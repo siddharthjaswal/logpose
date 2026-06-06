@@ -47,6 +47,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 }
 
+// Version comes from -Pversion (JitPack passes the git tag via $VERSION), defaulting
+// to a dev version for local publishToMavenLocal.
+version = (findProperty("version") as String?)?.takeIf { it != "unspecified" } ?: "0.1.0"
+
 afterEvaluate {
     publishing {
         publications {
@@ -54,7 +58,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "io.github.siddharthjaswal"
                 artifactId = "logpose-android"
-                version = "0.1.0"
+                version = project.version.toString()
             }
         }
     }

@@ -1,0 +1,12 @@
+# JitPack builds only the `logpose-android` interceptor library — the IDE plugin at the
+# repo root is an application, not a consumable library.
+#
+# After you push a tag (e.g. v1.0.0), JitPack builds this and shows the exact dependency
+# coordinate at: https://jitpack.io/#siddharthjaswal/logpose
+# It will look like:
+#   repositories { maven("https://jitpack.io") }
+#   dependencies { debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:<tag>") }
+jdk:
+  - openjdk17
+install:
+  - cd logpose-android && ./gradlew clean publishToMavenLocal -Pversion=$VERSION --no-daemon

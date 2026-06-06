@@ -11,16 +11,28 @@
             bodies, no manual JSON pretty-printing.
         </p>
         <ul>
-            <li>Expand/collapse and select individual requests</li>
-            <li>Filter by URL, status class (<code>status:5xx</code>), method, or exclusion (<code>-heartbeat</code>)</li>
-            <li>Pretty-printed request &amp; response bodies on demand</li>
+            <li>Master/detail view with collapsible JSON trees and a real JSON editor (folding) in Raw mode</li>
+            <li>One-click filter bar: URL search, Method &amp; Status toggles, and a Hide-noise switch</li>
+            <li>Copy as cURL, copy section/transaction JSON, find within a body</li>
             <li>First-class multipart upload (S3 / GCS) metadata instead of raw bytes</li>
+            <li>Adapts to your IDE theme (light &amp; dark)</li>
         </ul>
         <p>
-            Pair it with the LogPose OkHttp interceptor on the device, which emits one
-            structured line per transaction. Works in IntelliJ IDEA and Android Studio.
+            Requires a one-line OkHttp interceptor (<code>logpose-android</code>) in your app's
+            debug/staging build, which emits one structured line per transaction. Works in
+            IntelliJ IDEA and Android Studio.
         </p>
     ]]></description>
+
+    <change-notes><![CDATA[
+        <ul>
+            <li>Light-theme support (adapts to the IDE theme)</li>
+            <li>Raw JSON mode is now a real editor with code folding</li>
+            <li>One-click filter bar (method/status toggles, Hide-noise switch)</li>
+            <li>Find in request/response, server trace-id in the overview</li>
+            <li>Compass icon, helpful empty state</li>
+        </ul>
+    ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.json</depends>

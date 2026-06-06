@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.siddharthjaswal"
-version = "0.9.4"
+version = "0.9.5"
 
 repositories {
     mavenCentral()
@@ -49,6 +49,13 @@ intellijPlatform {
     }
     publishing {
         token = providers.environmentVariable("PUBLISH_TOKEN")
+    }
+
+    // `verifyPlugin` runs the JetBrains Plugin Verifier against compatible IDEs.
+    pluginVerification {
+        ides {
+            recommended()
+        }
     }
 }
 
