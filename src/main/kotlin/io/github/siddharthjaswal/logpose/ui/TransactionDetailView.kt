@@ -1,6 +1,9 @@
 package io.github.siddharthjaswal.logpose.ui
 
+import com.intellij.openapi.ide.CopyPasteManager
+import com.intellij.ui.JBColor
 import com.intellij.ui.OnePixelSplitter
+import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.model.Body
 import io.github.siddharthjaswal.logpose.model.Transaction
 import kotlinx.serialization.json.Json
@@ -11,64 +14,74 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.awt.BorderLayout
+import java.awt.Component
+import java.awt.datatransfer.StringSelection
+import javax.swing.JComponent
 import javax.swing.JPanel
 
 /**
- * Detail pane laid out as three JSON-tree sections:
- *
- *   ┌──────────────── Overview ────────────────┐
- *   ├──────────────────┬───────────────────────┤
- *   │     Request      │       Response        │
- *   └──────────────────┴───────────────────────┘
- *
- * Each section renders its own JSON (request/response are real objects, with the
- * body parsed back into nested JSON) and offers Copy-as-JSON.
+ * Detail pane: a hero Overview card on top, with Request and Response cards
+ * side-by-side below. Each request/response card renders real JSON (body parsed
+ * back into nested JSON) as a tree or raw, with Copy.
  */
 class TransactionDetailView : JPanel(BorderLayout()) {
 
-    private val overview = JsonTreePanel("Overview")
-    private val request = JsonTreePanel("Request")
+    private val overview = OverviewPanel()
+    private val request = JsonTreePanel("Request") { Theme.methodColor(currentMethod) }
     private val response = JsonTreePanel("Response")
 
     private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val pretty = Json { prettyPrint = true; encodeDefaults = true }
+    private var current: Transaction? = null
+    private var currentMethod: String = "GET"
 
     init {
+        background = JBColor.PanelBackground
+        border = JBUI.Borders.empty(6)
+
+        overview.onCopyCurl = { current?.let { copy(CurlBuilder.build(it)) } }
+        overview.onCopyJson = { current?.let { copy(pretty.encodeToString(Transaction.serializer(), it)) } }
+
         val bottom = OnePixelSplitter(false, 0.5f).apply {
-            firstComponent = request
-            secondComponent = response
+            firstComponent = pad(request)
+            secondComponent = pad(response)
         }
-        val outer = OnePixelSplitter(true, 0.22f).apply {
-            firstComponent = overview
+        val outer = OnePixelSplitter(true, 0.30f).apply {
+            firstComponent = pad(overview)
             secondComponent = bottom
         }
         add(outer, BorderLayout.CENTER)
     }
 
     fun show(tx: Transaction?) {
+        current = tx
+        currentMethod = tx?.request?.method ?: "GET"
+        overview.show(tx)
         if (tx == null) {
-            overview.setElement(null); request.setElement(null); response.setElement(null)
+            request.setElement(null); request.setStatus(null)
+            response.setElement(null); response.setStatus(null)
             return
         }
-        overview.setElement(overviewJson(tx))
+        request.setStatus(tx.request.method)
         request.setElement(requestJson(tx))
+        response.setStatus(tx.response?.let { "${it.code} ${it.message}".trim() } ?: "—")
         response.setElement(responseJson(tx))
     }
 
     fun showError(message: String) {
-        overview.showMessage(message)
-        request.setElement(null)
-        response.setElement(null)
+        current = null
+        overview.show(null)
+        request.showMessage(message); request.setStatus(null)
+        response.setElement(null); response.setStatus(null)
     }
 
-    private fun overviewJson(tx: Transaction): JsonElement = buildJsonObject {
-        put("id", tx.id)
-        put("method", tx.request.method)
-        tx.response?.let { put("status", it.code) }
-        tx.durationMillis?.let { put("durationMs", it) }
-        if (tx.startedAtMillis > 0) put("startedAtMillis", tx.startedAtMillis)
-        put("url", tx.request.url)
-        tx.error?.let { put("error", it) }
+    private fun pad(c: Component): JComponent = JPanel(BorderLayout()).apply {
+        isOpaque = false
+        border = JBUI.Borders.empty(4)
+        add(c, BorderLayout.CENTER)
     }
+
+    private fun copy(text: String) = CopyPasteManager.getInstance().setContents(StringSelection(text))
 
     private fun requestJson(tx: Transaction): JsonElement = buildJsonObject {
         put("method", tx.request.method)
@@ -89,7 +102,6 @@ class TransactionDetailView : JPanel(BorderLayout()) {
         }
     }
 
-    /** Body as JSON: parsed object if it's JSON, raw string if not, or a parts array. */
     private fun bodyElement(body: Body?): JsonElement? {
         if (body == null) return null
         body.parts?.let { parts ->

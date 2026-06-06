@@ -6,22 +6,25 @@ import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.JBColor
 import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.tree.TreeUtil
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.Json
 import java.awt.BorderLayout
+import java.awt.CardLayout
 import java.awt.Font
 import java.awt.datatransfer.StringSelection
 import javax.swing.JComponent
@@ -32,35 +35,75 @@ import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreeSelectionModel
 
 /**
- * A titled section that renders a [JsonElement] as a collapsible, syntax-colored
- * tree, with a toolbar for Expand-All / Collapse-All / Copy-as-JSON.
- *
- * Reused for the Overview, Request and Response panes — each just gets a different
- * element. Copy yields the pretty-printed JSON of whatever this section holds.
+ * A titled card section that shows a [JsonElement] either as a collapsible,
+ * syntax-colored tree (default) or as raw pretty-printed JSON, with Copy-as-JSON.
  */
-class JsonTreePanel(title: String) : JPanel(BorderLayout()) {
+class JsonTreePanel(private val title: String, private val titleColor: () -> JBColor? = { null }) :
+    CardPanel(BorderLayout()) {
 
     private val tree = Tree(DefaultTreeModel(DefaultMutableTreeNode()))
+    private val raw = JBTextArea().apply {
+        isEditable = false; lineWrap = false
+        font = JBUI.Fonts.create("Monospaced", 12)
+        background = Theme.cardBg
+        border = JBUI.Borders.empty(4, 8)
+    }
+    private val titleLabel = JBLabel(title)
+    private val statusLabel = JBLabel()
     private val pretty = Json { prettyPrint = true }
     private var element: JsonElement? = null
+    private var rawMode = false
+
+    private val cards = CardLayout()
+    private val content = JPanel(cards)
 
     init {
+        arc = 12
+        border = JBUI.Borders.empty()
+
         tree.isRootVisible = false
         tree.showsRootHandles = true
+        tree.background = Theme.cardBg
         tree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         tree.cellRenderer = NodeRenderer()
         tree.emptyText.text = "—"
 
-        add(header(title), BorderLayout.NORTH)
-        add(JBScrollPane(tree), BorderLayout.CENTER)
+        content.isOpaque = false
+        content.add(scroll(tree), "tree")
+        content.add(scroll(raw), "raw")
+
+        add(header(), BorderLayout.NORTH)
+        add(content, BorderLayout.CENTER)
     }
 
-    private fun header(title: String): JComponent {
-        val label = JBLabel(title).apply {
-            font = font.deriveFont(Font.BOLD)
-            border = JBUI.Borders.empty(3, 8)
+    private fun scroll(c: JComponent) = JBScrollPane(c).apply {
+        border = JBUI.Borders.empty(0, 2, 4, 2)
+        viewport.isOpaque = false
+        isOpaque = false
+    }
+
+    private fun header(): JComponent {
+        titleLabel.font = titleLabel.font.deriveFont(Font.BOLD)
+        titleLabel.foreground = Theme.text
+        statusLabel.foreground = Theme.textDim
+        statusLabel.border = JBUI.Borders.emptyLeft(8)
+
+        val titleBox = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(4, 10)
+            add(titleLabel, BorderLayout.WEST)
+            add(statusLabel, BorderLayout.CENTER)
         }
+
         val actions = DefaultActionGroup().apply {
+            add(object : ToggleAction("Raw") {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = rawMode
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    rawMode = state
+                    cards.show(content, if (state) "raw" else "tree")
+                }
+            })
             add(simpleAction("Expand All", AllIcons.Actions.Expandall) { TreeUtil.expandAll(tree) })
             add(simpleAction("Collapse All", AllIcons.Actions.Collapseall) { TreeUtil.collapseAll(tree, 0) })
             add(simpleAction("Copy as JSON", AllIcons.Actions.Copy) { copyJson() })
@@ -69,10 +112,17 @@ class JsonTreePanel(title: String) : JPanel(BorderLayout()) {
         tb.targetComponent = this
 
         return JPanel(BorderLayout()).apply {
-            add(label, BorderLayout.WEST)
+            isOpaque = false
+            border = JBUI.Borders.customLine(Theme.cardBorder, 0, 0, 1, 0)
+            add(titleBox, BorderLayout.WEST)
             add(tb.component, BorderLayout.EAST)
-            border = JBUI.Borders.customLine(JBColor.border(), 0, 0, 1, 0)
         }
+    }
+
+    /** Optional small status text next to the title (e.g. method or "200 OK"). */
+    fun setStatus(text: String?) {
+        statusLabel.text = text ?: ""
+        titleColor()?.let { titleLabel.foreground = it }
     }
 
     fun setElement(el: JsonElement?) {
@@ -82,12 +132,15 @@ class JsonTreePanel(title: String) : JPanel(BorderLayout()) {
         if (el != null) addElement(root, null, el)
         tree.model = DefaultTreeModel(root)
         expandToDepth(root, maxDepth = 3)
+        raw.text = el?.let { pretty.encodeToString(JsonElement.serializer(), it) } ?: ""
+        raw.caretPosition = 0
     }
 
     fun showMessage(message: String) {
         element = null
         tree.model = DefaultTreeModel(DefaultMutableTreeNode())
         tree.emptyText.text = message
+        raw.text = ""
     }
 
     fun copyJson() {
@@ -140,6 +193,7 @@ class JsonTreePanel(title: String) : JPanel(BorderLayout()) {
     private data class LpNode(val key: String?, val value: String?, val kind: Kind? = null, val suffix: String? = null)
 
     private class NodeRenderer : ColoredTreeCellRenderer() {
+        init { isOpaque = false }
         override fun customizeCellRenderer(
             tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
             leaf: Boolean, row: Int, hasFocus: Boolean,
@@ -162,10 +216,10 @@ class JsonTreePanel(title: String) : JPanel(BorderLayout()) {
         }
 
         companion object {
-            private val KEY_COLOR = JBColor(0x871094, 0xCB7AD9)
-            private val STRING_COLOR = JBColor(0x067D17, 0x6A8759)
-            private val NUMBER_COLOR = JBColor(0x1750EB, 0x6897BB)
-            private val KEYWORD_COLOR = JBColor(0x0033B3, 0xCC7832)
+            private val KEY_COLOR = JBColor(0x871094, 0xC77DBB)
+            private val STRING_COLOR = JBColor(0x067D17, 0x7FB069)
+            private val NUMBER_COLOR = JBColor(0x1750EB, 0x5AA9D6)
+            private val KEYWORD_COLOR = JBColor(0x0033B3, 0xCC8A52)
         }
     }
 }

@@ -12,6 +12,7 @@ import com.intellij.openapi.actionSystem.Toggleable
 import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.JBColor
 import com.intellij.ui.OnePixelSplitter
+import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
@@ -49,6 +50,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     private val list = JBList(DefaultListModel<Transaction>())
     private val detail = TransactionDetailView()
     private val filterField = JBTextField()
+    private val countLabel = JBLabel()
 
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
     private val refreshScheduled = AtomicBoolean(false)
@@ -58,7 +60,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         border = JBUI.Borders.empty()
 
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        list.cellRenderer = TransactionCellRenderer()
+        list.cellRenderer = TransactionListRenderer()
         list.addListSelectionListener {
             if (!suppressSelectionEvents && !it.valueIsAdjusting) detail.show(list.selectedValue)
         }
@@ -89,9 +91,13 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
             ActionManager.getInstance().createActionToolbar("LogPose", group, true)
         toolbar.targetComponent = this
 
+        countLabel.foreground = JBColor.GRAY
+        countLabel.border = JBUI.Borders.empty(0, 10)
+
         val north = JPanel(BorderLayout())
         north.add(toolbar.component, BorderLayout.WEST)
         north.add(filterField, BorderLayout.CENTER)
+        north.add(countLabel, BorderLayout.EAST)
         north.border = BorderFactory.createMatteBorder(0, 0, 1, 0, JBColor.border())
         return north
     }
@@ -119,7 +125,9 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
 
     private fun refreshList() {
         val selectedId = list.selectedValue?.id
-        val filtered = TransactionStore.filter(store.snapshot(), filterField.text)
+        val all = store.snapshot()
+        val filtered = TransactionStore.filter(all, filterField.text)
+        countLabel.text = "${filtered.size}/${all.size}"
 
         val model = DefaultListModel<Transaction>()
         filtered.forEach { model.addElement(it) }
