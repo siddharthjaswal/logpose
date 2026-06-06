@@ -10,10 +10,11 @@ import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Component
 import java.awt.Dimension
-import java.awt.FlowLayout
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
+import javax.swing.Box
+import javax.swing.BoxLayout
 import javax.swing.JLabel
 import javax.swing.JList
 import javax.swing.JPanel
@@ -21,32 +22,51 @@ import javax.swing.ListCellRenderer
 import javax.swing.SwingConstants
 
 /**
- * Studio list row: `[METHOD] [status]  path …  size  duration`, pill badges,
- * accent-bar selection, faded 26px muted rows, and a hover-revealed cURL hint.
+ * Studio list row, laid out in FIXED columns so method / status / path align across
+ * every row regardless of method length or muted state:
+ *
+ *   `METHOD   [status]   path … …                 size   duration`
+ *
+ * Per spec §4, METHOD is plain colored bold text in a fixed column; only the status
+ * is a pill. Muted rows are shorter (26px) and faded (~0.34, 0.7 on hover); hover
+ * reveals a cURL affordance in place of the size.
  */
 class TransactionListRenderer : ListCellRenderer<Transaction> {
 
-    /** Index currently hovered (set by the list's mouse-motion handler). */
     var hoveredIndex: Int = -1
 
-    private val methodTag = TagLabel().apply { preferredSize = Dimension(JBUI.scale(46), JBUI.scale(18)) }
-    private val statusTag = TagLabel().apply { preferredSize = Dimension(JBUI.scale(44), JBUI.scale(18)) }
+    private val methodLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
+    private val statusTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
     private val path = JLabel()
     private val sizeLabel = JLabel("", SwingConstants.RIGHT)
     private val duration = JLabel("", SwingConstants.RIGHT)
 
     private val row = RowPanel().apply {
-        border = JBUI.Borders.empty(0, 12)
-        val badges = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), 0)).apply {
-            isOpaque = false; add(methodTag); add(statusTag)
+        border = JBUI.Borders.empty(0, 14)
+
+        methodLabel.font = JBUI.Fonts.label(11f).asBold()
+        statusTag.font = JBUI.Fonts.label(11f).asBold()
+
+        val badges = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(methodLabel)
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
+            add(statusTag)
         }
-        val meta = JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(12), 0)).apply {
-            isOpaque = false; add(sizeLabel); add(duration)
-        }
-        path.border = JBUI.Borders.emptyLeft(8)
+        path.border = JBUI.Borders.emptyLeft(12)
         path.font = JBUI.Fonts.label(12.5f)
         sizeLabel.font = JBUI.Fonts.create("JetBrains Mono", 11)
         duration.font = JBUI.Fonts.create("JetBrains Mono", 11)
+
+        val meta = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(sizeLabel.fixed(JBUI.scale(64), JBUI.scale(20)))
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
+            add(duration.fixed(JBUI.scale(56), JBUI.scale(20)))
+        }
+
         add(badges, BorderLayout.WEST)
         add(path, BorderLayout.CENTER)
         add(meta, BorderLayout.EAST)
@@ -65,23 +85,20 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         row.hovered = hovered && !isSelected
         row.rowHeight = if (muted) 26 else 34
 
-        // opacity: full for normal rows; 0.34 muted, 0.7 muted+hover
         fun shade(c: Color): Color = if (!muted) c else Theme.fade(c, if (hovered) 0.7f else 0.34f)
 
-        val method = value.request.method
-        val mColor = Theme.methodColor(method)
-        methodTag.font = JBUI.Fonts.label(11f).asBold()
-        methodTag.set(method, shade(mColor), if (muted) null else Theme.tint(mColor, 30))
+        val mColor = Theme.methodColor(value.request.method)
+        methodLabel.text = value.request.method
+        methodLabel.foreground = shade(mColor)
 
         val code = value.response?.code
         val sColor = Theme.statusColor(code, value.error)
-        statusTag.font = JBUI.Fonts.label(11f).asBold()
-        statusTag.set(value.statusText(), shade(sColor), if (muted) null else Theme.statusTint(code, value.error))
+        val sBg = if (muted) Theme.tint(sColor, 14) else Theme.statusTint(code, value.error)
+        statusTag.set(value.statusText(), shade(sColor), sBg)
 
         path.text = value.request.path.ifBlank { value.request.url }
         path.foreground = shade(Theme.text)
 
-        // Hover (non-muted) reveals a cURL affordance in place of the size.
         if (hovered && !muted) {
             sizeLabel.text = "⧉ cURL"
             sizeLabel.foreground = Theme.accent
@@ -95,8 +112,11 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         return row
     }
 
-    /** True if [point]'s x falls in the right-hand cURL hit zone of a row. */
-    fun isInCurlZone(rowWidth: Int, x: Int): Boolean = x >= rowWidth - JBUI.scale(72)
+    fun isInCurlZone(rowWidth: Int, x: Int): Boolean = x >= rowWidth - JBUI.scale(150)
+
+    private fun <T : JLabel> T.fixed(w: Int, h: Int): T = apply {
+        val d = Dimension(w, h); preferredSize = d; minimumSize = d; maximumSize = d
+    }
 
     private class RowPanel : JPanel(BorderLayout()) {
         var selected = false
@@ -122,7 +142,7 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
                     g2.color = Theme.accentTint
                     g2.fillRoundRect(m, y, w, h, 8, 8)
                     g2.color = Theme.accent
-                    g2.fillRoundRect(m, y, JBUI.scale(2), h, 2, 2) // 2px accent bar inset-left
+                    g2.fillRoundRect(m, y, JBUI.scale(2), h, 2, 2)
                 }
                 hovered -> {
                     g2.color = Theme.rowHover
