@@ -12,6 +12,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * We run `adb logcat -v raw -s <TAG>:V`:
  *  - `-s <TAG>:V` silences everything except our tag — no app-log noise.
  *  - `-v raw` strips the timestamp/pid/level prefix, so each line IS the payload.
+ *
+ * Crucially, we **clear the log buffer before streaming**. By default `adb logcat`
+ * dumps the entire existing buffer first and only then tails new entries — which is
+ * why a Stop→Start would otherwise replay every old transaction. Clearing first means
+ * Start shows only traffic produced from that moment on.
  */
 class LogcatReader(
     private val tag: String = DEFAULT_TAG,
@@ -31,6 +36,9 @@ class LogcatReader(
             return
         }
 
+        // Drop the backlog so we only stream new logs (no replay of old transactions).
+        clearBuffer(adb)
+
         thread = Thread({ pump(adb, onLine, onError) }, "logpose-logcat").apply {
             isDaemon = true
             start()
@@ -39,13 +47,7 @@ class LogcatReader(
 
     private fun pump(adb: String, onLine: (String) -> Unit, onError: (String) -> Unit) {
         try {
-            val cmd = buildList {
-                add(adb)
-                if (!deviceSerial.isNullOrBlank()) {
-                    add("-s"); add(deviceSerial)
-                }
-                add("logcat"); add("-v"); add("raw"); add("-s"); add("$tag:V")
-            }
+            val cmd = baseCmd(adb) + listOf("logcat", "-v", "raw", "-s", "$tag:V")
             val proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
             process = proc
             BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
@@ -61,6 +63,20 @@ class LogcatReader(
         }
     }
 
+    /** Empties the device log buffer. Safe to call whether or not capture is running. */
+    fun clearBuffer() {
+        resolveAdb()?.let { clearBuffer(it) }
+    }
+
+    private fun clearBuffer(adb: String) {
+        runCatching {
+            ProcessBuilder(baseCmd(adb) + listOf("logcat", "-c"))
+                .redirectErrorStream(true)
+                .start()
+                .waitFor()
+        }
+    }
+
     fun stop() {
         running.set(false)
         process?.destroy()
@@ -69,6 +85,13 @@ class LogcatReader(
     }
 
     fun isRunning(): Boolean = running.get()
+
+    private fun baseCmd(adb: String): List<String> = buildList {
+        add(adb)
+        if (!deviceSerial.isNullOrBlank()) {
+            add("-s"); add(deviceSerial)
+        }
+    }
 
     private fun resolveAdb(): String? {
         val candidates = buildList {

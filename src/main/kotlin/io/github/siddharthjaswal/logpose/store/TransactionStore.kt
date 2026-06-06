@@ -10,20 +10,18 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 class TransactionStore(private val capacity: Int = 2_000) {
 
-    private val all = ArrayDeque<Transaction>()
+    // Insertion-ordered, keyed by transaction id: O(1) add + dedup. Re-putting an
+    // existing id (e.g. a response arriving after its request) updates in place and
+    // keeps its original position. Oldest entries evict once over capacity.
+    private val all = object : LinkedHashMap<String, Transaction>(256, 0.75f) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Transaction>): Boolean =
+            size > capacity
+    }
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
 
     @Synchronized
     fun add(tx: Transaction) {
-        // Coalesce: a later emission for the same id (e.g. response after request)
-        // replaces the earlier partial entry.
-        val existing = all.indexOfFirst { it.id == tx.id }
-        if (existing >= 0) {
-            all[existing] = tx
-        } else {
-            all.addLast(tx)
-            while (all.size > capacity) all.removeFirst()
-        }
+        all[tx.id] = tx
         listeners.forEach { it() }
     }
 
@@ -34,7 +32,7 @@ class TransactionStore(private val capacity: Int = 2_000) {
     }
 
     @Synchronized
-    fun snapshot(): List<Transaction> = all.toList()
+    fun snapshot(): List<Transaction> = all.values.toList()
 
     fun addListener(l: () -> Unit) { listeners.add(l) }
 
