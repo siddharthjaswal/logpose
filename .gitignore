@@ -3,6 +3,9 @@
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
+# IntelliJ Platform Gradle Plugin
+.intellijPlatform/
+
 # IntelliJ / Android Studio
 .idea/
 *.iml

@@ -127,11 +127,23 @@ To build a distributable zip:
 ./gradlew buildPlugin   # output in build/distributions/
 ```
 
+## Repository layout
+
+```
+logpose/
+├── src/…                 # the IntelliJ / Android Studio plugin (this build)
+└── logpose-android/      # the drop-in OkHttp interceptor (separate Gradle build)
+```
+
+The two halves talk over the [wire format](#the-wire-format) above — the interceptor
+emits it, the plugin reads it. See [`logpose-android/README.md`](logpose-android/README.md)
+for the device-side setup.
+
 ## Roadmap
 
 - [x] Plugin: tool window, logcat capture, master/detail, filtering, chunk reassembly
-- [ ] **`logpose-android`**: drop-in OkHttp interceptor (atomic transaction, multipart
-      metadata, chunking) — the device side of the contract
+- [x] **`logpose-android`**: drop-in OkHttp interceptor (atomic transaction, multipart
+      metadata, gzip, chunking) — the device side of the contract
 - [ ] JSON **tree** viewer (collapsible) instead of flat pretty-print
 - [ ] Copy as cURL
 - [ ] Per-device picker when multiple devices are attached
