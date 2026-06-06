@@ -2,6 +2,10 @@
 
 > A lightweight Android Studio / IntelliJ plugin for reading your app's network traffic — without the logcat pain.
 
+[![CI](https://github.com/siddharthjaswal/logpose/actions/workflows/ci.yml/badge.svg)](https://github.com/siddharthjaswal/logpose/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/siddharthjaswal/logpose?include_prereleases&sort=semver)](https://github.com/siddharthjaswal/logpose/releases)
+[![License](https://img.shields.io/github/license/siddharthjaswal/logpose)](LICENSE)
+
 LogPose is named after the navigational device from *One Piece* that reads an island's
 "log" to point you the right way. This one reads your **logcat** and points you straight
 at the HTTP request you care about.
