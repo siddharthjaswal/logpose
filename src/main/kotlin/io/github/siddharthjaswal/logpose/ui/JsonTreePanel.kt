@@ -78,6 +78,10 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
     private val allPainter = javax.swing.text.DefaultHighlighter.DefaultHighlightPainter(Theme.findAll)
     private val findBar = buildFindBar()
 
+    private var rawDirty = true
+    private var rawVisible = false
+    private lateinit var toggle: Segmented
+
     init {
         isOpaque = false
         border = JBUI.Borders.empty()
@@ -155,7 +159,7 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
     }
 
     private fun showFind() {
-        cards.show(content, "raw")
+        toggle.choose(1) // switch the segmented control to Raw (renders raw if needed)
         findBar.isVisible = true
         revalidate()
         findField.requestFocusInWindow()
@@ -242,7 +246,7 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
             add(statusLabel, BorderLayout.CENTER)
         }
 
-        val toggle = Segmented(listOf("Tree", "Raw")) { i -> cards.show(content, if (i == 1) "raw" else "tree") }
+        toggle = Segmented(listOf("Tree", "Raw")) { i -> showMode(raw = i == 1) }
         val actions = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
@@ -283,14 +287,29 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
         if (el != null) addElement(root, null, el)
         tree.model = DefaultTreeModel(root)
         expandToDepth(root, maxDepth = 3)
-        renderRaw(el)
+        // Raw is rendered lazily — only build it when actually shown (cheap selections).
+        rawDirty = true
+        if (rawVisible) {
+            ensureRaw()
+            if (findBar.isVisible) runFind(findField.text)
+        }
     }
 
     fun showMessage(message: String) {
         element = null
         tree.model = DefaultTreeModel(DefaultMutableTreeNode())
         tree.emptyText.text = message
-        renderRaw(null)
+        renderRaw(null); rawDirty = false
+    }
+
+    private fun showMode(raw: Boolean) {
+        rawVisible = raw
+        cards.show(content, if (raw) "raw" else "tree")
+        if (raw) ensureRaw()
+    }
+
+    private fun ensureRaw() {
+        if (rawDirty) { renderRaw(element); rawDirty = false }
     }
 
     fun copyJson() {
@@ -411,6 +430,8 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
             labels.forEach { add(it) }
             update()
         }
+
+        fun choose(i: Int) = select(i)
 
         private fun select(i: Int) {
             if (sel == i) return

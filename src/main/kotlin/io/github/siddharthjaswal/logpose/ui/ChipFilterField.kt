@@ -57,6 +57,11 @@ class ChipFilterField : JPanel(BorderLayout()) {
         add(chipsRow, BorderLayout.WEST)
         add(input, BorderLayout.CENTER)
         rebuild()
+
+        // Click anywhere in the field to start typing.
+        addMouseListener(object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) = input.requestFocusInWindow().let {}
+        })
     }
 
     override fun paintComponent(g: Graphics) {

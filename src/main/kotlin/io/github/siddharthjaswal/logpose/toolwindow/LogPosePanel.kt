@@ -67,6 +67,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
 
         list.isOpaque = true
         list.background = Theme.bg0
+        list.emptyText.text = "No requests yet — press ▶ to capture, then use your app"
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
         list.cellRenderer = renderer
         list.addListSelectionListener {
