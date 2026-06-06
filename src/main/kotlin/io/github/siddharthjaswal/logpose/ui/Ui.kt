@@ -194,12 +194,13 @@ open class CardPanel(layout: java.awt.LayoutManager? = java.awt.BorderLayout()) 
 }
 
 /** A small key/value "stat" card used in the overview hero. */
-class StatChip(caption: String, value: String) : CardPanel(java.awt.GridLayout(2, 1, 0, 1)) {
+class StatChip(caption: String, value: String, tip: String? = null) : CardPanel(java.awt.GridLayout(2, 1, 0, 1)) {
     init {
         arc = 8
         fill = Theme.bg2
         stroke = Theme.borderStrong
         border = JBUI.Borders.empty(6, 10)
+        tip?.let { toolTipText = it }
         add(JLabel(caption.uppercase()).apply { foreground = Theme.textMuted; font = JBUI.Fonts.label(9.5f) })
         add(JLabel(value).apply {
             foreground = Theme.text

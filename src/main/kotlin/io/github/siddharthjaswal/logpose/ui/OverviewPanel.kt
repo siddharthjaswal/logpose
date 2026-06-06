@@ -157,7 +157,11 @@ class OverviewPanel : CardPanel(null) {
             tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { add(StatChip("size", Theme.humanSize(it))) }
             if (tx.startedAtMillis > 0) add(StatChip("started", timeFmt.format(Date(tx.startedAtMillis))))
             if (tx.request.host.isNotBlank()) add(StatChip("host", tx.request.host.substringBefore('.')))
-            add(StatChip("id", tx.id))
+            // Prefer a server trace/request id (useful for backend log lookup) over the
+            // internal LogPose correlation id.
+            val trace = traceId(tx)
+            if (trace != null) add(StatChip(trace.first, ellipsize(trace.second), tip = trace.second))
+            else add(StatChip("id", tx.id, tip = "Internal LogPose correlation id"))
         }
         items.forEachIndexed { i, c ->
             if (i > 0) chips.add(Box.createHorizontalStrut(JBUI.scale(8)))
@@ -165,6 +169,28 @@ class OverviewPanel : CardPanel(null) {
         }
         chips.revalidate(); chips.repaint()
     }
+
+    /** Finds a server-side trace/request id in response (then request) headers. */
+    private fun traceId(tx: io.github.siddharthjaswal.logpose.model.Transaction): Pair<String, String>? {
+        val candidates = listOf(
+            "x-request-id", "x-correlation-id", "x-amzn-requestid", "x-amzn-trace-id",
+            "x-trace-id", "x-span-id", "request-id", "traceparent", "x-b3-traceid",
+        )
+        fun find(headers: Map<String, String>): Pair<String, String>? {
+            for (key in candidates) {
+                val match = headers.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }
+                if (match != null && match.value.isNotBlank()) {
+                    val label = if (key == "traceparent" || key.contains("trace")) "trace id" else "req id"
+                    return label to match.value
+                }
+            }
+            return null
+        }
+        return tx.response?.let { find(it.headers) } ?: find(tx.request.headers)
+    }
+
+    private fun ellipsize(s: String, max: Int = 14): String =
+        if (s.length <= max) s else s.take(max - 1) + "…"
 
     private fun reason(code: Int): String = when (code) {
         200 -> "OK"; 201 -> "Created"; 202 -> "Accepted"; 204 -> "No Content"
