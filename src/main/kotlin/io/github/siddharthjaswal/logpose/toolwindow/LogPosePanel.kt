@@ -96,23 +96,23 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     }
 
     private fun buildHeader(): Component {
-        val titleLeft = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(8))).apply {
-            isOpaque = false
-            add(statusDot)
-            add(JBLabel("LogPose").apply { foreground = Theme.text; font = JBUI.Fonts.label(13f).asBold() })
-        }
-
         val group = DefaultActionGroup().apply {
             add(CaptureToggleAction()); add(ClearAction())
         }
         val toolbar: ActionToolbar = ActionManager.getInstance().createActionToolbar("LogPose", group, true)
         toolbar.targetComponent = this
 
-        val titleBar = JPanel(BorderLayout()).apply {
+        // Capture / Clear on the left, with the pulsing status dot. No "LogPose" label —
+        // the IDE already titles the tool window.
+        val actionsLeft = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(6), JBUI.scale(4))).apply {
+            isOpaque = false
+            add(statusDot)
+            add(toolbar.component)
+        }
+        val toolbarRow = JPanel(BorderLayout()).apply {
             isOpaque = true; background = Theme.bg0
-            border = JBUI.Borders.empty(0, 8)
-            add(titleLeft, BorderLayout.WEST)
-            add(toolbar.component, BorderLayout.EAST)
+            border = JBUI.Borders.empty(0, 6)
+            add(actionsLeft, BorderLayout.WEST)
         }
 
         val filterWrap = JPanel(BorderLayout()).apply {
@@ -123,7 +123,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
 
         return JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(titleBar, BorderLayout.NORTH)
+            add(toolbarRow, BorderLayout.NORTH)
             add(filterWrap, BorderLayout.CENTER)
         }
     }
