@@ -67,19 +67,19 @@ class FilterBar : JPanel() {
 
     init {
         isOpaque = false
-        layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        border = JBUI.Borders.empty(8, 10)
+        layout = java.awt.BorderLayout()
+        border = JBUI.Borders.empty(6, 10)
 
-        search.textEditor.emptyText.text = "Filter by URL or path…"
+        search.textEditor.emptyText.text = "URL or path…"
+        val sd = Dimension(JBUI.scale(168), search.preferredSize.height)
+        search.preferredSize = sd; search.maximumSize = sd; search.minimumSize = sd
         search.addDocumentListener(object : DocumentAdapter() {
             override fun textChanged(e: DocumentEvent) = onChange()
         })
+        count.border = JBUI.Borders.empty(0, 10)
 
-        add(capped(search))
-        add(vGap(8))
-        add(capped(controlsRow()))
-        add(vGap(8))
-        add(capped(noiseRow()))
+        add(controlsRow(), java.awt.BorderLayout.WEST)
+        add(count, java.awt.BorderLayout.EAST)
     }
 
     fun state() = FilterState(
@@ -109,23 +109,15 @@ class FilterBar : JPanel() {
         }
 
         return hbox(
-            label("METHOD"), strut(8), methodGroup,
-            strut(14), divider(), strut(14),
-            label("STATUS"), strut(8),
+            search, strut(12),
+            label("METHOD"), strut(6), methodGroup,
+            strut(12), divider(), strut(12),
+            label("STATUS"), strut(6),
             statusChips[2]!!, strut(6), statusChips[3]!!, strut(6), statusChips[4]!!, strut(6), statusChips[5]!!,
-        )
-    }
-
-    private fun noiseRow(): JComponent {
-        val left = hbox(
-            hideNoise, strut(8),
+            strut(12), divider(), strut(12),
+            hideNoise, strut(6),
             JBLabel("Hide noise").apply { foreground = Theme.text; font = JBUI.Fonts.label(12f).asBold() },
         )
-        return JPanel(java.awt.BorderLayout()).apply {
-            isOpaque = false
-            add(left, java.awt.BorderLayout.WEST)
-            add(count, java.awt.BorderLayout.EAST)
-        }
     }
 
     private fun chip(text: String, color: Color, flat: Boolean) = ToggleChip(text, color, flat) { onChange() }
@@ -150,16 +142,7 @@ class FilterBar : JPanel() {
         comps.forEach { add(it) }
     }
 
-    private fun capped(c: Component): JPanel = object : JPanel(java.awt.BorderLayout()) {
-        override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
-    }.apply {
-        isOpaque = false
-        alignmentX = LEFT_ALIGNMENT
-        add(c, java.awt.BorderLayout.CENTER)
-    }
-
     private fun strut(px: Int) = Box.createHorizontalStrut(JBUI.scale(px))
-    private fun vGap(px: Int) = Box.createVerticalStrut(JBUI.scale(px))
 }
 
 /** A toggle pill. `flat` = no own border (for use inside a segmented group). */
