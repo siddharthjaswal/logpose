@@ -20,8 +20,8 @@ import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.TransactionStore
-import io.github.siddharthjaswal.logpose.ui.ChipFilterField
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
+import io.github.siddharthjaswal.logpose.ui.FilterBar
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.StatusDot
 import io.github.siddharthjaswal.logpose.ui.Theme
@@ -52,8 +52,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     private val renderer = TransactionListRenderer()
     private val list = JBList(javax.swing.DefaultListModel<Transaction>())
     private val detail = TransactionDetailView()
-    private val chipFilter = ChipFilterField()
-    private val countLabel = JBLabel()
+    private val filterBar = FilterBar()
     private val statusDot = StatusDot()
 
     private val prettyJson = Json { prettyPrint = true; encodeDefaults = true }
@@ -77,7 +76,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         list.addMouseListener(mouse)
         list.addMouseMotionListener(mouse)
 
-        chipFilter.onChange = { refreshList() }
+        filterBar.onChange = { refreshList() }
 
         val listScroll = JBScrollPane(list).apply {
             border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0
@@ -97,9 +96,8 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     }
 
     private fun buildHeader(): Component {
-        val titleBar = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(8))).apply {
-            isOpaque = true; background = Theme.bg0
-            border = JBUI.Borders.empty(0, 10)
+        val titleLeft = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(8))).apply {
+            isOpaque = false
             add(statusDot)
             add(JBLabel("LogPose").apply { foreground = Theme.text; font = JBUI.Fonts.label(13f).asBold() })
         }
@@ -110,26 +108,23 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         val toolbar: ActionToolbar = ActionManager.getInstance().createActionToolbar("LogPose", group, true)
         toolbar.targetComponent = this
 
-        val filterRow = JPanel(BorderLayout()).apply {
-            isOpaque = false
-            border = JBUI.Borders.empty(5, 6)
-            add(chipFilter, BorderLayout.CENTER)
-        }
-        countLabel.foreground = Theme.textMuted
-        countLabel.border = JBUI.Borders.empty(0, 12)
-
-        val toolbarRow = JPanel(BorderLayout()).apply {
+        val titleBar = JPanel(BorderLayout()).apply {
             isOpaque = true; background = Theme.bg0
-            border = JBUI.Borders.customLine(Theme.borderStrong, 0, 0, 1, 0)
-            add(toolbar.component, BorderLayout.WEST)
-            add(filterRow, BorderLayout.CENTER)
-            add(countLabel, BorderLayout.EAST)
+            border = JBUI.Borders.empty(0, 8)
+            add(titleLeft, BorderLayout.WEST)
+            add(toolbar.component, BorderLayout.EAST)
+        }
+
+        val filterWrap = JPanel(BorderLayout()).apply {
+            isOpaque = true; background = Theme.bg0
+            border = JBUI.Borders.customLine(Theme.borderStrong, 1, 0, 1, 0)
+            add(filterBar, BorderLayout.CENTER)
         }
 
         return JPanel(BorderLayout()).apply {
             isOpaque = false
             add(titleBar, BorderLayout.NORTH)
-            add(toolbarRow, BorderLayout.CENTER)
+            add(filterWrap, BorderLayout.CENTER)
         }
     }
 
@@ -157,8 +152,9 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     private fun refreshList() {
         val selectedId = list.selectedValue?.id
         val all = store.snapshot()
-        val filtered = TransactionStore.filter(all, chipFilter.queryString())
-        countLabel.text = "${filtered.size}/${all.size}"
+        val state = filterBar.state()
+        val filtered = all.filter { state.matches(it) }
+        filterBar.setCount(filtered.size, all.size)
 
         val model = javax.swing.DefaultListModel<Transaction>()
         filtered.forEach { model.addElement(it) }

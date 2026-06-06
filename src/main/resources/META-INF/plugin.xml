@@ -28,7 +28,7 @@
         <toolWindow
             id="LogPose"
             anchor="bottom"
-            icon="AllIcons.Toolwindows.WebToolWindow"
+            icon="/icons/logpose.svg"
             factoryClass="io.github.siddharthjaswal.logpose.toolwindow.LogPoseToolWindowFactory" />
     </extensions>
 </idea-plugin>
