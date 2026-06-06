@@ -18,3 +18,7 @@ out/
 
 # Local config
 local.properties
+
+# Plugin signing secrets — never commit these
+*.pem
+chain.crt

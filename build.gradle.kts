@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.siddharthjaswal"
-version = "0.9.2"
+version = "0.9.3"
 
 repositories {
     mavenCentral()
@@ -36,6 +36,19 @@ intellijPlatform {
             // newer IDEs like Android Studio 2026.1 (build 261).
             untilBuild = provider { null }
         }
+    }
+
+    // Plugin signing — required for JetBrains Marketplace. Secrets come from the
+    // environment (CI secrets / local env), never the repo. See RELEASING.md for how to
+    // generate the key/cert and run `./gradlew signPlugin`. Absent vars are fine for a
+    // normal build; only signPlugin/publishPlugin need them.
+    signing {
+        certificateChain = providers.environmentVariable("CERTIFICATE_CHAIN")
+        privateKey = providers.environmentVariable("PRIVATE_KEY")
+        password = providers.environmentVariable("PRIVATE_KEY_PASSWORD")
+    }
+    publishing {
+        token = providers.environmentVariable("PUBLISH_TOKEN")
     }
 }
 

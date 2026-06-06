@@ -1,7 +1,7 @@
 <idea-plugin>
     <id>io.github.siddharthjaswal.logpose</id>
     <name>LogPose</name>
-    <vendor url="https://github.com/siddharthjaswal">Siddharth Jaswal</vendor>
+    <vendor email="tosid23@gmail.com" url="https://github.com/siddharthjaswal">Siddharth Jaswal</vendor>
 
     <description><![CDATA[
         <h2>LogPose — read your Android network traffic without the logcat pain</h2>
