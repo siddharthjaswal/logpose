@@ -21,59 +21,59 @@ import javax.swing.JPanel
 import javax.swing.SwingConstants
 
 /**
- * Exact "Studio" design tokens (dark-only, per spec). Colors are wrapped in
- * [JBColor] with identical light/dark values so the panel renders the same dark
- * surface regardless of the IDE theme.
+ * "Studio" design tokens as [JBColor] light/dark pairs, so the tool window matches the
+ * IDE theme (dark values are the original Studio palette; light values mirror the
+ * JetBrains New UI light theme). Everything paints through these, so the whole UI adapts.
  */
 object Theme {
-    private fun c(rgb: Int) = JBColor(rgb, rgb)
+    private fun c(light: Int, dark: Int) = JBColor(light, dark)
 
     // surfaces
-    val bg0 = c(0x1E1F22)   // window
-    val bg1 = c(0x26282C)   // cards / chips
-    val bg2 = c(0x2B2D30)   // headers / inputs
-    val bg3 = c(0x303236)   // segments
-    val rowHover = c(0x2F3136)
+    val bg0 = c(0xF7F8FA, 0x1E1F22)   // window
+    val bg1 = c(0xFFFFFF, 0x26282C)   // cards / chips
+    val bg2 = c(0xF0F1F4, 0x2B2D30)   // headers / inputs
+    val bg3 = c(0xE3E5EA, 0x303236)   // segments
+    val rowHover = c(0xEAECF1, 0x2F3136)
 
     // borders
-    val borderStrong = c(0x393B40)
-    val borderSubtle = c(0x2D2F33)
+    val borderStrong = c(0xC6C9D2, 0x393B40)
+    val borderSubtle = c(0xE7E8EE, 0x2D2F33)
 
     // text
-    val text = c(0xDFE1E5)
-    val textDim = c(0xA3A6AD)
-    val textMuted = c(0x6B6E76)
+    val text = c(0x1E1F22, 0xDFE1E5)
+    val textDim = c(0x6C707E, 0xA3A6AD)
+    val textMuted = c(0x9296A1, 0x6B6E76)
 
     // accent
-    val accent = c(0x3574F0)
-    val accentHover = c(0x4A82F2)
-    val accentTint: Color = rgba(0x3574F0, 0.17f)
-    val onAccent = c(0xFFFFFF)
+    val accent = c(0x3574F0, 0x3574F0)
+    val accentHover = c(0x2E6AE0, 0x4A82F2)
+    val accentTint: Color = rgba(0x3574F0, 0.15f)
+    val onAccent = c(0xFFFFFF, 0xFFFFFF)
 
-    // method palette
-    private val mGet = c(0x5B9DFF)
-    private val mPost = c(0x5CC26F)
-    private val mPut = c(0xE0A740)
-    private val mDelete = c(0xE8736A)
-    private val mPatch = c(0xC08CF0)
+    // method palette (light = darker for contrast on a white surface)
+    private val mGet = c(0x2E6AE0, 0x5B9DFF)
+    private val mPost = c(0x1A8A3A, 0x5CC26F)
+    private val mPut = c(0xA86A12, 0xE0A740)
+    private val mDelete = c(0xCF3030, 0xE8736A)
+    private val mPatch = c(0x8250DF, 0xC08CF0)
 
     // status palette (text + bg tint)
-    private val s2 = c(0x62B97C); private val s2bg = rgba(0x62B97C, 0.15f)
-    private val s3 = c(0x5AA9D6); private val s3bg = rgba(0x5AA9D6, 0.15f)
-    private val s4 = c(0xE3B34C); private val s4bg = rgba(0xE3B34C, 0.17f)
-    private val s5 = c(0xEC7A70); private val s5bg = rgba(0xEC7A70, 0.17f)
+    private val s2 = c(0x1A8A3A, 0x62B97C); private val s2bg = rgba(0x62B97C, 0.15f)
+    private val s3 = c(0x2E6AE0, 0x5AA9D6); private val s3bg = rgba(0x5AA9D6, 0.15f)
+    private val s4 = c(0xA86A12, 0xE3B34C); private val s4bg = rgba(0xE3B34C, 0.17f)
+    private val s5 = c(0xCF3030, 0xEC7A70); private val s5bg = rgba(0xEC7A70, 0.17f)
 
     // find highlight
-    val findAll: Color = rgba(0xE3B34C, 0.30f)
+    val findAll: Color = JBColor(rgba(0xFFD54F, 0.55f), rgba(0xE3B34C, 0.30f))
 
     // JSON syntax
-    val jsonKey = c(0xC77DBB)
-    val jsonString = c(0x7FB069)
-    val jsonNumber = c(0x5B9DFF)
-    val jsonBool = c(0xCC8A52)
-    val jsonNull = c(0x8D9298)
-    val jsonPunct = c(0x787C84)
-    val jsonCount = c(0x6F737A)
+    val jsonKey = c(0x871094, 0xC77DBB)
+    val jsonString = c(0x067D17, 0x7FB069)
+    val jsonNumber = c(0x1750EB, 0x5B9DFF)
+    val jsonBool = c(0x0033B3, 0xCC8A52)
+    val jsonNull = c(0x808080, 0x8D9298)
+    val jsonPunct = c(0x5B5E66, 0x787C84)
+    val jsonCount = c(0x8C8F98, 0x6F737A)
 
     // aliases kept for existing widgets
     val cardBg get() = bg1
