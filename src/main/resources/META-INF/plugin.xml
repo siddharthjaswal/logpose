@@ -1,0 +1,34 @@
+<idea-plugin>
+    <id>io.github.siddharthjaswal.logpose</id>
+    <name>LogPose</name>
+    <vendor url="https://github.com/siddharthjaswal">Siddharth Jaswal</vendor>
+
+    <description><![CDATA[
+        <h2>LogPose — read your Android network traffic without the logcat pain</h2>
+        <p>
+            LogPose gives you a tool window that captures each HTTP request/response
+            as a single, structured transaction — no interleaved lines, no mismatched
+            bodies, no manual JSON pretty-printing.
+        </p>
+        <ul>
+            <li>Expand/collapse and select individual requests</li>
+            <li>Filter by URL, status class (<code>status:5xx</code>), method, or exclusion (<code>-heartbeat</code>)</li>
+            <li>Pretty-printed request &amp; response bodies on demand</li>
+            <li>First-class multipart upload (S3 / GCS) metadata instead of raw bytes</li>
+        </ul>
+        <p>
+            Pair it with the LogPose OkHttp interceptor on the device, which emits one
+            structured line per transaction. Works in IntelliJ IDEA and Android Studio.
+        </p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+            id="LogPose"
+            anchor="bottom"
+            icon="AllIcons.Toolwindows.WebToolWindow"
+            factoryClass="io.github.siddharthjaswal.logpose.toolwindow.LogPoseToolWindowFactory" />
+    </extensions>
+</idea-plugin>
