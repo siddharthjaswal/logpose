@@ -9,8 +9,12 @@ import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.Graphics
+import java.awt.Graphics2D
+import java.awt.RenderingHints
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.geom.RoundRectangle2D
 import java.text.SimpleDateFormat
 import java.util.Date
 import javax.swing.Box
@@ -42,17 +46,37 @@ class OverviewPanel : CardPanel(null) {
         isOpaque = false
         layout = BoxLayout(this, BoxLayout.X_AXIS)
     }
+    private lateinit var headerComp: Component
 
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
-        arc = 10
-        fill = Theme.bg1
-        stroke = Theme.borderSubtle
         border = JBUI.Borders.empty(0)
 
-        add(header())
+        headerComp = header()
+        add(headerComp)
         add(body())
         show(null)
+    }
+
+    override fun paintComponent(g: Graphics) {
+        val g2 = g.create() as Graphics2D
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        val w = width; val h = height; val a = JBUI.scale(10)
+        g2.color = Theme.bg1
+        g2.fillRoundRect(0, 0, w - 1, h - 1, a, a)
+        val hh = if (::headerComp.isInitialized) headerComp.height else 0
+        if (hh > 0) {
+            val clip = g2.clip
+            g2.clip(RoundRectangle2D.Float(0f, 0f, (w - 1).toFloat(), (h - 1).toFloat(), a.toFloat(), a.toFloat()))
+            g2.color = Theme.bg2
+            g2.fillRect(0, 0, w, hh)
+            g2.clip = clip
+            g2.color = Theme.borderStrong
+            g2.drawLine(0, hh - 1, w - 1, hh - 1)
+        }
+        g2.color = Theme.borderSubtle
+        g2.drawRoundRect(0, 0, w - 1, h - 1, a, a)
+        g2.dispose()
     }
 
     private fun header(): Component {
@@ -71,10 +95,7 @@ class OverviewPanel : CardPanel(null) {
         }.apply {
             isOpaque = false
             alignmentX = LEFT_ALIGNMENT
-            border = JBUI.Borders.compound(
-                JBUI.Borders.customLine(Theme.borderSubtle, 0, 0, 1, 0),
-                JBUI.Borders.empty(8, 14),
-            )
+            border = JBUI.Borders.empty(8, 14)
             add(title, BorderLayout.WEST)
             add(copy, BorderLayout.EAST)
         }

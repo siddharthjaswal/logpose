@@ -197,8 +197,8 @@ open class CardPanel(layout: java.awt.LayoutManager? = java.awt.BorderLayout()) 
 class StatChip(caption: String, value: String) : CardPanel(java.awt.GridLayout(2, 1, 0, 1)) {
     init {
         arc = 8
-        fill = Theme.bg1
-        stroke = Theme.borderSubtle
+        fill = Theme.bg2
+        stroke = Theme.borderStrong
         border = JBUI.Borders.empty(6, 10)
         add(JLabel(caption.uppercase()).apply { foreground = Theme.textMuted; font = JBUI.Fonts.label(9.5f) })
         add(JLabel(value).apply {

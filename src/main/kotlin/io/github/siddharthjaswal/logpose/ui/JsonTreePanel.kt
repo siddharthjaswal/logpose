@@ -59,7 +59,7 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
         isEditable = false
         background = Theme.bg1
         border = JBUI.Borders.empty(6, 12)
-        font = JBUI.Fonts.create("JetBrains Mono", 12)
+        font = JBUI.Fonts.create("JetBrains Mono", 13)
     }
     private val titleLabel = JBLabel(title)
     private val statusLabel = JBLabel()
@@ -85,6 +85,8 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
         tree.isRootVisible = false
         tree.showsRootHandles = true
         tree.isOpaque = false
+        tree.font = JBUI.Fonts.create("JetBrains Mono", 13)
+        tree.rowHeight = JBUI.scale(22) // ~1.7 line-height for the data/mono spec
         tree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
         tree.cellRenderer = NodeRenderer()
         tree.emptyText.text = "—"

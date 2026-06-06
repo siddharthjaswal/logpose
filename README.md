@@ -8,6 +8,29 @@ at the HTTP request you care about.
 
 ---
 
+## Features
+
+- **Modern "Studio" tool window** — a master/detail view with color-coded method/status
+  pill badges, a hero **Overview** card (status, URL, duration/size/started/host/id stat
+  chips), and side-by-side **Request** / **Response** cards.
+- **Collapsible JSON trees** — request/response bodies are parsed back into navigable,
+  syntax-colored trees; bodies that are JSON nest directly under `body`. Toggle **Tree /
+  Raw** (raw is syntax-highlighted too).
+- **Find in body** — `⌘F` / `Ctrl+F` inside either card highlights all matches with
+  next/prev navigation and an `n/total` counter.
+- **Chip filter** — type a term, press Space/Enter to pin it as a removable chip;
+  Backspace on an empty field removes the last. Grammar: `/orders status:5xx method:POST
+  -heartbeat`.
+- **Mute noisy endpoints** — right-click → mute; muted calls stay visible but fade into
+  the background (numeric path segments are normalized, so one mute covers all ids).
+  Persists across restarts.
+- **Copy everything** — Copy as **cURL** (hover a row or right-click), Copy as **JSON**
+  (per-section or the whole transaction), Copy URL, Copy response body.
+- **First-class multipart uploads** — S3/GCS media uploads show per-part metadata, never
+  raw bytes.
+- **Atomic, ordered capture** — no interleaved or mismatched bodies, even under load;
+  oversized payloads are chunked and reassembled.
+
 ## Why?
 
 The usual setup — OkHttp's `HttpLoggingInterceptor` at `BODY` level dumped into logcat —
@@ -101,7 +124,8 @@ for the canonical schema.
 
 ## Filtering
 
-The filter box accepts space-separated terms (AND-ed):
+The filter box is a chip input (Space/Enter pins a term, Backspace removes the last). It
+accepts space-separated terms (AND-ed):
 
 | Term | Matches |
 |---|---|
@@ -144,11 +168,15 @@ for the device-side setup.
 - [x] Plugin: tool window, logcat capture, master/detail, filtering, chunk reassembly
 - [x] **`logpose-android`**: drop-in OkHttp interceptor (atomic transaction, multipart
       metadata, gzip, chunking) — the device side of the contract
-- [ ] JSON **tree** viewer (collapsible) instead of flat pretty-print
-- [ ] Copy as cURL
+- [x] Collapsible JSON **tree** viewer (+ syntax-colored Raw mode)
+- [x] **Copy as cURL** (hover + context menu), section/transaction JSON copy
+- [x] Endpoint **muting** and a **chip-based** filter
+- [x] **Find** within request/response bodies
+- [x] Modern "Studio" card UI
 - [ ] Per-device picker when multiple devices are attached
 - [ ] Optional socket transport (`adb reverse`) to bypass logcat entirely
 - [ ] Persist/replay captured sessions
+- [ ] Publish to JetBrains Marketplace + Maven Central / JitPack
 
 ## Contributing
 
