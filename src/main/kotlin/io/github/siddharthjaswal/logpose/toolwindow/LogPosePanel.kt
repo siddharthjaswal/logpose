@@ -201,6 +201,8 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
             if (!SwingUtilities.isLeftMouseButton(e)) return
             val idx = indexAt(e)
             if (idx < 0) return
+            // Only the hovered, non-muted row paints the cURL affordance.
+            if (idx != renderer.hoveredIndex) return
             val tx = list.model.getElementAt(idx)
             val bounds = list.getCellBounds(idx, idx) ?: return
             if (!MutedEndpoints.isMuted(tx) && renderer.isInCurlZone(bounds.width, e.x - bounds.x)) {

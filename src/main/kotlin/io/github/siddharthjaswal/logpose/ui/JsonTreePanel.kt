@@ -178,13 +178,14 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
         hl.removeAllHighlights()
         matches.clear(); currentMatch = -1
         if (query.isBlank()) { findCount.text = ""; return }
-        val text = rawPane.text.lowercase()
-        val q = query.lowercase()
-        var i = text.indexOf(q)
+        // Case-insensitive search on the ORIGINAL text so offsets map to the document
+        // (lowercasing can change length for some Unicode and shift highlight positions).
+        val text = rawPane.text
+        var i = text.indexOf(query, 0, ignoreCase = true)
         while (i >= 0) {
             matches.add(i)
-            runCatching { hl.addHighlight(i, i + q.length, allPainter) }
-            i = text.indexOf(q, i + q.length)
+            runCatching { hl.addHighlight(i, i + query.length, allPainter) }
+            i = text.indexOf(query, i + query.length, ignoreCase = true)
         }
         if (matches.isNotEmpty()) { currentMatch = 0; showCurrent() }
         updateCount()
@@ -213,7 +214,7 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
         val w = width; val h = height
         g2.color = Theme.bg1
         g2.fillRoundRect(0, 0, w - 1, h - 1, arc, arc)
-        val hh = headerComp.height
+        val hh = if (::headerComp.isInitialized) headerComp.height else 0
         if (hh > 0) {
             val clip = g2.clip
             g2.clip(RoundRectangle2D.Float(0f, 0f, (w - 1).toFloat(), (h - 1).toFloat(), arc.toFloat(), arc.toFloat()))

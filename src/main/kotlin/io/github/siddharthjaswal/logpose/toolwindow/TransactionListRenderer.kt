@@ -112,7 +112,9 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         return row
     }
 
-    fun isInCurlZone(rowWidth: Int, x: Int): Boolean = x >= rowWidth - JBUI.scale(150)
+    /** The "⧉ cURL" affordance occupies the size column; match that band, not the whole right edge. */
+    fun isInCurlZone(rowWidth: Int, x: Int): Boolean =
+        x in (rowWidth - JBUI.scale(146))..(rowWidth - JBUI.scale(74))
 
     private fun <T : JLabel> T.fixed(w: Int, h: Int): T = apply {
         val d = Dimension(w, h); preferredSize = d; minimumSize = d; maximumSize = d

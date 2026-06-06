@@ -39,14 +39,16 @@ class TransactionParser {
     }
 
     private fun acceptChunk(chunk: Chunk): Transaction? {
+        // Ignore malformed envelopes; an out-of-range seq would otherwise inflate the
+        // part count and permanently wedge (and leak) this id's pending entry.
+        if (chunk.total <= 0 || chunk.seq !in 0 until chunk.total) return null
+
         val parts = pending.getOrPut(chunk.id) { HashMap() }
         parts[chunk.seq] = chunk
         if (parts.size < chunk.total) return null
 
         val payload = buildString {
-            for (i in 0 until chunk.total) {
-                append(parts[i]?.payload ?: return null)
-            }
+            for (i in 0 until chunk.total) append(parts[i]?.payload ?: "")
         }
         pending.remove(chunk.id)
         return runCatching { json.decodeFromString<Transaction>(payload) }.getOrNull()

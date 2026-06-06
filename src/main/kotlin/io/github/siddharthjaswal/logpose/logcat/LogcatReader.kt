@@ -48,7 +48,9 @@ class LogcatReader(
     private fun pump(adb: String, onLine: (String) -> Unit, onError: (String) -> Unit) {
         try {
             val cmd = baseCmd(adb) + listOf("logcat", "-v", "raw", "-s", "$tag:V")
-            val proc = ProcessBuilder(cmd).redirectErrorStream(false).start()
+            // Merge stderr into stdout so adb's error output is drained by our single
+            // reader (an undrained stderr can block the process and leak it).
+            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
             process = proc
             BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                 while (running.get()) {
@@ -79,7 +81,12 @@ class LogcatReader(
 
     fun stop() {
         running.set(false)
-        process?.destroy()
+        process?.let { p ->
+            p.destroy()
+            // Give it a moment to exit, then force, so the reader thread unblocks and
+            // the process is reaped rather than left as a zombie.
+            if (!p.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)) p.destroyForcibly()
+        }
         process = null
         thread = null
     }
