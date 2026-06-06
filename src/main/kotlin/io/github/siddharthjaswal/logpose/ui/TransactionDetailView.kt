@@ -15,6 +15,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.awt.BorderLayout
 import java.awt.Component
+import java.awt.Dimension
 import java.awt.datatransfer.StringSelection
 import javax.swing.JComponent
 import javax.swing.JPanel
@@ -44,12 +45,15 @@ class TransactionDetailView : JPanel(BorderLayout()) {
         overview.onCopyJson = { current?.let { copy(pretty.encodeToString(Transaction.serializer(), it), "Transaction JSON copied") } }
 
         val bottom = OnePixelSplitter(false, 0.5f).apply {
-            firstComponent = pad(request)
-            secondComponent = pad(response)
+            firstComponent = pad(request, 160, 60)
+            secondComponent = pad(response, 160, 60)
+            setHonorComponentsMinimumSize(true)
+            minimumSize = Dimension(0, JBUI.scale(140))
         }
         val outer = OnePixelSplitter(true, 0.30f).apply {
-            firstComponent = pad(overview)
+            firstComponent = pad(overview, 0, 96)
             secondComponent = bottom
+            setHonorComponentsMinimumSize(true)
         }
         add(outer, BorderLayout.CENTER)
     }
@@ -76,9 +80,10 @@ class TransactionDetailView : JPanel(BorderLayout()) {
         response.setElement(null); response.setStatus(null)
     }
 
-    private fun pad(c: Component): JComponent = JPanel(BorderLayout()).apply {
+    private fun pad(c: Component, minW: Int, minH: Int): JComponent = JPanel(BorderLayout()).apply {
         isOpaque = false
         border = JBUI.Borders.empty(4)
+        minimumSize = Dimension(JBUI.scale(minW), JBUI.scale(minH))
         add(c, BorderLayout.CENTER)
     }
 

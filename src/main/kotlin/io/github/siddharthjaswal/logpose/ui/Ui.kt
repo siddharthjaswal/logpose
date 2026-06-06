@@ -63,6 +63,9 @@ object Theme {
     private val s4 = c(0xE3B34C); private val s4bg = rgba(0xE3B34C, 0.17f)
     private val s5 = c(0xEC7A70); private val s5bg = rgba(0xEC7A70, 0.17f)
 
+    // find highlight
+    val findAll: Color = rgba(0xE3B34C, 0.30f)
+
     // JSON syntax
     val jsonKey = c(0xC77DBB)
     val jsonString = c(0x7FB069)

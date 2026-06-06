@@ -70,6 +70,14 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
     private val content = JPanel(cards).apply { isOpaque = false }
     private lateinit var headerComp: JComponent
 
+    // find
+    private val matches = ArrayList<Int>()
+    private var currentMatch = -1
+    private val findField = com.intellij.ui.components.JBTextField()
+    private val findCount = JBLabel("")
+    private val allPainter = javax.swing.text.DefaultHighlighter.DefaultHighlightPainter(Theme.findAll)
+    private val findBar = buildFindBar()
+
     init {
         isOpaque = false
         border = JBUI.Borders.empty()
@@ -85,8 +93,112 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
         content.add(scroll(rawPane), "raw")
 
         headerComp = header()
+        val centerWrap = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(findBar, BorderLayout.NORTH)
+            add(content, BorderLayout.CENTER)
+        }
         add(headerComp, BorderLayout.NORTH)
-        add(content, BorderLayout.CENTER)
+        add(centerWrap, BorderLayout.CENTER)
+        registerFindShortcut()
+    }
+
+    private fun buildFindBar(): JComponent {
+        findField.emptyText.text = "Find in $title…"
+        findField.preferredSize = java.awt.Dimension(JBUI.scale(220), findField.preferredSize.height)
+        findField.document.addDocumentListener(object : com.intellij.ui.DocumentAdapter() {
+            override fun textChanged(e: javax.swing.event.DocumentEvent) = runFind(findField.text)
+        })
+        findField.addKeyListener(object : java.awt.event.KeyAdapter() {
+            override fun keyPressed(e: java.awt.event.KeyEvent) {
+                when (e.keyCode) {
+                    java.awt.event.KeyEvent.VK_ENTER -> moveMatch(if (e.isShiftDown) -1 else 1)
+                    java.awt.event.KeyEvent.VK_ESCAPE -> hideFind()
+                }
+            }
+        })
+        findCount.foreground = Theme.textDim
+        findCount.border = JBUI.Borders.empty(0, 8)
+
+        val controls = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(findCount)
+            add(iconButton(AllIcons.Actions.PreviousOccurence, "Previous (Shift+Enter)") { moveMatch(-1) })
+            add(iconButton(AllIcons.Actions.NextOccurence, "Next (Enter)") { moveMatch(1) })
+            add(iconButton(AllIcons.Actions.Close, "Close (Esc)") { hideFind() })
+        }
+        return JPanel(BorderLayout()).apply {
+            isOpaque = true
+            background = Theme.bg2
+            border = JBUI.Borders.compound(
+                JBUI.Borders.customLine(Theme.borderStrong, 0, 0, 1, 0),
+                JBUI.Borders.empty(4, 10),
+            )
+            isVisible = false
+            add(findField, BorderLayout.WEST)
+            add(controls, BorderLayout.EAST)
+        }
+    }
+
+    private fun registerFindShortcut() {
+        val ks = javax.swing.KeyStroke.getKeyStroke(
+            java.awt.event.KeyEvent.VK_F,
+            java.awt.Toolkit.getDefaultToolkit().menuShortcutKeyMaskEx,
+        )
+        getInputMap(WHEN_ANCESTOR_OF_FOCUSED_COMPONENT).put(ks, "logposeFind")
+        actionMap.put("logposeFind", object : javax.swing.AbstractAction() {
+            override fun actionPerformed(e: java.awt.event.ActionEvent) = showFind()
+        })
+    }
+
+    private fun showFind() {
+        cards.show(content, "raw")
+        findBar.isVisible = true
+        revalidate()
+        findField.requestFocusInWindow()
+        runFind(findField.text)
+    }
+
+    private fun hideFind() {
+        findBar.isVisible = false
+        rawPane.highlighter.removeAllHighlights()
+        matches.clear(); currentMatch = -1
+        revalidate()
+    }
+
+    private fun runFind(query: String) {
+        val hl = rawPane.highlighter
+        hl.removeAllHighlights()
+        matches.clear(); currentMatch = -1
+        if (query.isBlank()) { findCount.text = ""; return }
+        val text = rawPane.text.lowercase()
+        val q = query.lowercase()
+        var i = text.indexOf(q)
+        while (i >= 0) {
+            matches.add(i)
+            runCatching { hl.addHighlight(i, i + q.length, allPainter) }
+            i = text.indexOf(q, i + q.length)
+        }
+        if (matches.isNotEmpty()) { currentMatch = 0; showCurrent() }
+        updateCount()
+    }
+
+    private fun moveMatch(dir: Int) {
+        if (matches.isEmpty()) return
+        currentMatch = (currentMatch + dir + matches.size) % matches.size
+        showCurrent(); updateCount()
+    }
+
+    private fun showCurrent() {
+        val start = matches[currentMatch]
+        val end = start + findField.text.length
+        rawPane.select(start, end)
+        runCatching { @Suppress("DEPRECATION") rawPane.modelToView(start)?.let { rawPane.scrollRectToVisible(it) } }
+    }
+
+    private fun updateCount() {
+        findCount.text = if (matches.isEmpty()) "0/0" else "${currentMatch + 1}/${matches.size}"
     }
 
     override fun paintComponent(g: Graphics) {
@@ -134,6 +246,7 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
             layout = BoxLayout(this, BoxLayout.X_AXIS)
             add(toggle)
             add(javax.swing.Box.createHorizontalStrut(JBUI.scale(10)))
+            add(iconButton(AllIcons.Actions.Find, "Find (⌘F)") { showFind() })
             add(iconButton(AllIcons.Actions.Expandall, "Expand all") { TreeUtil.expandAll(tree) })
             add(iconButton(AllIcons.Actions.Collapseall, "Collapse all") { TreeUtil.collapseAll(tree, 0) })
             add(iconButton(AllIcons.Actions.Copy, "Copy as JSON") { copyJson() })

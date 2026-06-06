@@ -10,18 +10,17 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.Toggleable
 import com.intellij.openapi.ide.CopyPasteManager
-import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.components.JBTextField
 import com.intellij.util.Alarm
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.TransactionStore
+import io.github.siddharthjaswal.logpose.ui.ChipFilterField
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.StatusDot
@@ -42,7 +41,6 @@ import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.ListSelectionModel
 import javax.swing.SwingUtilities
-import javax.swing.event.DocumentEvent
 
 /** The LogPose tool window: a master/detail view over captured HTTP transactions. */
 class LogPosePanel : JPanel(BorderLayout()), Disposable {
@@ -54,7 +52,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     private val renderer = TransactionListRenderer()
     private val list = JBList(javax.swing.DefaultListModel<Transaction>())
     private val detail = TransactionDetailView()
-    private val filterField = JBTextField()
+    private val chipFilter = ChipFilterField()
     private val countLabel = JBLabel()
     private val statusDot = StatusDot()
 
@@ -78,15 +76,17 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         list.addMouseListener(mouse)
         list.addMouseMotionListener(mouse)
 
-        filterField.emptyText.text = "/orders   status:5xx   method:POST   -heartbeat"
-        filterField.background = Theme.bg2
-        filterField.document.addDocumentListener(object : DocumentAdapter() {
-            override fun textChanged(e: DocumentEvent) = refreshList()
-        })
+        chipFilter.onChange = { refreshList() }
 
+        val listScroll = JBScrollPane(list).apply {
+            border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0
+            minimumSize = Dimension(JBUI.scale(220), 0)
+        }
+        detail.minimumSize = Dimension(JBUI.scale(320), 0)
         val splitter = OnePixelSplitter(false, 0.44f).apply {
-            firstComponent = JBScrollPane(list).apply { border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0 }
+            firstComponent = listScroll
             secondComponent = detail
+            setHonorComponentsMinimumSize(true)
         }
 
         add(buildHeader(), BorderLayout.NORTH)
@@ -109,13 +109,10 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         val toolbar: ActionToolbar = ActionManager.getInstance().createActionToolbar("LogPose", group, true)
         toolbar.targetComponent = this
 
-        val filterLabel = JBLabel("filter:").apply {
-            foreground = Theme.textMuted; border = JBUI.Borders.empty(0, 8, 0, 4)
-        }
         val filterRow = JPanel(BorderLayout()).apply {
             isOpaque = false
-            add(filterLabel, BorderLayout.WEST)
-            add(filterField, BorderLayout.CENTER)
+            border = JBUI.Borders.empty(5, 6)
+            add(chipFilter, BorderLayout.CENTER)
         }
         countLabel.foreground = Theme.textMuted
         countLabel.border = JBUI.Borders.empty(0, 12)
@@ -159,7 +156,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     private fun refreshList() {
         val selectedId = list.selectedValue?.id
         val all = store.snapshot()
-        val filtered = TransactionStore.filter(all, filterField.text)
+        val filtered = TransactionStore.filter(all, chipFilter.queryString())
         countLabel.text = "${filtered.size}/${all.size}"
 
         val model = javax.swing.DefaultListModel<Transaction>()
