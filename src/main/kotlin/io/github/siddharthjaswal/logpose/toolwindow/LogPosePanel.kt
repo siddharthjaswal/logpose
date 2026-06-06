@@ -14,7 +14,6 @@ import com.intellij.ui.JBColor
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.Alarm
 import com.intellij.util.ui.JBUI
@@ -22,38 +21,34 @@ import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.TransactionStore
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
+import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
+import io.github.siddharthjaswal.logpose.ui.TransactionDetailView
 import java.awt.BorderLayout
 import java.awt.Component
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.BorderFactory
 import javax.swing.DefaultListModel
+import javax.swing.JMenuItem
+import javax.swing.JPanel
+import javax.swing.JPopupMenu
 import javax.swing.ListSelectionModel
 import javax.swing.event.DocumentEvent
 
-/**
- * The LogPose tool window: a master/detail view over captured HTTP transactions.
- */
-class LogPosePanel : javax.swing.JPanel(BorderLayout()), Disposable {
+/** The LogPose tool window: a master/detail view over captured HTTP transactions. */
+class LogPosePanel : JPanel(BorderLayout()), Disposable {
 
     private val store = TransactionStore()
     private val parser = TransactionParser()
     private val reader = LogcatReader()
 
     private val list = JBList(DefaultListModel<Transaction>())
-    private val detail = JBTextArea()
+    private val detail = TransactionDetailView()
     private val filterField = JBTextField()
 
-    private val pretty = Json { prettyPrint = true; encodeDefaults = true }
-
-    // Coalesces bursts of incoming transactions into at most one UI rebuild per tick,
-    // so a busy app doesn't swamp the EDT with thousands of full-list refreshes.
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
     private val refreshScheduled = AtomicBoolean(false)
-
-    // Set while we swap the list model programmatically, so the resulting selection
-    // churn doesn't keep re-rendering the detail pane during live capture.
     private var suppressSelectionEvents = false
 
     init {
@@ -62,20 +57,18 @@ class LogPosePanel : javax.swing.JPanel(BorderLayout()), Disposable {
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
         list.cellRenderer = TransactionCellRenderer()
         list.addListSelectionListener {
-            if (!suppressSelectionEvents && !it.valueIsAdjusting) showDetail(list.selectedValue)
+            if (!suppressSelectionEvents && !it.valueIsAdjusting) detail.show(list.selectedValue)
         }
-
-        detail.isEditable = false
-        detail.lineWrap = false
+        list.addMouseListener(MutePopup())
 
         filterField.emptyText.text = "filter:  /orders   status:5xx   method:POST   -heartbeat"
         filterField.document.addDocumentListener(object : DocumentAdapter() {
             override fun textChanged(e: DocumentEvent) = refreshList()
         })
 
-        val splitter = OnePixelSplitter(false, 0.35f).apply {
+        val splitter = OnePixelSplitter(false, 0.38f).apply {
             firstComponent = JBScrollPane(list)
-            secondComponent = JBScrollPane(detail)
+            secondComponent = detail
         }
 
         add(buildToolbar(), BorderLayout.NORTH)
@@ -93,7 +86,7 @@ class LogPosePanel : javax.swing.JPanel(BorderLayout()), Disposable {
             ActionManager.getInstance().createActionToolbar("LogPose", group, true)
         toolbar.targetComponent = this
 
-        val north = javax.swing.JPanel(BorderLayout())
+        val north = JPanel(BorderLayout())
         north.add(toolbar.component, BorderLayout.WEST)
         north.add(filterField, BorderLayout.CENTER)
         north.border = BorderFactory.createMatteBorder(0, 0, 1, 0, JBColor.border())
@@ -104,9 +97,7 @@ class LogPosePanel : javax.swing.JPanel(BorderLayout()), Disposable {
         parser.reset()
         reader.start(
             onLine = { line -> parser.accept(line)?.let { store.add(it) } },
-            onError = { msg ->
-                refreshAlarm.addRequest({ detail.text = "⚠ LogPose capture error:\n\n$msg" }, 0)
-            },
+            onError = { msg -> refreshAlarm.addRequest({ detail.showError("⚠ LogPose capture error:\n\n$msg") }, 0) },
         )
         scheduleRefresh()
     }
@@ -127,8 +118,6 @@ class LogPosePanel : javax.swing.JPanel(BorderLayout()), Disposable {
         val selectedId = list.selectedValue?.id
         val filtered = TransactionStore.filter(store.snapshot(), filterField.text)
 
-        // Build a fresh, detached model (cheap — no listeners fire), then swap it in
-        // with a single structure-changed event instead of N per-element events.
         val model = DefaultListModel<Transaction>()
         filtered.forEach { model.addElement(it) }
 
@@ -145,12 +134,34 @@ class LogPosePanel : javax.swing.JPanel(BorderLayout()), Disposable {
         }
     }
 
-    private fun showDetail(tx: Transaction?) {
-        detail.text = if (tx == null) "" else pretty.encodeToString(tx)
-        detail.caretPosition = 0
-    }
-
     override fun dispose() = reader.stop()
+
+    /** Right-click a row to mute/unmute its endpoint (persists across restarts). */
+    private inner class MutePopup : MouseAdapter() {
+        override fun mousePressed(e: MouseEvent) = maybeShow(e)
+        override fun mouseReleased(e: MouseEvent) = maybeShow(e)
+
+        private fun maybeShow(e: MouseEvent) {
+            if (!e.isPopupTrigger) return
+            val idx = list.locationToIndex(e.point).takeIf { it >= 0 } ?: return
+            list.selectedIndex = idx
+            val tx = list.selectedValue ?: return
+            val key = MutedEndpoints.keyOf(tx)
+            val muted = MutedEndpoints.isMuted(tx)
+
+            JPopupMenu().apply {
+                add(JMenuItem(if (muted) "Unmute  $key" else "Mute  $key").apply {
+                    addActionListener { MutedEndpoints.toggle(tx); list.repaint() }
+                })
+                if (MutedEndpoints.patterns().isNotEmpty()) {
+                    add(JMenuItem("Clear all mutes").apply {
+                        addActionListener { MutedEndpoints.clearAll(); list.repaint() }
+                    })
+                }
+                show(list, e.x, e.y)
+            }
+        }
+    }
 
     private inner class CaptureToggleAction :
         AnAction("Capture", "Start/stop reading logcat", AllIcons.Actions.Execute), Toggleable {
@@ -171,9 +182,8 @@ class LogPosePanel : javax.swing.JPanel(BorderLayout()), Disposable {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
         override fun actionPerformed(e: AnActionEvent) {
             store.clear()
-            // Also empty the device buffer so cleared logs don't replay on the next Start.
             reader.clearBuffer()
-            detail.text = ""
+            detail.show(null)
             refreshList()
         }
     }
