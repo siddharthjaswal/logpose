@@ -7,7 +7,7 @@ import com.intellij.ui.content.ContentFactory
 
 class LogPoseToolWindowFactory : ToolWindowFactory {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = LogPosePanel()
+        val panel = LogPosePanel(project)
         val content = ContentFactory.getInstance().createContent(panel, "", false)
         content.setDisposer(panel)
         toolWindow.contentManager.addContent(content)

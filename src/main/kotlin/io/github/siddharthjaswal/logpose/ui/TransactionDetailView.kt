@@ -25,11 +25,11 @@ import javax.swing.JPanel
  * side-by-side below. Each request/response card renders real JSON (body parsed
  * back into nested JSON) as a tree or raw, with Copy.
  */
-class TransactionDetailView : JPanel(BorderLayout()) {
+class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()) {
 
     private val overview = OverviewPanel()
-    private val request = JsonTreePanel("Request") { Theme.methodColor(currentMethod) }
-    private val response = JsonTreePanel("Response")
+    private val request = JsonTreePanel("Request", project) { Theme.methodColor(currentMethod) }
+    private val response = JsonTreePanel("Response", project)
 
     private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
     private val pretty = Json { prettyPrint = true; encodeDefaults = true }

@@ -43,7 +43,7 @@ import javax.swing.ListSelectionModel
 import javax.swing.SwingUtilities
 
 /** The LogPose tool window: a master/detail view over captured HTTP transactions. */
-class LogPosePanel : JPanel(BorderLayout()), Disposable {
+class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()), Disposable {
 
     private val store = TransactionStore()
     private val parser = TransactionParser()
@@ -51,7 +51,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
 
     private val renderer = TransactionListRenderer()
     private val list = JBList(javax.swing.DefaultListModel<Transaction>())
-    private val detail = TransactionDetailView()
+    private val detail = TransactionDetailView(project)
     private val filterBar = FilterBar()
     private val statusDot = StatusDot()
 

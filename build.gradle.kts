@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.siddharthjaswal"
-version = "0.8.2"
+version = "0.9.0"
 
 repositories {
     mavenCentral()
@@ -21,6 +21,8 @@ dependencies {
         // does NOT depend on the bundled Android plugin — it talks to `adb` directly,
         // which keeps it usable in any JetBrains IDE.
         intellijIdeaCommunity("2024.3")
+        // Bundled JSON support — powers the Raw view's editor (highlighting + folding).
+        bundledPlugin("com.intellij.modules.json")
     }
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 }
