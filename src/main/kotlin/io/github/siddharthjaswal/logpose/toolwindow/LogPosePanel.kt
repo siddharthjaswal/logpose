@@ -9,8 +9,8 @@ import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.Toggleable
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.ui.DocumentAdapter
-import com.intellij.ui.JBColor
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
@@ -22,22 +22,26 @@ import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.TransactionStore
-import com.intellij.openapi.ide.CopyPasteManager
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
+import io.github.siddharthjaswal.logpose.ui.StatusDot
+import io.github.siddharthjaswal.logpose.ui.Theme
+import io.github.siddharthjaswal.logpose.ui.Toast
 import io.github.siddharthjaswal.logpose.ui.TransactionDetailView
+import kotlinx.serialization.json.Json
 import java.awt.BorderLayout
 import java.awt.Component
+import java.awt.Dimension
+import java.awt.FlowLayout
 import java.awt.datatransfer.StringSelection
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.swing.BorderFactory
-import javax.swing.DefaultListModel
 import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.ListSelectionModel
+import javax.swing.SwingUtilities
 import javax.swing.event.DocumentEvent
 
 /** The LogPose tool window: a master/detail view over captured HTTP transactions. */
@@ -47,63 +51,93 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
     private val parser = TransactionParser()
     private val reader = LogcatReader()
 
-    private val list = JBList(DefaultListModel<Transaction>())
+    private val renderer = TransactionListRenderer()
+    private val list = JBList(javax.swing.DefaultListModel<Transaction>())
     private val detail = TransactionDetailView()
     private val filterField = JBTextField()
     private val countLabel = JBLabel()
+    private val statusDot = StatusDot()
 
+    private val prettyJson = Json { prettyPrint = true; encodeDefaults = true }
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
     private val refreshScheduled = AtomicBoolean(false)
     private var suppressSelectionEvents = false
 
     init {
-        border = JBUI.Borders.empty()
+        isOpaque = true
+        background = Theme.bg0
 
+        list.isOpaque = true
+        list.background = Theme.bg0
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        list.cellRenderer = TransactionListRenderer()
+        list.cellRenderer = renderer
         list.addListSelectionListener {
             if (!suppressSelectionEvents && !it.valueIsAdjusting) detail.show(list.selectedValue)
         }
-        list.addMouseListener(MutePopup())
+        val mouse = ListMouse()
+        list.addMouseListener(mouse)
+        list.addMouseMotionListener(mouse)
 
-        filterField.emptyText.text = "filter:  /orders   status:5xx   method:POST   -heartbeat"
+        filterField.emptyText.text = "/orders   status:5xx   method:POST   -heartbeat"
+        filterField.background = Theme.bg2
         filterField.document.addDocumentListener(object : DocumentAdapter() {
             override fun textChanged(e: DocumentEvent) = refreshList()
         })
 
-        val splitter = OnePixelSplitter(false, 0.38f).apply {
-            firstComponent = JBScrollPane(list)
+        val splitter = OnePixelSplitter(false, 0.44f).apply {
+            firstComponent = JBScrollPane(list).apply { border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0 }
             secondComponent = detail
         }
 
-        add(buildToolbar(), BorderLayout.NORTH)
+        add(buildHeader(), BorderLayout.NORTH)
         add(splitter, BorderLayout.CENTER)
 
         store.addListener { scheduleRefresh() }
     }
 
-    private fun buildToolbar(): Component {
-        val group = DefaultActionGroup().apply {
-            add(CaptureToggleAction())
-            add(ClearAction())
+    private fun buildHeader(): Component {
+        val titleBar = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(8))).apply {
+            isOpaque = true; background = Theme.bg0
+            border = JBUI.Borders.empty(0, 10)
+            add(statusDot)
+            add(JBLabel("LogPose").apply { foreground = Theme.text; font = JBUI.Fonts.label(13f).asBold() })
         }
-        val toolbar: ActionToolbar =
-            ActionManager.getInstance().createActionToolbar("LogPose", group, true)
+
+        val group = DefaultActionGroup().apply {
+            add(CaptureToggleAction()); add(ClearAction())
+        }
+        val toolbar: ActionToolbar = ActionManager.getInstance().createActionToolbar("LogPose", group, true)
         toolbar.targetComponent = this
 
-        countLabel.foreground = JBColor.GRAY
-        countLabel.border = JBUI.Borders.empty(0, 10)
+        val filterLabel = JBLabel("filter:").apply {
+            foreground = Theme.textMuted; border = JBUI.Borders.empty(0, 8, 0, 4)
+        }
+        val filterRow = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(filterLabel, BorderLayout.WEST)
+            add(filterField, BorderLayout.CENTER)
+        }
+        countLabel.foreground = Theme.textMuted
+        countLabel.border = JBUI.Borders.empty(0, 12)
 
-        val north = JPanel(BorderLayout())
-        north.add(toolbar.component, BorderLayout.WEST)
-        north.add(filterField, BorderLayout.CENTER)
-        north.add(countLabel, BorderLayout.EAST)
-        north.border = BorderFactory.createMatteBorder(0, 0, 1, 0, JBColor.border())
-        return north
+        val toolbarRow = JPanel(BorderLayout()).apply {
+            isOpaque = true; background = Theme.bg0
+            border = JBUI.Borders.customLine(Theme.borderStrong, 0, 0, 1, 0)
+            add(toolbar.component, BorderLayout.WEST)
+            add(filterRow, BorderLayout.CENTER)
+            add(countLabel, BorderLayout.EAST)
+        }
+
+        return JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(titleBar, BorderLayout.NORTH)
+            add(toolbarRow, BorderLayout.CENTER)
+        }
     }
 
     private fun startCapture() {
         parser.reset()
+        statusDot.capturing = true
         reader.start(
             onLine = { line -> parser.accept(line)?.let { store.add(it) } },
             onError = { msg -> refreshAlarm.addRequest({ detail.showError("⚠ LogPose capture error:\n\n$msg") }, 0) },
@@ -111,15 +145,14 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         scheduleRefresh()
     }
 
-    private fun stopCapture() = reader.stop()
+    private fun stopCapture() {
+        statusDot.capturing = false
+        reader.stop()
+    }
 
-    /** Debounced, coalesced refresh: at most one rebuild per ~150ms regardless of volume. */
     private fun scheduleRefresh() {
         if (refreshScheduled.compareAndSet(false, true)) {
-            refreshAlarm.addRequest({
-                refreshScheduled.set(false)
-                refreshList()
-            }, 150)
+            refreshAlarm.addRequest({ refreshScheduled.set(false); refreshList() }, 150)
         }
     }
 
@@ -129,7 +162,7 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         val filtered = TransactionStore.filter(all, filterField.text)
         countLabel.text = "${filtered.size}/${all.size}"
 
-        val model = DefaultListModel<Transaction>()
+        val model = javax.swing.DefaultListModel<Transaction>()
         filtered.forEach { model.addElement(it) }
 
         suppressSelectionEvents = true
@@ -145,44 +178,77 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
         }
     }
 
-    override fun dispose() = reader.stop()
+    override fun dispose() {
+        reader.stop()
+        statusDot.dispose()
+    }
 
-    /** Right-click a row to mute/unmute its endpoint (persists across restarts). */
-    private inner class MutePopup : MouseAdapter() {
-        override fun mousePressed(e: MouseEvent) = maybeShow(e)
-        override fun mouseReleased(e: MouseEvent) = maybeShow(e)
+    private fun copyToClipboard(text: String, toast: String) {
+        CopyPasteManager.getInstance().setContents(StringSelection(text))
+        Toast.show(list, toast)
+    }
 
-        private fun maybeShow(e: MouseEvent) {
+    /** Handles hover (cURL affordance), left-click cURL copy, and the right-click menu. */
+    private inner class ListMouse : MouseAdapter() {
+        override fun mouseMoved(e: MouseEvent) {
+            val idx = indexAt(e)
+            if (renderer.hoveredIndex != idx) { renderer.hoveredIndex = idx; list.repaint() }
+        }
+
+        override fun mouseExited(e: MouseEvent) {
+            if (renderer.hoveredIndex != -1) { renderer.hoveredIndex = -1; list.repaint() }
+        }
+
+        override fun mouseClicked(e: MouseEvent) {
+            if (!SwingUtilities.isLeftMouseButton(e)) return
+            val idx = indexAt(e)
+            if (idx < 0) return
+            val tx = list.model.getElementAt(idx)
+            val bounds = list.getCellBounds(idx, idx) ?: return
+            if (!MutedEndpoints.isMuted(tx) && renderer.isInCurlZone(bounds.width, e.x - bounds.x)) {
+                copyToClipboard(CurlBuilder.build(tx), "cURL copied")
+            }
+        }
+
+        override fun mousePressed(e: MouseEvent) = maybePopup(e)
+        override fun mouseReleased(e: MouseEvent) = maybePopup(e)
+
+        private fun indexAt(e: MouseEvent): Int {
+            val idx = list.locationToIndex(e.point)
+            if (idx < 0) return -1
+            val bounds = list.getCellBounds(idx, idx) ?: return -1
+            return if (bounds.contains(e.point)) idx else -1
+        }
+
+        private fun maybePopup(e: MouseEvent) {
             if (!e.isPopupTrigger) return
-            val idx = list.locationToIndex(e.point).takeIf { it >= 0 } ?: return
+            val idx = indexAt(e).takeIf { it >= 0 } ?: return
             list.selectedIndex = idx
             val tx = list.selectedValue ?: return
             val key = MutedEndpoints.keyOf(tx)
             val muted = MutedEndpoints.isMuted(tx)
 
             JPopupMenu().apply {
-                add(JMenuItem("Copy as cURL").apply {
-                    addActionListener { copyToClipboard(CurlBuilder.build(tx)) }
+                add(item("Copy as cURL") { copyToClipboard(CurlBuilder.build(tx), "cURL copied") })
+                add(item("Copy as JSON") {
+                    copyToClipboard(prettyJson.encodeToString(Transaction.serializer(), tx), "Transaction JSON copied")
                 })
-                add(JMenuItem("Copy URL").apply {
-                    addActionListener { copyToClipboard(tx.request.url) }
-                })
+                add(item("Copy URL") { copyToClipboard(tx.request.url, "URL copied") })
+                tx.response?.body?.text?.let { body ->
+                    add(item("Copy response body") { copyToClipboard(body, "Response body copied") })
+                }
                 addSeparator()
-                add(JMenuItem(if (muted) "Unmute  $key" else "Mute  $key").apply {
-                    addActionListener { MutedEndpoints.toggle(tx); list.repaint() }
-                })
+                add(item(if (muted) "Unmute  $key" else "Mute  $key") { MutedEndpoints.toggle(tx); list.repaint() })
                 if (MutedEndpoints.patterns().isNotEmpty()) {
-                    add(JMenuItem("Clear all mutes").apply {
-                        addActionListener { MutedEndpoints.clearAll(); list.repaint() }
-                    })
+                    add(item("Clear all mutes") { MutedEndpoints.clearAll(); list.repaint() })
                 }
                 show(list, e.x, e.y)
             }
         }
-    }
 
-    private fun copyToClipboard(text: String) =
-        CopyPasteManager.getInstance().setContents(StringSelection(text))
+        private fun item(text: String, action: () -> Unit) =
+            JMenuItem(text).apply { addActionListener { action() } }
+    }
 
     private inner class CaptureToggleAction :
         AnAction("Capture", "Start/stop reading logcat", AllIcons.Actions.Execute), Toggleable {

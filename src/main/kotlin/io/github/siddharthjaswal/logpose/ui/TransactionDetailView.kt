@@ -36,11 +36,12 @@ class TransactionDetailView : JPanel(BorderLayout()) {
     private var currentMethod: String = "GET"
 
     init {
-        background = JBColor.PanelBackground
+        isOpaque = true
+        background = Theme.bg0
         border = JBUI.Borders.empty(6)
 
-        overview.onCopyCurl = { current?.let { copy(CurlBuilder.build(it)) } }
-        overview.onCopyJson = { current?.let { copy(pretty.encodeToString(Transaction.serializer(), it)) } }
+        overview.onCopyCurl = { current?.let { copy(CurlBuilder.build(it), "cURL copied") } }
+        overview.onCopyJson = { current?.let { copy(pretty.encodeToString(Transaction.serializer(), it), "Transaction JSON copied") } }
 
         val bottom = OnePixelSplitter(false, 0.5f).apply {
             firstComponent = pad(request)
@@ -81,7 +82,10 @@ class TransactionDetailView : JPanel(BorderLayout()) {
         add(c, BorderLayout.CENTER)
     }
 
-    private fun copy(text: String) = CopyPasteManager.getInstance().setContents(StringSelection(text))
+    private fun copy(text: String, label: String) {
+        CopyPasteManager.getInstance().setContents(StringSelection(text))
+        Toast.show(overview, label)
+    }
 
     private fun requestJson(tx: Transaction): JsonElement = buildJsonObject {
         put("method", tx.request.method)

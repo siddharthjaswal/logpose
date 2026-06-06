@@ -76,9 +76,9 @@ class OverviewPanel : CardPanel(null) {
             code != null -> "$code ${tx.response?.message.orEmpty()}".trim()
             else -> "pending"
         }
-        statusPill.set(statusLabel, sColor, Theme.tint(sColor))
+        statusPill.set(statusLabel, sColor, Theme.statusTint(code, tx.error))
         val mColor = Theme.methodColor(tx.request.method)
-        methodPill.set(tx.request.method, mColor, Theme.tint(mColor))
+        methodPill.set(tx.request.method, mColor, Theme.bg2)
 
         url.text = tx.request.url
 

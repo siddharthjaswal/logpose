@@ -112,8 +112,9 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
         tb.targetComponent = this
 
         return JPanel(BorderLayout()).apply {
-            isOpaque = false
-            border = JBUI.Borders.customLine(Theme.cardBorder, 0, 0, 1, 0)
+            isOpaque = true
+            background = Theme.bg2
+            border = JBUI.Borders.customLine(Theme.borderStrong, 0, 0, 1, 0)
             add(titleBox, BorderLayout.WEST)
             add(tb.component, BorderLayout.EAST)
         }
@@ -146,6 +147,7 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
     fun copyJson() {
         val text = element?.let { pretty.encodeToString(JsonElement.serializer(), it) } ?: return
         CopyPasteManager.getInstance().setContents(StringSelection(text))
+        Toast.show(this, "$title JSON copied")
     }
 
     private fun simpleAction(text: String, icon: javax.swing.Icon, run: () -> Unit) =
@@ -157,8 +159,9 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
     private fun addElement(parent: DefaultMutableTreeNode, key: String?, el: JsonElement) {
         when (el) {
             is JsonObject -> {
+                val preview = el.keys.take(4).joinToString(", ") + if (el.size > 4) ", …" else ""
                 val container = if (key == null) parent
-                else node(LpNode(key, null, suffix = "{${el.size}}")).also { parent.add(it) }
+                else node(LpNode(key, null, suffix = "{${el.size}}", preview = preview)).also { parent.add(it) }
                 el.forEach { (k, v) -> addElement(container, k, v) }
             }
             is JsonArray -> {
@@ -190,7 +193,10 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
     private fun node(n: LpNode) = DefaultMutableTreeNode(n)
 
     private enum class Kind { STRING, NUMBER, BOOL, NULL }
-    private data class LpNode(val key: String?, val value: String?, val kind: Kind? = null, val suffix: String? = null)
+    private data class LpNode(
+        val key: String?, val value: String?, val kind: Kind? = null,
+        val suffix: String? = null, val preview: String? = null,
+    )
 
     private class NodeRenderer : ColoredTreeCellRenderer() {
         init { isOpaque = false }
@@ -199,27 +205,29 @@ class JsonTreePanel(private val title: String, private val titleColor: () -> JBC
             leaf: Boolean, row: Int, hasFocus: Boolean,
         ) {
             val n = ((value as? DefaultMutableTreeNode)?.userObject as? LpNode) ?: return
-            n.key?.let { append(it, SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, KEY_COLOR)) }
+            n.key?.let { append(it, attr(Theme.jsonKey)) }
             if (n.value != null) {
-                if (n.key != null) append(": ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                if (n.key != null) append(": ", attr(Theme.jsonPunct))
                 append(n.value, attrFor(n.kind))
             }
-            n.suffix?.takeIf { it.isNotBlank() }?.let { append("   $it", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
+            n.suffix?.takeIf { it.isNotBlank() }?.let { append("  $it", attr(Theme.jsonCount)) }
+            // Dim preview of child keys when an object node is collapsed.
+            if (!expanded && !n.preview.isNullOrBlank()) {
+                append("   ${n.preview}", attr(Theme.jsonPunct, italic = true))
+            }
         }
 
         private fun attrFor(kind: Kind?) = when (kind) {
-            Kind.STRING -> SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, STRING_COLOR)
-            Kind.NUMBER -> SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, NUMBER_COLOR)
-            Kind.BOOL -> SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, KEYWORD_COLOR)
-            Kind.NULL -> SimpleTextAttributes.GRAYED_ATTRIBUTES
-            null -> SimpleTextAttributes.REGULAR_ATTRIBUTES
+            Kind.STRING -> attr(Theme.jsonString)
+            Kind.NUMBER -> attr(Theme.jsonNumber)
+            Kind.BOOL -> attr(Theme.jsonBool)
+            Kind.NULL -> attr(Theme.jsonNull)
+            null -> attr(Theme.text)
         }
 
-        companion object {
-            private val KEY_COLOR = JBColor(0x871094, 0xC77DBB)
-            private val STRING_COLOR = JBColor(0x067D17, 0x7FB069)
-            private val NUMBER_COLOR = JBColor(0x1750EB, 0x5AA9D6)
-            private val KEYWORD_COLOR = JBColor(0x0033B3, 0xCC8A52)
+        private fun attr(color: JBColor, italic: Boolean = false): SimpleTextAttributes {
+            val style = if (italic) SimpleTextAttributes.STYLE_ITALIC else SimpleTextAttributes.STYLE_PLAIN
+            return SimpleTextAttributes(style, color)
         }
     }
 }
