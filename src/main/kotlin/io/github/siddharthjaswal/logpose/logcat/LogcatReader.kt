@@ -3,6 +3,7 @@ package io.github.siddharthjaswal.logpose.logcat
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -13,20 +14,25 @@ import java.util.concurrent.atomic.AtomicBoolean
  *  - `-s <TAG>:V` silences everything except our tag — no app-log noise.
  *  - `-v raw` strips the timestamp/pid/level prefix, so each line IS the payload.
  *
- * Crucially, we **clear the log buffer before streaming**. By default `adb logcat`
- * dumps the entire existing buffer first and only then tails new entries — which is
- * why a Stop→Start would otherwise replay every old transaction. Clearing first means
- * Start shows only traffic produced from that moment on.
+ * The buffer is cleared before streaming so a Stop→Start doesn't replay the backlog.
+ *
+ * **All `adb` invocations run on the background pump thread, never the caller's (EDT)
+ * thread** — a blocking `adb` call on the UI thread freezes the whole IDE, e.g. while
+ * the emulator is shutting down and adb stalls.
  */
 class LogcatReader(
     private val tag: String = DEFAULT_TAG,
     private val deviceSerial: String? = null,
 ) {
     private val running = AtomicBoolean(false)
-    private var process: Process? = null
+    @Volatile private var process: Process? = null
     private var thread: Thread? = null
 
-    fun start(onLine: (String) -> Unit, onError: (String) -> Unit) {
+    /**
+     * @param onStopped invoked (off the EDT) when streaming ends for any reason —
+     *   user stop, the device disconnecting, or an adb error. Lets the UI reset state.
+     */
+    fun start(onLine: (String) -> Unit, onError: (String) -> Unit, onStopped: () -> Unit = {}) {
         if (!running.compareAndSet(false, true)) return
 
         val adb = resolveAdb()
@@ -36,25 +42,26 @@ class LogcatReader(
             return
         }
 
-        // Drop the backlog so we only stream new logs (no replay of old transactions).
-        clearBuffer(adb)
-
-        thread = Thread({ pump(adb, onLine, onError) }, "logpose-logcat").apply {
+        thread = Thread({ pump(adb, onLine, onError, onStopped) }, "logpose-logcat").apply {
             isDaemon = true
             start()
         }
     }
 
-    private fun pump(adb: String, onLine: (String) -> Unit, onError: (String) -> Unit) {
+    private fun pump(adb: String, onLine: (String) -> Unit, onError: (String) -> Unit, onStopped: () -> Unit) {
+        var proc: Process? = null
         try {
+            // Clear the backlog here (background thread), not in start() — `adb logcat -c`
+            // can block while the device is transitioning.
+            clearBuffer(adb)
+
             val cmd = baseCmd(adb) + listOf("logcat", "-v", "raw", "-s", "$tag:V")
-            // Merge stderr into stdout so adb's error output is drained by our single
-            // reader (an undrained stderr can block the process and leak it).
-            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
+            // Merge stderr so adb's error output is drained by our single reader.
+            proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
             process = proc
             BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
                 while (running.get()) {
-                    val line = reader.readLine() ?: break
+                    val line = reader.readLine() ?: break // null = process ended (device gone)
                     if (line.isNotBlank()) onLine(line)
                 }
             }
@@ -62,33 +69,40 @@ class LogcatReader(
             if (running.get()) onError(t.message ?: t.toString())
         } finally {
             running.set(false)
+            process = null
+            runCatching { proc?.destroy() }
+            runCatching { onStopped() }
         }
     }
 
-    /** Empties the device log buffer. Safe to call whether or not capture is running. */
+    /** Empties the device log buffer asynchronously (never blocks the caller). */
     fun clearBuffer() {
-        resolveAdb()?.let { clearBuffer(it) }
+        val adb = resolveAdb() ?: return
+        Thread({ clearBuffer(adb) }, "logpose-clear").apply { isDaemon = true }.start()
     }
 
     private fun clearBuffer(adb: String) {
         runCatching {
-            ProcessBuilder(baseCmd(adb) + listOf("logcat", "-c"))
+            val p = ProcessBuilder(baseCmd(adb) + listOf("logcat", "-c"))
                 .redirectErrorStream(true)
                 .start()
-                .waitFor()
+            // Bound it — never wait forever on a stalled adb.
+            if (!p.waitFor(2, TimeUnit.SECONDS)) p.destroyForcibly()
         }
     }
 
+    /** Stops streaming. Returns immediately; the process is reaped on a daemon thread. */
     fun stop() {
         running.set(false)
-        process?.let { p ->
-            p.destroy()
-            // Give it a moment to exit, then force, so the reader thread unblocks and
-            // the process is reaped rather than left as a zombie.
-            if (!p.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS)) p.destroyForcibly()
-        }
+        val p = process
         process = null
         thread = null
+        if (p != null) {
+            Thread({
+                p.destroy()
+                if (!p.waitFor(800, TimeUnit.MILLISECONDS)) p.destroyForcibly()
+            }, "logpose-stop").apply { isDaemon = true }.start()
+        }
     }
 
     fun isRunning(): Boolean = running.get()

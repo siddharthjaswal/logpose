@@ -155,6 +155,8 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         reader.start(
             onLine = { line -> parser.accept(line)?.let { store.add(it) } },
             onError = { msg -> refreshAlarm.addRequest({ detail.showError("⚠ LogPose capture error:\n\n$msg") }, 0) },
+            // Reader ended (device disconnected / adb error) — reset capture state on the EDT.
+            onStopped = { refreshAlarm.addRequest({ statusDot.capturing = false }, 0) },
         )
         scheduleRefresh()
     }

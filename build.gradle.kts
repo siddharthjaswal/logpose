@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.siddharthjaswal"
-version = "0.9.5"
+version = "0.9.7"
 
 repositories {
     mavenCentral()
@@ -51,10 +51,12 @@ intellijPlatform {
         token = providers.environmentVariable("PUBLISH_TOKEN")
     }
 
-    // `verifyPlugin` runs the JetBrains Plugin Verifier against compatible IDEs.
+    // `verifyPlugin` runs the JetBrains Plugin Verifier against specific, released IDEs.
+    // (recommended() can resolve to an unreleased build that 404s on download.)
     pluginVerification {
         ides {
-            recommended()
+            ide("2024.1")
+            ide("2024.3")
         }
     }
 }
