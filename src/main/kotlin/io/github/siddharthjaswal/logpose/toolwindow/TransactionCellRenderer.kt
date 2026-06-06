@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.ui.ColoredListCellRenderer
+import com.intellij.ui.Gray
 import com.intellij.ui.JBColor
 import com.intellij.ui.SimpleTextAttributes
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -22,8 +23,6 @@ class TransactionCellRenderer : ColoredListCellRenderer<Transaction>() {
     ) {
         val muted = MutedEndpoints.isMuted(value)
 
-        if (muted) append("🔇 ", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
-
         append(
             value.request.method.padEnd(6),
             attr(methodColor(value.request.method), muted, bold = true),
@@ -35,13 +34,15 @@ class TransactionCellRenderer : ColoredListCellRenderer<Transaction>() {
         append("  ")
 
         val label = value.request.path.ifBlank { value.request.url }
-        append(label, if (muted) SimpleTextAttributes.GRAYED_ATTRIBUTES else SimpleTextAttributes.REGULAR_ATTRIBUTES)
+        append(label, if (muted) FAINT else SimpleTextAttributes.REGULAR_ATTRIBUTES)
 
-        value.durationMillis?.let { append("   ${it}ms", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
+        value.durationMillis?.let {
+            append("   ${it}ms", if (muted) FAINT else SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+        }
     }
 
     private fun attr(color: Color, muted: Boolean, bold: Boolean): SimpleTextAttributes {
-        if (muted) return SimpleTextAttributes.GRAYED_ATTRIBUTES
+        if (muted) return FAINT
         val style = if (bold) SimpleTextAttributes.STYLE_BOLD else SimpleTextAttributes.STYLE_PLAIN
         return SimpleTextAttributes(style, color)
     }
@@ -61,5 +62,13 @@ class TransactionCellRenderer : ColoredListCellRenderer<Transaction>() {
         code in 300..399 -> JBColor.BLUE
         code in 400..499 -> JBColor(0xEF6C00, 0xCC7832)
         else -> JBColor.RED
+    }
+
+    companion object {
+        // Much fainter than GRAYED_ATTRIBUTES — muted rows recede well into the background.
+        private val FAINT = SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_PLAIN,
+            JBColor(Gray._190, Gray._75),
+        )
     }
 }

@@ -21,10 +21,13 @@ import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.TransactionStore
+import com.intellij.openapi.ide.CopyPasteManager
+import io.github.siddharthjaswal.logpose.ui.CurlBuilder
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.TransactionDetailView
 import java.awt.BorderLayout
 import java.awt.Component
+import java.awt.datatransfer.StringSelection
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.util.concurrent.atomic.AtomicBoolean
@@ -150,6 +153,13 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
             val muted = MutedEndpoints.isMuted(tx)
 
             JPopupMenu().apply {
+                add(JMenuItem("Copy as cURL").apply {
+                    addActionListener { copyToClipboard(CurlBuilder.build(tx)) }
+                })
+                add(JMenuItem("Copy URL").apply {
+                    addActionListener { copyToClipboard(tx.request.url) }
+                })
+                addSeparator()
                 add(JMenuItem(if (muted) "Unmute  $key" else "Mute  $key").apply {
                     addActionListener { MutedEndpoints.toggle(tx); list.repaint() }
                 })
@@ -162,6 +172,9 @@ class LogPosePanel : JPanel(BorderLayout()), Disposable {
             }
         }
     }
+
+    private fun copyToClipboard(text: String) =
+        CopyPasteManager.getInstance().setContents(StringSelection(text))
 
     private inner class CaptureToggleAction :
         AnAction("Capture", "Start/stop reading logcat", AllIcons.Actions.Execute), Toggleable {
