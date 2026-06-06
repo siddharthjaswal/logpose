@@ -66,7 +66,28 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
 
         list.isOpaque = true
         list.background = Theme.bg0
-        list.emptyText.text = "No requests yet — press ▶ to capture, then use your app"
+        list.emptyText.apply {
+            text = "No requests captured yet"
+            appendLine(
+                "1.  Press ▶ above to start capturing",
+                com.intellij.ui.SimpleTextAttributes.GRAYED_ATTRIBUTES, null,
+            )
+            appendLine(
+                "2.  Add LogPoseInterceptor to your app's OkHttpClient (debug/staging)",
+                com.intellij.ui.SimpleTextAttributes.GRAYED_ATTRIBUTES, null,
+            )
+            appendLine(
+                "     without it, there's nothing on the LogPose tag to read",
+                com.intellij.ui.SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES, null,
+            )
+            appendLine(
+                "Setup guide →",
+                com.intellij.ui.SimpleTextAttributes.LINK_PLAIN_ATTRIBUTES,
+                java.awt.event.ActionListener {
+                    com.intellij.ide.BrowserUtil.browse("https://github.com/siddharthjaswal/logpose#getting-started")
+                },
+            )
+        }
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
         list.cellRenderer = renderer
         list.addListSelectionListener {
