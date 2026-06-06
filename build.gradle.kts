@@ -29,7 +29,10 @@ intellijPlatform {
     pluginConfiguration {
         ideaVersion {
             sinceBuild = "233"
-            // Leave untilBuild unset so the plugin keeps working with future IDE builds.
+            // Remove the upper bound. The Gradle plugin otherwise auto-caps until-build
+            // to the platform we compile against (243.*), which would refuse to load on
+            // newer IDEs like Android Studio 2026.1 (build 261).
+            untilBuild = provider { null }
         }
     }
 }
