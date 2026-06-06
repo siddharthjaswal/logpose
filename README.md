@@ -8,6 +8,14 @@ at the HTTP request you care about.
 
 ---
 
+## Demo
+
+![LogPose demo](docs/demo.gif)
+
+<!-- Drop the recording at docs/demo.gif (or update the path above). -->
+
+---
+
 ## Features
 
 - **Modern "Studio" tool window** — a master/detail view with color-coded method/status
@@ -18,9 +26,8 @@ at the HTTP request you care about.
   Raw** (raw is syntax-highlighted too).
 - **Find in body** — `⌘F` / `Ctrl+F` inside either card highlights all matches with
   next/prev navigation and an `n/total` counter.
-- **Chip filter** — type a term, press Space/Enter to pin it as a removable chip;
-  Backspace on an empty field removes the last. Grammar: `/orders status:5xx method:POST
-  -heartbeat`.
+- **One-click filter bar** — a compact URL search box plus Method (GET/POST/PUT/DELETE)
+  and Status (2xx–5xx) toggles, and a **Hide noise** switch. No typing required.
 - **Mute noisy endpoints** — right-click → mute; muted calls stay visible but fade into
   the background (numeric path segments are normalized, so one mute covers all ids).
   Persists across restarts.
@@ -124,32 +131,73 @@ for the canonical schema.
 
 ## Filtering
 
-The filter box is a chip input (Space/Enter pins a term, Backspace removes the last). It
-accepts space-separated terms (AND-ed):
+Filtering is a one-line, zero-typing bar (all conditions AND-ed):
 
-| Term | Matches |
+| Control | Effect |
 |---|---|
-| `/orders` | URL contains `/orders` (case-insensitive) |
-| `status:5xx` | response code class (also `2xx`, `3xx`, `4xx`) |
-| `status:404` | exact response code |
-| `method:POST` | HTTP method |
-| `-heartbeat` | **excludes** URLs containing `heartbeat` |
+| **Search box** | URL/path contains the text (case-insensitive) |
+| **METHOD** GET / POST / PUT / DELETE | multi-select; show only the picked methods |
+| **STATUS** 2xx / 3xx / 4xx / 5xx | multi-select; show only the picked status classes |
+| **Hide noise** switch | hide muted/noise endpoints entirely (right-click a row → mute to mark it noise) |
 
-## Install (development)
+## Getting started
+
+LogPose has two halves and you need both: the **IDE plugin** (reads logcat) and a
+one-line **OkHttp interceptor** in your app (emits the structured transactions the
+plugin reads).
+
+### 1. Install the plugin
+
+**From a release zip** (until it's on the JetBrains Marketplace):
+
+1. Download `logpose-<version>.zip` from [Releases](https://github.com/siddharthjaswal/logpose/releases).
+2. Android Studio / IntelliJ → **Settings → Plugins → ⚙️ → Install Plugin from Disk…**
+3. Pick the zip and **restart**. A **LogPose** tool window appears at the bottom.
+
+**Or build it yourself:**
 
 ```bash
 git clone https://github.com/siddharthjaswal/logpose.git
 cd logpose
-./gradlew runIde      # launches a sandbox IDE with the plugin loaded
+./gradlew buildPlugin   # zip in build/distributions/
+# or: ./gradlew runIde  # launch a sandbox IDE with the plugin loaded
 ```
 
-Then open the **LogPose** tool window (bottom), hit **Start Capture**, and run your app.
+### 2. Add the interceptor to your app
 
-To build a distributable zip:
+> ⚠️ Not yet published to Maven Central / JitPack (see [Road to 1.0](#road-to-10--production-checklist)).
+> For now, publish it locally and depend on it:
+> `./gradlew -p logpose-android publishToMavenLocal` then add `mavenLocal()`.
+> Once published it'll be a single Gradle line, no `mavenLocal`.
 
-```bash
-./gradlew buildPlugin   # output in build/distributions/
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    debugImplementation("io.github.siddharthjaswal:logpose-android:<version>")
+}
 ```
+
+```kotlin
+val client = OkHttpClient.Builder()
+    // Add LAST so LogPose sees the final request and the decoded response.
+    .addInterceptor(LogPoseInterceptor(LogPoseConfig(enabled = BuildConfig.DEBUG)))
+    .build()
+```
+
+`enabled = BuildConfig.DEBUG` keeps it inert in release. See
+[`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
+header redaction, custom tag, custom transport).
+
+### 3. Capture
+
+1. Open the **LogPose** tool window (bottom edge).
+2. Click **▶** to start capturing — it clears the device log buffer and tails new traffic.
+3. Run your app on a device/emulator. Transactions stream in live.
+4. Filter by method/status/URL, click a row to inspect the JSON, **Copy as cURL**, mute
+   noisy endpoints, etc.
+
+> Multiple devices attached? LogPose currently uses the default `adb` device — a picker
+> is on the roadmap.
 
 ## Repository layout
 
@@ -163,24 +211,54 @@ The two halves talk over the [wire format](#the-wire-format) above — the inter
 emits it, the plugin reads it. See [`logpose-android/README.md`](logpose-android/README.md)
 for the device-side setup.
 
-## Roadmap
+## What works today
 
-- [x] Plugin: tool window, logcat capture, master/detail, filtering, chunk reassembly
-- [x] **`logpose-android`**: drop-in OkHttp interceptor (atomic transaction, multipart
-      metadata, gzip, chunking) — the device side of the contract
-- [x] Collapsible JSON **tree** viewer (+ syntax-colored Raw mode)
-- [x] **Copy as cURL** (hover + context menu), section/transaction JSON copy
-- [x] Endpoint **muting** and a **chip-based** filter
-- [x] **Find** within request/response bodies
-- [x] Modern "Studio" card UI
-- [ ] Per-device picker when multiple devices are attached
-- [ ] Optional socket transport (`adb reverse`) to bypass logcat entirely
-- [ ] Persist/replay captured sessions
-- [ ] Publish to JetBrains Marketplace + Maven Central / JitPack
+- [x] Plugin: tool window, logcat capture, master/detail, chunk reassembly
+- [x] **`logpose-android`** interceptor: atomic transaction, multipart metadata, gzip,
+      header redaction, chunking
+- [x] Collapsible JSON tree + real JSON editor (folding) in Raw mode
+- [x] Copy as cURL / JSON, endpoint muting, one-click filter bar, find-in-body
+- [x] Modern "Studio" card UI + custom icon
+
+## Road to 1.0 — production checklist
+
+What's left to make this something the world can install and trust:
+
+### Distribution (the big ones)
+
+- [ ] **Publish the interceptor** to a public repo so consumers don't need `mavenLocal`:
+  - **JitPack** (fastest): tag a release → `com.github.siddharthjaswal:logpose:<tag>`.
+    Needs a `jitpack.yml` that builds the `logpose-android` subproject.
+  - or **Maven Central** (more setup): Sonatype account, GPG signing, full POM metadata.
+- [ ] **Publish the plugin** to the **JetBrains Marketplace**: create a vendor account,
+      fill listing (description, screenshots, the demo GIF), run `./gradlew publishPlugin`
+      with a Marketplace token.
+
+### Quality & trust
+
+- [ ] **CI** (GitHub Actions): build + `verifyPlugin` (JetBrains Plugin Verifier across
+      target IDE versions) on every PR; publish on tag.
+- [ ] **Tests** for the pure logic: `TransactionParser` (incl. chunk reassembly),
+      `CurlBuilder` quoting, `FilterState` matching, `MutedEndpoints.normalize`, body
+      capture (multipart/binary/gzip/truncation).
+- [ ] **Plugin compatibility**: verify against the IDE range we claim (`since-build 233`,
+      no upper bound) and the bundled JSON module.
+- [ ] **`CHANGELOG.md`** + `<change-notes>` in `plugin.xml`, semantic versioning.
+- [ ] **Security/privacy note**: LogPose runs `adb logcat` and reads HTTP bodies on
+      *debug/staging* builds only; headers like `Authorization` are redacted on-device.
+      Document this clearly.
+
+### Polish / nice-to-have
+
+- [ ] Per-device picker when multiple devices/emulators are attached.
+- [ ] Settings panel (tag, body limits, default filters) instead of code-only config.
+- [ ] Optional socket transport (`adb reverse`) to bypass logcat truncation entirely.
+- [ ] Persist/replay captured sessions; export HAR.
+- [ ] Zero-setup "raw OkHttp" capture mode (parse stock `HttpLoggingInterceptor` output).
 
 ## Contributing
 
-Issues and PRs welcome. This is early — the wire format may still change before 1.0.
+Issues and PRs welcome. This is pre-1.0 — the wire format may still change.
 
 ## License
 
