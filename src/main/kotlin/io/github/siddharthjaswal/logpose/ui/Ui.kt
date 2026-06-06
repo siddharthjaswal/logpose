@@ -213,7 +213,7 @@ class PillButton(text: String, private val filled: Boolean) : JButton(text) {
         isBorderPainted = false
         isOpaque = false
         cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        border = JBUI.Borders.empty(6, 14)
+        border = JBUI.Borders.empty(4, 12)
         foreground = if (filled) Theme.onAccent else Theme.text
         font = JBUI.Fonts.label(12f).asBold()
     }
@@ -236,7 +236,7 @@ class PillButton(text: String, private val filled: Boolean) : JButton(text) {
 
     override fun getPreferredSize(): Dimension {
         val d = super.getPreferredSize()
-        return Dimension(d.width, maxOf(d.height, JBUI.scale(28)))
+        return Dimension(d.width, maxOf(d.height, JBUI.scale(24)))
     }
 }
 

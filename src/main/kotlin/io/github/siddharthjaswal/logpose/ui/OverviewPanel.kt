@@ -38,7 +38,10 @@ class OverviewPanel : CardPanel(null) {
         font = JBUI.Fonts.create("JetBrains Mono", 12)
         border = JBUI.Borders.empty(2, 0)
     }
-    private val chips = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(6))).apply { isOpaque = false }
+    private val chips = JPanel().apply {
+        isOpaque = false
+        layout = BoxLayout(this, BoxLayout.X_AXIS)
+    }
 
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -93,17 +96,13 @@ class OverviewPanel : CardPanel(null) {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             border = JBUI.Borders.empty(12, 14)
 
-            add(row(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0)).apply {
-                isOpaque = false; add(statusPill); add(methodPill)
-            }, fill = false))
+            add(row(hbox(statusPill, Box.createHorizontalStrut(JBUI.scale(8)), methodPill), fill = false))
             add(vGap(8))
             add(row(url, fill = true))
             add(vGap(8))
             add(row(chips, fill = false))
             add(vGap(12))
-            add(row(JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(10), 0)).apply {
-                isOpaque = false; add(curlBtn); add(jsonBtn)
-            }, fill = false))
+            add(row(hbox(curlBtn, Box.createHorizontalStrut(JBUI.scale(10)), jsonBtn), fill = false))
             add(Box.createVerticalGlue())
         }
         return inner
@@ -132,11 +131,17 @@ class OverviewPanel : CardPanel(null) {
         url.text = tx.request.url
 
         chips.removeAll()
-        tx.durationMillis?.let { chips.add(StatChip("duration", "$it ms")) }
-        tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { chips.add(StatChip("size", Theme.humanSize(it))) }
-        if (tx.startedAtMillis > 0) chips.add(StatChip("started", timeFmt.format(Date(tx.startedAtMillis))))
-        if (tx.request.host.isNotBlank()) chips.add(StatChip("host", tx.request.host.substringBefore('.')))
-        chips.add(StatChip("id", tx.id))
+        val items = buildList {
+            tx.durationMillis?.let { add(StatChip("duration", "$it ms")) }
+            tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { add(StatChip("size", Theme.humanSize(it))) }
+            if (tx.startedAtMillis > 0) add(StatChip("started", timeFmt.format(Date(tx.startedAtMillis))))
+            if (tx.request.host.isNotBlank()) add(StatChip("host", tx.request.host.substringBefore('.')))
+            add(StatChip("id", tx.id))
+        }
+        items.forEachIndexed { i, c ->
+            if (i > 0) chips.add(Box.createHorizontalStrut(JBUI.scale(8)))
+            chips.add(c)
+        }
         chips.revalidate(); chips.repaint()
     }
 
@@ -157,6 +162,12 @@ class OverviewPanel : CardPanel(null) {
             alignmentX = LEFT_ALIGNMENT
             add(c, if (fill) BorderLayout.CENTER else BorderLayout.WEST)
         }
+
+    private fun hbox(vararg comps: Component): JPanel = JPanel().apply {
+        isOpaque = false
+        layout = BoxLayout(this, BoxLayout.X_AXIS)
+        comps.forEach { add(it) }
+    }
 
     private fun vGap(px: Int) = Box.createVerticalStrut(JBUI.scale(px))
 }
