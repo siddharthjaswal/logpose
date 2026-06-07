@@ -234,35 +234,30 @@ for the device-side setup.
       header redaction, chunking
 - [x] Collapsible JSON tree + real JSON editor (folding) in Raw mode
 - [x] Copy as cURL / JSON, endpoint muting, one-click filter bar, find-in-body
-- [x] Modern "Studio" card UI + custom icon
+- [x] Live in-flight requests — appear on hit, ticking timer + loader until the response
+- [x] Modern "Studio" card UI, custom icon, light & dark theme
 
 ## Road to 1.0 — production checklist
 
-What's left to make this something the world can install and trust:
+### Distribution
 
-### Distribution (the big ones)
-
-- [ ] **Publish the interceptor** to a public repo so consumers don't need `mavenLocal`:
-  - **JitPack** (fastest): tag a release → `com.github.siddharthjaswal:logpose:<tag>`.
-    Needs a `jitpack.yml` that builds the `logpose-android` subproject.
-  - or **Maven Central** (more setup): Sonatype account, GPG signing, full POM metadata.
-- [ ] **Publish the plugin** to the **JetBrains Marketplace**: create a vendor account,
-      fill listing (description, screenshots, the demo GIF), run `./gradlew publishPlugin`
-      with a Marketplace token.
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal:logpose:v0.9.8`
+      (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
+- [x] **Plugin submitted** to the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
+      *(in review)*; signing + publishing wired via GitHub Actions (`RELEASING.md`).
+- [ ] Maven Central for the interceptor (optional, more "official" than JitPack).
 
 ### Quality & trust
 
-- [ ] **CI** (GitHub Actions): build + `verifyPlugin` (JetBrains Plugin Verifier across
-      target IDE versions) on every PR; publish on tag.
+- [x] **CI** (GitHub Actions): `buildPlugin` + `verifyPlugin` on push/PR; GitHub Release on tag.
+- [x] **Plugin compatibility** verified (Plugin Verifier vs 2024.1 / 2024.3; `since-build 233`,
+      no upper bound; bundled JSON module).
+- [x] **`CHANGELOG.md`** + `<change-notes>` in `plugin.xml`; semantic versioning.
+- [x] **Security/privacy**: documented — runs on *debug/staging* only, `Authorization` &
+      cookies redacted on-device, bodies never leave logcat.
 - [ ] **Tests** for the pure logic: `TransactionParser` (incl. chunk reassembly),
       `CurlBuilder` quoting, `FilterState` matching, `MutedEndpoints.normalize`, body
-      capture (multipart/binary/gzip/truncation).
-- [ ] **Plugin compatibility**: verify against the IDE range we claim (`since-build 233`,
-      no upper bound) and the bundled JSON module.
-- [ ] **`CHANGELOG.md`** + `<change-notes>` in `plugin.xml`, semantic versioning.
-- [ ] **Security/privacy note**: LogPose runs `adb logcat` and reads HTTP bodies on
-      *debug/staging* builds only; headers like `Authorization` are redacted on-device.
-      Document this clearly.
+      capture (multipart/binary/gzip/truncation). *(the main remaining item)*
 
 ### Polish / nice-to-have
 
