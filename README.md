@@ -169,15 +169,17 @@ cd logpose
 
 ### 2. Add the interceptor to your app
 
-> ⚠️ Not yet published to Maven Central / JitPack (see [Road to 1.0](#road-to-10--production-checklist)).
-> For now, publish it locally and depend on it:
-> `./gradlew -p logpose-android publishToMavenLocal` then add `mavenLocal()`.
-> Once published it'll be a single Gradle line, no `mavenLocal`.
+The interceptor is distributed via [JitPack](https://jitpack.io/#siddharthjaswal/logpose):
 
 ```kotlin
+// settings.gradle.kts
+dependencyResolutionManagement {
+    repositories { maven("https://jitpack.io") }
+}
+
 // app/build.gradle.kts
 dependencies {
-    debugImplementation("io.github.siddharthjaswal:logpose-android:<version>")
+    debugImplementation("com.github.siddharthjaswal:logpose:v0.9.8")
 }
 ```
 
