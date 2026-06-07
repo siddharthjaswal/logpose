@@ -5,6 +5,8 @@ import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.TagLabel
 import io.github.siddharthjaswal.logpose.ui.Theme
+import io.github.siddharthjaswal.logpose.ui.isPending
+import io.github.siddharthjaswal.logpose.ui.spinnerChar
 import io.github.siddharthjaswal.logpose.ui.statusText
 import java.awt.BorderLayout
 import java.awt.Color
@@ -34,6 +36,12 @@ import javax.swing.SwingConstants
 class TransactionListRenderer : ListCellRenderer<Transaction> {
 
     var hoveredIndex: Int = -1
+
+    /** Animation frame for the in-flight spinner; bumped by the panel's timer. */
+    var spinnerFrame: Int = 0
+
+    /** Live wall-clock elapsed (ms) for a pending transaction, or null if not pending. */
+    var elapsedProvider: (Transaction) -> Long? = { null }
 
     private val methodLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
     private val statusTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
@@ -91,23 +99,38 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         methodLabel.text = value.request.method
         methodLabel.foreground = shade(mColor)
 
+        val pending = value.isPending()
         val code = value.response?.code
-        val sColor = Theme.statusColor(code, value.error)
-        val sBg = if (muted) Theme.tint(sColor, 14) else Theme.statusTint(code, value.error)
-        statusTag.set(value.statusText(), shade(sColor), sBg)
+        if (pending) {
+            statusTag.set(spinnerChar(spinnerFrame).toString(), Theme.accent, Theme.tint(Theme.accent, 22))
+        } else {
+            val sColor = Theme.statusColor(code, value.error)
+            val sBg = if (muted) Theme.tint(sColor, 14) else Theme.statusTint(code, value.error)
+            statusTag.set(value.statusText(), shade(sColor), sBg)
+        }
 
         path.text = value.request.path.ifBlank { value.request.url }
         path.foreground = shade(Theme.text)
 
-        if (hovered && !muted) {
-            sizeLabel.text = "⧉ cURL"
-            sizeLabel.foreground = Theme.accent
-        } else {
-            sizeLabel.text = value.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { Theme.humanSize(it) } ?: ""
-            sizeLabel.foreground = shade(Theme.textMuted)
+        when {
+            pending -> {
+                sizeLabel.text = ""
+                duration.text = elapsedProvider(value)?.let { "${it}ms" } ?: "…"
+                duration.foreground = Theme.accent
+            }
+            hovered && !muted -> {
+                sizeLabel.text = "⧉ cURL"
+                sizeLabel.foreground = Theme.accent
+                duration.text = value.durationMillis?.let { "${it}ms" } ?: ""
+                duration.foreground = shade(Theme.textMuted)
+            }
+            else -> {
+                sizeLabel.text = value.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { Theme.humanSize(it) } ?: ""
+                sizeLabel.foreground = shade(Theme.textMuted)
+                duration.text = value.durationMillis?.let { "${it}ms" } ?: ""
+                duration.foreground = shade(Theme.textMuted)
+            }
         }
-        duration.text = value.durationMillis?.let { "${it}ms" } ?: ""
-        duration.foreground = shade(Theme.textMuted)
 
         return row
     }

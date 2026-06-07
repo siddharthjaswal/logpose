@@ -17,10 +17,14 @@ class TransactionStore(private val capacity: Int = 2_000) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Transaction>): Boolean =
             size > capacity
     }
+    // Host-clock timestamp when each id was first seen — used for the live timer, since
+    // the device's startedAtMillis can't be diffed against the host clock (skew).
+    private val firstSeen = HashMap<String, Long>()
     private val listeners = CopyOnWriteArrayList<() -> Unit>()
 
     @Synchronized
     fun add(tx: Transaction) {
+        firstSeen.getOrPut(tx.id) { System.currentTimeMillis() }
         all[tx.id] = tx
         listeners.forEach { it() }
     }
@@ -28,11 +32,17 @@ class TransactionStore(private val capacity: Int = 2_000) {
     @Synchronized
     fun clear() {
         all.clear()
+        firstSeen.clear()
         listeners.forEach { it() }
     }
 
     @Synchronized
     fun snapshot(): List<Transaction> = all.values.toList()
+
+    /** Wall-clock millis since this id was first seen by the plugin (for in-flight timing). */
+    @Synchronized
+    fun elapsedMillis(id: String): Long =
+        firstSeen[id]?.let { System.currentTimeMillis() - it } ?: 0L
 
     fun addListener(l: () -> Unit) { listeners.add(l) }
 

@@ -195,6 +195,11 @@ open class CardPanel(layout: java.awt.LayoutManager? = java.awt.BorderLayout()) 
 
 /** A small key/value "stat" card used in the overview hero. */
 class StatChip(caption: String, value: String, tip: String? = null) : CardPanel(java.awt.GridLayout(2, 1, 0, 1)) {
+    private val valueLabel = JLabel(value).apply {
+        foreground = Theme.text
+        font = JBUI.Fonts.create("JetBrains Mono", 14).asBold()
+    }
+
     init {
         arc = 8
         fill = Theme.bg2
@@ -202,11 +207,11 @@ class StatChip(caption: String, value: String, tip: String? = null) : CardPanel(
         border = JBUI.Borders.empty(6, 10)
         tip?.let { toolTipText = it }
         add(JLabel(caption.uppercase()).apply { foreground = Theme.textMuted; font = JBUI.Fonts.label(9.5f) })
-        add(JLabel(value).apply {
-            foreground = Theme.text
-            font = JBUI.Fonts.create("JetBrains Mono", 14).asBold()
-        })
+        add(valueLabel)
     }
+
+    /** Update the value in place (used for the live duration of a pending request). */
+    fun value(v: String) { valueLabel.text = v }
 }
 
 /** Rounded action button — filled (accent) or ghost (outlined). */
@@ -282,3 +287,11 @@ class StatusDot : JComponent() {
 }
 
 fun Transaction.statusText(): String = response?.code?.toString() ?: if (error != null) "ERR" else "···"
+
+/** True while the request is in flight (request emitted, no response/error yet). */
+fun Transaction.isPending(): Boolean = response == null && error == null
+
+private const val SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+/** A braille spinner glyph for the given animation frame. */
+fun spinnerChar(frame: Int): Char = SPINNER[((frame % SPINNER.length) + SPINNER.length) % SPINNER.length]

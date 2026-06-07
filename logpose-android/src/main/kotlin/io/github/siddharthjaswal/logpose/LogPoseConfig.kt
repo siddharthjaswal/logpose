@@ -19,6 +19,8 @@ data class LogPoseConfig(
     val enabled: Boolean = true,
     val maxBodyBytes: Long = 250_000L,
     val maxLineChars: Int = 3500,
+    /** Emit a "pending" event when a request starts (lets the IDE show it live). */
+    val emitPending: Boolean = true,
     val redactHeaders: Set<String> = setOf(
         "Authorization",
         "Cookie",

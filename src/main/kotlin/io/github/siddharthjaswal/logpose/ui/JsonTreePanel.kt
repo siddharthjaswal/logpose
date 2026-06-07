@@ -226,6 +226,11 @@ class JsonTreePanel(
         if (rawVisible) ensureRaw()
     }
 
+    /** Cheap update of the empty-state text only (for an animated loading spinner). */
+    fun setLoadingText(text: String) {
+        tree.emptyText.text = text
+    }
+
     fun copyJson() {
         val text = element?.let { pretty.encodeToString(JsonElement.serializer(), it) } ?: return
         CopyPasteManager.getInstance().setContents(StringSelection(text))

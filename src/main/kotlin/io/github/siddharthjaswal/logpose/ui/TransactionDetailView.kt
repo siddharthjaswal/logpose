@@ -69,8 +69,20 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         }
         request.setStatus(tx.request.method)
         request.setElement(requestJson(tx))
-        response.setStatus(tx.response?.let { "${it.code} ${it.message}".trim() } ?: "—")
-        response.setElement(responseJson(tx))
+        if (tx.isPending()) {
+            response.setStatus("…")
+            response.showMessage("Waiting for response…")
+        } else {
+            response.setStatus(tx.response?.let { "${it.code} ${it.message}".trim() } ?: "—")
+            response.setElement(responseJson(tx))
+        }
+    }
+
+    /** Live update for an in-flight request — ticking duration + spinning loader. */
+    fun tick(elapsedMs: Long, frame: Int) {
+        if (current?.isPending() != true) return
+        overview.tick(elapsedMs, frame)
+        response.setLoadingText("${spinnerChar(frame)}  Waiting for response…   ${elapsedMs}ms")
     }
 
     fun showError(message: String) {

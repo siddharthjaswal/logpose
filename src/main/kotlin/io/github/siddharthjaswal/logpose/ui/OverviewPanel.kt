@@ -48,6 +48,9 @@ class OverviewPanel : CardPanel(null) {
     }
     private lateinit var headerComp: Component
 
+    private var pending = false
+    private var liveDurationChip: StatChip? = null
+
     init {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         border = JBUI.Borders.empty(0)
@@ -138,23 +141,33 @@ class OverviewPanel : CardPanel(null) {
             return
         }
 
+        pending = tx.isPending()
         val code = tx.response?.code
-        val sColor = Theme.statusColor(code, tx.error)
-        val label = when {
-            tx.error != null -> "ERR"
-            code != null -> "$code ${tx.response?.message?.ifBlank { reason(code) } ?: reason(code)}".trim()
-            else -> "pending"
+        if (pending) {
+            statusPill.set("${spinnerChar(0)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
+        } else {
+            val sColor = Theme.statusColor(code, tx.error)
+            val label = when {
+                tx.error != null -> "ERR"
+                code != null -> "$code ${tx.response?.message?.ifBlank { reason(code) } ?: reason(code)}".trim()
+                else -> "pending"
+            }
+            statusPill.set(label, sColor, Theme.statusTint(code, tx.error))
         }
-        statusPill.set(label, sColor, Theme.statusTint(code, tx.error))
         val mColor = Theme.methodColor(tx.request.method)
         methodPill.set(tx.request.method, mColor, Theme.bg2)
 
         url.text = tx.request.url
 
         chips.removeAll()
+        liveDurationChip = null
         val items = buildList {
-            tx.durationMillis?.let { add(StatChip("duration", "$it ms")) }
-            tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { add(StatChip("size", Theme.humanSize(it))) }
+            if (pending) {
+                StatChip("duration", "0 ms").also { liveDurationChip = it; add(it) }
+            } else {
+                tx.durationMillis?.let { add(StatChip("duration", "$it ms")) }
+                tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { add(StatChip("size", Theme.humanSize(it))) }
+            }
             if (tx.startedAtMillis > 0) add(StatChip("started", timeFmt.format(Date(tx.startedAtMillis))))
             if (tx.request.host.isNotBlank()) add(StatChip("host", tx.request.host.substringBefore('.')))
             // Prefer a server trace/request id (useful for backend log lookup) over the
@@ -168,6 +181,13 @@ class OverviewPanel : CardPanel(null) {
             chips.add(c)
         }
         chips.revalidate(); chips.repaint()
+    }
+
+    /** Live update while a request is in flight: ticking duration + spinning status. */
+    fun tick(elapsedMs: Long, frame: Int) {
+        if (!pending) return
+        liveDurationChip?.value("$elapsedMs ms")
+        statusPill.set("${spinnerChar(frame)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
     }
 
     /** Finds a server-side trace/request id in response (then request) headers. */

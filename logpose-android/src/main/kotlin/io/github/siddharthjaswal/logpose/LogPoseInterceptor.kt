@@ -50,6 +50,13 @@ class LogPoseInterceptor @JvmOverloads constructor(
             body = runCatching { BodyCapture.captureRequest(request, config) }.getOrNull(),
         )
 
+        // Emit a "pending" event (request only, no response) the instant the call starts,
+        // so the IDE can show the in-flight request with a live timer. The completed event
+        // below shares the same id and replaces it.
+        if (config.emitPending) {
+            emitter.emit(Transaction(id = id, startedAtMillis = startedAt, request = wireRequest))
+        }
+
         val response: Response = try {
             chain.proceed(request)
         } catch (e: IOException) {

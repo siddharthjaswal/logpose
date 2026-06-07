@@ -22,6 +22,7 @@ import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.TransactionStore
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
 import io.github.siddharthjaswal.logpose.ui.FilterBar
+import io.github.siddharthjaswal.logpose.ui.isPending
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.StatusDot
 import io.github.siddharthjaswal.logpose.ui.Theme
@@ -59,10 +60,19 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
     private val refreshScheduled = AtomicBoolean(false)
     private var suppressSelectionEvents = false
+    private var lastShown: Transaction? = null
+
+    // Drives the in-flight UI: ticking duration + spinner while any request is pending.
+    private val liveTimer = javax.swing.Timer(250) { onLiveTick() }
 
     init {
         isOpaque = true
         background = Theme.bg0
+
+        renderer.elapsedProvider = { tx ->
+            if (tx.isPending()) store.elapsedMillis(tx.id) else null
+        }
+        liveTimer.start()
 
         list.isOpaque = true
         list.background = Theme.bg0
@@ -91,7 +101,7 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
         list.cellRenderer = renderer
         list.addListSelectionListener {
-            if (!suppressSelectionEvents && !it.valueIsAdjusting) detail.show(list.selectedValue)
+            if (!suppressSelectionEvents && !it.valueIsAdjusting) showDetail(list.selectedValue)
         }
         val mouse = ListMouse()
         list.addMouseListener(mouse)
@@ -193,9 +203,29 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         } finally {
             suppressSelectionEvents = false
         }
+
+        // If the selected transaction's data changed (e.g. pending → completed), re-render
+        // the detail even though the selection index didn't change.
+        val sel = list.selectedValue
+        if (sel != lastShown) showDetail(sel)
+    }
+
+    private fun showDetail(tx: Transaction?) {
+        lastShown = tx
+        detail.show(tx)
+    }
+
+    private fun onLiveTick() {
+        renderer.spinnerFrame++
+        val model = list.model
+        val anyPending = (0 until model.size).any { model.getElementAt(it).isPending() }
+        if (anyPending) list.repaint()
+        val sel = list.selectedValue
+        if (sel != null && sel.isPending()) detail.tick(store.elapsedMillis(sel.id), renderer.spinnerFrame)
     }
 
     override fun dispose() {
+        liveTimer.stop()
         reader.stop()
         statusDot.dispose()
     }
