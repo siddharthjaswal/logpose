@@ -14,9 +14,19 @@ at the HTTP request you care about.
 
 ## Demo
 
-![LogPose demo](docs/demo.gif)
+![LogPose — capture, filter, inspect, and copy as cURL](docs/demo.gif)
 
-<!-- Drop the recording at docs/demo.gif (or update the path above). -->
+## Screenshots
+
+![Inspect — every request and response, fully structured](docs/screenshots/1-inspect.png)
+
+![Filter — drill to failures in a single click](docs/screenshots/2-filter.png)
+
+![Read — collapsible, syntax-highlighted JSON](docs/screenshots/3-json.png)
+
+![Reproduce — copy any call as cURL, paste and replay](docs/screenshots/4-curl.png)
+
+![Focus — mute the noise, keep the signal](docs/screenshots/5-focus.png)
 
 ---
 
