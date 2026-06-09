@@ -36,6 +36,11 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     private var current: Transaction? = null
     private var currentMethod: String = "GET"
 
+    // Request headers (auth/api-key) are usually useful → shown by default. Response headers
+    // (CSP, security, caching) are mostly noise → hidden until the user clicks "Headers".
+    private var showReqHeaders = true
+    private var showRespHeaders = false
+
     init {
         isOpaque = true
         background = Theme.bg0
@@ -43,6 +48,9 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
 
         overview.onCopyCurl = { current?.let { copy(CurlBuilder.build(it), "cURL copied") } }
         overview.onCopyJson = { current?.let { copy(pretty.encodeToString(Transaction.serializer(), it), "Transaction JSON copied") } }
+
+        request.setHeadersToggle(showReqHeaders) { on -> showReqHeaders = on; current?.let { renderRequest(it) } }
+        response.setHeadersToggle(showRespHeaders) { on -> showRespHeaders = on; current?.let { renderResponse(it) } }
 
         val bottom = OnePixelSplitter(false, 0.5f).apply {
             firstComponent = pad(request, 160, 60)
@@ -58,17 +66,25 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         add(outer, BorderLayout.CENTER)
     }
 
-    fun show(tx: Transaction?) {
+    fun show(tx: Transaction?, dup: io.github.siddharthjaswal.logpose.analysis.DuplicateDetector.Mark? = null) {
         current = tx
         currentMethod = tx?.request?.method ?: "GET"
-        overview.show(tx)
+        overview.show(tx, dup)
         if (tx == null) {
             request.setElement(null); request.setStatus(null)
             response.setElement(null); response.setStatus(null)
             return
         }
+        renderRequest(tx)
+        renderResponse(tx)
+    }
+
+    private fun renderRequest(tx: Transaction) {
         request.setStatus(tx.request.method)
         request.setElement(requestJson(tx))
+    }
+
+    private fun renderResponse(tx: Transaction) {
         if (tx.isPending()) {
             response.setStatus("…")
             response.showMessage("Waiting for response…")
@@ -109,7 +125,7 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         put("url", tx.request.url)
         if (tx.request.host.isNotBlank()) put("host", tx.request.host)
         if (tx.request.path.isNotBlank()) put("path", tx.request.path)
-        put("headers", buildJsonObject { tx.request.headers.forEach { (k, v) -> put(k, v) } })
+        if (showReqHeaders) put("headers", buildJsonObject { tx.request.headers.forEach { (k, v) -> put(k, v) } })
         bodyElement(tx.request.body)?.let { put("body", it) }
     }
 
@@ -118,7 +134,7 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         return buildJsonObject {
             put("code", r.code)
             if (r.message.isNotBlank()) put("message", r.message)
-            put("headers", buildJsonObject { r.headers.forEach { (k, v) -> put(k, v) } })
+            if (showRespHeaders) put("headers", buildJsonObject { r.headers.forEach { (k, v) -> put(k, v) } })
             bodyElement(r.body)?.let { put("body", it) }
         }
     }

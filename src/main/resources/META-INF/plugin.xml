@@ -26,6 +26,14 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Duplicate-call detection</b> — repeated identical requests fired in a quick
+                burst are flagged with a <code>DUP ×N</code> tag; overlapping non-idempotent
+                calls (double-submits) are highlighted in red, with a warning in the overview
+                and a "Dupes" filter to isolate them.</li>
+            <li>Raw JSON now colors keys vs. values (matching the tree), shows line numbers,
+                and pre-collapses deeply-nested nodes on large payloads.</li>
+            <li>Response headers are hidden by default behind a "Headers" toggle (request
+                headers stay shown) — no more CSP noise drowning the body.</li>
             <li>Light-theme support (adapts to the IDE theme)</li>
             <li>Raw JSON mode is now a real editor with code folding</li>
             <li>One-click filter bar (method/status toggles, Hide-noise switch)</li>

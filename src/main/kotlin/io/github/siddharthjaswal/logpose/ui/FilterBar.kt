@@ -28,6 +28,11 @@ data class FilterState(
     val methods: Set<String> = emptySet(),
     val statusClasses: Set<Int> = emptySet(), // 2,3,4,5 -> 2xx..5xx
     val hideNoise: Boolean = false,
+    /**
+     * "Duplicates only" — applied by the panel (not [matches]), since duplicate membership
+     * is a property of the whole capture, not of a single transaction in isolation.
+     */
+    val duplicatesOnly: Boolean = false,
 ) {
     fun matches(tx: Transaction): Boolean {
         if (urlQuery.isNotBlank() && !tx.request.url.contains(urlQuery, ignoreCase = true)) return false
@@ -63,6 +68,7 @@ class FilterBar : JPanel() {
         5 to chip("5xx", Theme.statusColor(500, null), flat = false),
     )
     private val hideNoise = ToggleSwitch { onChange() }
+    private val dupChip = chip("⚠ Dupes", Theme.warn, flat = false)
     private val count = JBLabel().apply { foreground = Theme.textMuted }
 
     init {
@@ -87,6 +93,7 @@ class FilterBar : JPanel() {
         methods = methodChips.filterValues { it.selected }.keys,
         statusClasses = statusChips.filterValues { it.selected }.keys,
         hideNoise = hideNoise.on,
+        duplicatesOnly = dupChip.selected,
     )
 
     fun setCount(shown: Int, total: Int) { count.text = "$shown/$total" }
@@ -117,6 +124,8 @@ class FilterBar : JPanel() {
             strut(12), divider(), strut(12),
             hideNoise, strut(6),
             JBLabel("Hide noise").apply { foreground = Theme.text; font = JBUI.Fonts.label(12f).asBold() },
+            strut(12), divider(), strut(12),
+            dupChip,
         )
     }
 

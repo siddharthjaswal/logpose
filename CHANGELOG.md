@@ -6,7 +6,25 @@ format may still change.
 
 ## [Unreleased]
 
+## [0.9.9]
+
 ### Added
+- **Duplicate-call detection** — repeated identical requests fired within a short window are
+  flagged with a `DUP ×N` tag in the list. Severity is tiered: overlapping in-flight,
+  non-idempotent calls (the classic double-tap double-submit) show red; redundant completed
+  writes show amber; repeated GETs are a muted "info". The detail Overview shows a warning
+  banner explaining the likely cause, hovering a row gives a tooltip, and a "Dupes" filter
+  isolates them. Matching strips cache-buster query params, sorts params, and honours
+  `Idempotency-Key` headers to avoid false positives; genuine retries are not flagged as
+  double-submits.
+- Unit tests for the duplicate detector (window, severity, idempotency-key, retry, chains).
+- Raw JSON view: key/value color coding (purple keys, matching the tree), line numbers,
+  indent guides, and a default fold depth that pre-collapses deeply-nested nodes on large
+  payloads (short responses still open flat).
+- "Headers" show/hide toggle on the Request and Response cards. Response headers (CSP,
+  security, caching) are hidden by default to cut noise; request headers stay shown.
+
+### Added (earlier, previously unreleased)
 - Light-theme support — the tool window now adapts to the active IDE theme (was dark-only).
 - Real IntelliJ JSON editor in Raw mode: native code folding + IDE syntax highlighting.
 - One-click filter bar: URL search, Method/Status toggles, and a Hide-noise switch.

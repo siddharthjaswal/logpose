@@ -3,6 +3,7 @@ package io.github.siddharthjaswal.logpose.ui
 import com.intellij.codeInsight.folding.CodeFoldingManager
 import com.intellij.icons.AllIcons
 import com.intellij.json.JsonFileType
+import com.intellij.json.psi.JsonProperty
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
@@ -10,6 +11,7 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.ToggleAction
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.editor.ScrollType
 import com.intellij.openapi.editor.ex.EditorEx
@@ -19,6 +21,8 @@ import com.intellij.openapi.editor.markup.RangeHighlighter
 import com.intellij.openapi.editor.markup.TextAttributes
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
+import com.intellij.psi.PsiDocumentManager
+import com.intellij.psi.util.PsiTreeUtil
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.EditorTextField
 import com.intellij.ui.JBColor
@@ -75,18 +79,28 @@ class JsonTreePanel(
             e.settings.apply {
                 isFoldingOutlineShown = true
                 isAutoCodeFoldingEnabled = true
-                isLineNumbersShown = false
+                isLineNumbersShown = true
                 isLineMarkerAreaShown = false
-                isIndentGuidesShown = false
+                isIndentGuidesShown = true
                 additionalColumnsCount = 0
                 additionalLinesCount = 0
             }
+            // Give the gutter a little breathing room so the fold arrows + line numbers
+            // aren't cramped against the text.
+            e.gutterComponentEx.isPaintBackground = false
             return e
         }
     }
 
     private val titleLabel = JBLabel(title)
     private val statusLabel = JBLabel()
+
+    // Holds an optional "Headers ▾/▸" show-hide toggle, wired by the detail view.
+    private val togglesHolder = JPanel().apply {
+        isOpaque = false
+        layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
+    }
+    private var headersToggleAdded = false
     private val pretty = Json { prettyPrint = true }
     private var element: JsonElement? = null
 
@@ -105,6 +119,12 @@ class JsonTreePanel(
     private val findCount = JBLabel("")
     private val rawHighlighters = ArrayList<RangeHighlighter>()
     private val findAttrs = TextAttributes(null, Theme.findAll, null, null, Font.PLAIN)
+
+    // Recolours JSON property keys in Raw mode to match the Tree's purple key color. The
+    // lightweight editor only runs the lexer highlighter, which paints keys as plain strings
+    // (green) — so we override the key ranges via PSI to restore the key/value distinction.
+    private val rawKeyHighlighters = ArrayList<RangeHighlighter>()
+    private val keyAttrs = TextAttributes(Theme.jsonKey, null, null, null, Font.PLAIN)
     private val findBar = buildFindBar()
 
     init {
@@ -175,6 +195,7 @@ class JsonTreePanel(
             layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
             add(toggle)
             add(javax.swing.Box.createHorizontalStrut(JBUI.scale(10)))
+            add(togglesHolder)
             add(iconButton(AllIcons.Actions.Find, "Find (⌘F)") { showFind() })
             add(iconButton(AllIcons.Actions.Expandall, "Expand all") { expandAll() })
             add(iconButton(AllIcons.Actions.Collapseall, "Collapse all") { collapseAll() })
@@ -205,6 +226,35 @@ class JsonTreePanel(
     fun setStatus(text: String?) {
         statusLabel.text = text ?: ""
         titleColor()?.let { titleLabel.foreground = it }
+    }
+
+    /**
+     * Adds a "Headers ▾/▸" show-hide toggle to this card's header. Configured once; the
+     * detail view rebuilds the rendered JSON with or without the headers node on toggle.
+     */
+    fun setHeadersToggle(initiallyOn: Boolean, onToggle: (Boolean) -> Unit) {
+        if (headersToggleAdded) return
+        headersToggleAdded = true
+        var on = initiallyOn
+        val chip = javax.swing.JLabel().apply {
+            font = JBUI.Fonts.label(11f).asBold()
+            border = JBUI.Borders.empty(2, 8)
+            cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+            toolTipText = "Show / hide headers"
+        }
+        fun render() {
+            chip.text = if (on) "Headers ▾" else "Headers ▸"
+            chip.foreground = if (on) Theme.accent else Theme.textDim
+        }
+        render()
+        chip.addMouseListener(object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) {
+                on = !on; render(); onToggle(on)
+            }
+        })
+        togglesHolder.add(chip)
+        togglesHolder.add(javax.swing.Box.createHorizontalStrut(JBUI.scale(8)))
+        togglesHolder.revalidate()
     }
 
     fun setElement(el: JsonElement?) {
@@ -252,7 +302,48 @@ class JsonTreePanel(
             val ed = rawEditor.editor ?: return@invokeLater
             // The JSON editor's daemon folds automatically; nudge it in case it hasn't run.
             runCatching { CodeFoldingManager.getInstance(project).updateFoldRegions(ed) }
+            applyKeyColors(ed)
+            applyDefaultFolds(ed)
             if (findBar.isVisible) runFind(findField.text)
+        }
+    }
+
+    /** Paints every JSON property key with the tree's key color so keys ≠ values in Raw mode. */
+    private fun applyKeyColors(ed: Editor) {
+        rawKeyHighlighters.forEach { runCatching { ed.markupModel.removeHighlighter(it) } }
+        rawKeyHighlighters.clear()
+        val pdm = PsiDocumentManager.getInstance(project)
+        pdm.commitDocument(ed.document)
+        val psiFile = pdm.getPsiFile(ed.document) ?: return
+        PsiTreeUtil.findChildrenOfType(psiFile, JsonProperty::class.java).forEach { prop ->
+            val range = prop.nameElement.textRange
+            runCatching {
+                rawKeyHighlighters.add(
+                    ed.markupModel.addRangeHighlighter(
+                        range.startOffset, range.endOffset,
+                        HighlighterLayer.ADDITIONAL_SYNTAX, keyAttrs, HighlighterTargetArea.EXACT_RANGE,
+                    ),
+                )
+            }
+        }
+    }
+
+    /**
+     * Tidies large payloads on load: containers nested deeper than [DEFAULT_FOLD_DEPTH] start
+     * collapsed (to `{…}` / `[…]`), shallower ones stay open. A region's depth is how many
+     * other fold regions fully contain it. Skipped for small docs so short responses open flat.
+     */
+    private fun applyDefaultFolds(ed: Editor) {
+        if (ed.document.lineCount <= SMALL_DOC_LINES) return
+        val regions = ed.foldingModel.allFoldRegions
+        if (regions.isEmpty()) return
+        ed.foldingModel.runBatchFoldingOperation {
+            for (r in regions) {
+                val depth = regions.count { o ->
+                    o !== r && o.startOffset <= r.startOffset && o.endOffset >= r.endOffset
+                }
+                r.isExpanded = depth < DEFAULT_FOLD_DEPTH
+            }
         }
     }
 
@@ -501,5 +592,12 @@ class JsonTreePanel(
             val style = if (italic) SimpleTextAttributes.STYLE_ITALIC else SimpleTextAttributes.STYLE_PLAIN
             return SimpleTextAttributes(style, color)
         }
+    }
+
+    private companion object {
+        /** Containers nested at or beyond this depth start collapsed in Raw mode. */
+        const val DEFAULT_FOLD_DEPTH = 3
+        /** Documents at or below this many lines open fully expanded (no auto-fold). */
+        const val SMALL_DOC_LINES = 40
     }
 }

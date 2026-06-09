@@ -4,6 +4,7 @@ import com.intellij.icons.AllIcons
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.model.Transaction
 import java.awt.BorderLayout
 import java.awt.Component
@@ -36,6 +37,13 @@ class OverviewPanel : CardPanel(null) {
 
     private val statusPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
     private val methodPill = TagLabel().apply { font = JBUI.Fonts.label(12f).asBold() }
+    private val dupBanner = JBLabel().apply {
+        font = JBUI.Fonts.label(11.5f).asBold()
+        border = JBUI.Borders.empty(5, 10)
+        isOpaque = false
+    }
+    private lateinit var dupRow: JPanel
+    private var setBannerFill: (java.awt.Color?) -> Unit = {}
     private val url = JBTextArea(2, 10).apply {
         isEditable = false; isOpaque = false; lineWrap = true; wrapStyleWord = false
         foreground = Theme.jsonString
@@ -114,12 +122,36 @@ class OverviewPanel : CardPanel(null) {
             addActionListener { onCopyJson() }
         }
 
+        // A tinted, rounded warning strip shown only when the selected call is a duplicate.
+        var bannerFill: java.awt.Color? = null
+        val bannerHolder = object : JPanel(BorderLayout()) {
+            override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
+            override fun paintComponent(g: Graphics) {
+                bannerFill?.let {
+                    val g2 = g.create() as Graphics2D
+                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                    g2.color = it
+                    g2.fillRoundRect(0, 0, width - 1, height - 1, JBUI.scale(8), JBUI.scale(8))
+                    g2.dispose()
+                }
+                super.paintComponent(g)
+            }
+        }.apply {
+            isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
+            add(dupBanner, BorderLayout.WEST)
+        }
+        dupRow = bannerHolder
+        setBannerFill = { bannerFill = it }
+
         val inner = JPanel().apply {
             isOpaque = false
             alignmentX = LEFT_ALIGNMENT
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             border = JBUI.Borders.empty(12, 14)
 
+            add(bannerHolder)
+            add(vGap(8))
             add(row(hbox(statusPill, Box.createHorizontalStrut(JBUI.scale(8)), methodPill), fill = false))
             add(vGap(8))
             add(row(url, fill = true))
@@ -132,7 +164,8 @@ class OverviewPanel : CardPanel(null) {
         return inner
     }
 
-    fun show(tx: Transaction?) {
+    fun show(tx: Transaction?, dup: DuplicateDetector.Mark? = null) {
+        applyDuplicate(tx, dup)
         if (tx == null) {
             statusPill.set("—", Theme.textDim, Theme.bg2)
             methodPill.set("", Theme.textDim, null)
@@ -188,6 +221,35 @@ class OverviewPanel : CardPanel(null) {
         if (!pending) return
         liveDurationChip?.value("$elapsedMs ms")
         statusPill.set("${spinnerChar(frame)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
+    }
+
+    /** Shows/hides the duplicate warning strip and styles it by severity. */
+    private fun applyDuplicate(tx: Transaction?, dup: DuplicateDetector.Mark?) {
+        if (!::dupRow.isInitialized) return
+        if (tx == null || dup == null) {
+            dupRow.isVisible = false
+            return
+        }
+        val (fg, tint, label) = when (dup.severity) {
+            DuplicateDetector.Severity.STRONG ->
+                Triple(Theme.danger, Theme.dangerTint, "Possible double-submit")
+            DuplicateDetector.Severity.MEDIUM ->
+                Triple(Theme.warn, Theme.warnTint, "Redundant duplicate request")
+            DuplicateDetector.Severity.INFO ->
+                Triple(Theme.textDim, Theme.tint(Theme.textDim, 22), "Repeated request")
+        }
+        val detail = if (dup.severity == DuplicateDetector.Severity.STRONG)
+            " — fired before the previous ${tx.request.method} responded; check for a missing debounce or disabled-button guard."
+        else
+            " — ${ordinalWord(dup.ordinal)} identical ${tx.request.method} within a short burst."
+        dupBanner.foreground = fg
+        dupBanner.text = "⚠  DUPLICATE ×${dup.ordinal}  ·  $label$detail"
+        setBannerFill(tint)
+        dupRow.isVisible = true
+    }
+
+    private fun ordinalWord(n: Int): String = when (n) {
+        2 -> "2nd"; 3 -> "3rd"; else -> "${n}th"
     }
 
     /** Finds a server-side trace/request id in response (then request) headers. */

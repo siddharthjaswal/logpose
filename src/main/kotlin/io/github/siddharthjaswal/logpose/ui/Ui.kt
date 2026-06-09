@@ -63,6 +63,12 @@ object Theme {
     private val s4 = c(0xA86A12, 0xE3B34C); private val s4bg = rgba(0xE3B34C, 0.17f)
     private val s5 = c(0xCF3030, 0xEC7A70); private val s5bg = rgba(0xEC7A70, 0.17f)
 
+    // semantic accents (warnings / dangers) — reused by the duplicate-call pill
+    val warn = c(0xA86A12, 0xE3B34C)
+    val warnTint: Color = rgba(0xE3B34C, 0.17f)
+    val danger = c(0xCF3030, 0xEC7A70)
+    val dangerTint: Color = rgba(0xEC7A70, 0.17f)
+
     // find highlight
     val findAll: Color = JBColor(rgba(0xFFD54F, 0.55f), rgba(0xE3B34C, 0.30f))
 

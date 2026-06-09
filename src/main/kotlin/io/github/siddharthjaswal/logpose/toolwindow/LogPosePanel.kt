@@ -16,6 +16,7 @@ import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.Alarm
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -51,7 +52,19 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     private val reader = LogcatReader()
 
     private val renderer = TransactionListRenderer()
-    private val list = JBList(javax.swing.DefaultListModel<Transaction>())
+    // Latest duplicate-burst marks, keyed by transaction id; recomputed each refresh and read
+    // by the renderer, the row tooltip, and the detail banner.
+    private var duplicateMarks: Map<String, DuplicateDetector.Mark> = emptyMap()
+    private val list = object : JBList<Transaction>(javax.swing.DefaultListModel<Transaction>()) {
+        override fun getToolTipText(event: MouseEvent): String? {
+            val idx = locationToIndex(event.point)
+            if (idx < 0) return null
+            val bounds = getCellBounds(idx, idx) ?: return null
+            if (!bounds.contains(event.point)) return null
+            val tx = model.getElementAt(idx) ?: return null
+            return duplicateMarks[tx.id]?.let { duplicateTooltip(tx, it) }
+        }
+    }
     private val detail = TransactionDetailView(project)
     private val filterBar = FilterBar()
     private val statusDot = StatusDot()
@@ -100,6 +113,8 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         }
         list.selectionMode = ListSelectionModel.SINGLE_SELECTION
         list.cellRenderer = renderer
+        // Enable per-row tooltips (our JBList overrides getToolTipText for duplicate rows).
+        javax.swing.ToolTipManager.sharedInstance().registerComponent(list)
         list.addListSelectionListener {
             if (!suppressSelectionEvents && !it.valueIsAdjusting) showDetail(list.selectedValue)
         }
@@ -186,7 +201,15 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         val selectedId = list.selectedValue?.id
         val all = store.snapshot()
         val state = filterBar.state()
-        val filtered = all.filter { state.matches(it) }
+
+        // Detect duplicate bursts over the FULL (time-ordered) capture, not the filtered view —
+        // filtering must not break a burst chain or change a call's ordinal.
+        duplicateMarks = DuplicateDetector.analyze(all)
+        renderer.duplicateProvider = { duplicateMarks[it.id] }
+
+        val filtered = all.filter {
+            state.matches(it) && (!state.duplicatesOnly || duplicateMarks.containsKey(it.id))
+        }
         filterBar.setCount(filtered.size, all.size)
 
         val model = javax.swing.DefaultListModel<Transaction>()
@@ -212,7 +235,20 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
 
     private fun showDetail(tx: Transaction?) {
         lastShown = tx
-        detail.show(tx)
+        detail.show(tx, tx?.let { duplicateMarks[it.id] })
+    }
+
+    private fun duplicateTooltip(tx: Transaction, mark: DuplicateDetector.Mark): String {
+        val headline = when (mark.severity) {
+            DuplicateDetector.Severity.STRONG -> "Possible double-submit"
+            DuplicateDetector.Severity.MEDIUM -> "Redundant duplicate request"
+            DuplicateDetector.Severity.INFO -> "Repeated request"
+        }
+        val ord = when (mark.ordinal) { 2 -> "2nd"; 3 -> "3rd"; else -> "${mark.ordinal}th" }
+        val extra = if (mark.severity == DuplicateDetector.Severity.STRONG)
+            "<br/>It fired before the previous one responded — likely a missing debounce or disabled-button guard."
+        else ""
+        return "<html><b>$headline</b><br/>$ord identical ${tx.request.method} call in a quick burst.$extra</html>"
     }
 
     private fun onLiveTick() {

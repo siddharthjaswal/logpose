@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.TagLabel
@@ -43,9 +44,13 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
     /** Live wall-clock elapsed (ms) for a pending transaction, or null if not pending. */
     var elapsedProvider: (Transaction) -> Long? = { null }
 
+    /** Duplicate-burst mark for a transaction, or null if it isn't a repeated call. */
+    var duplicateProvider: (Transaction) -> DuplicateDetector.Mark? = { null }
+
     private val methodLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
     private val statusTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
     private val path = JLabel()
+    private val dupTag = TagLabel()
     private val sizeLabel = JLabel("", SwingConstants.RIGHT)
     private val duration = JLabel("", SwingConstants.RIGHT)
 
@@ -64,8 +69,18 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         }
         path.border = JBUI.Borders.emptyLeft(12)
         path.font = JBUI.Fonts.label(12.5f)
+        dupTag.font = JBUI.Fonts.label(10f).asBold()
+        dupTag.border = JBUI.Borders.empty(2, 7)
         sizeLabel.font = JBUI.Fonts.create("JetBrains Mono", 11)
         duration.font = JBUI.Fonts.create("JetBrains Mono", 11)
+
+        // The path fills the centre; the duplicate pill (when present) tucks in at its right
+        // end, just before the size/duration meta — so path-start alignment is never disturbed.
+        val center = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(path, BorderLayout.CENTER)
+            add(dupTag, BorderLayout.EAST)
+        }
 
         val meta = JPanel().apply {
             isOpaque = false
@@ -76,7 +91,7 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         }
 
         add(badges, BorderLayout.WEST)
-        add(path, BorderLayout.CENTER)
+        add(center, BorderLayout.CENTER)
         add(meta, BorderLayout.EAST)
     }
 
@@ -111,6 +126,25 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
 
         path.text = value.request.path.ifBlank { value.request.url }
         path.foreground = shade(Theme.text)
+
+        val dup = duplicateProvider(value)
+        if (dup != null) {
+            val fg = when (dup.severity) {
+                DuplicateDetector.Severity.STRONG -> Theme.danger
+                DuplicateDetector.Severity.MEDIUM -> Theme.warn
+                DuplicateDetector.Severity.INFO -> Theme.textDim
+            }
+            val bg = when (dup.severity) {
+                DuplicateDetector.Severity.STRONG -> Theme.dangerTint
+                DuplicateDetector.Severity.MEDIUM -> Theme.warnTint
+                DuplicateDetector.Severity.INFO -> Theme.tint(Theme.textDim, 22)
+            }
+            dupTag.isVisible = true
+            dupTag.set("DUP ×${dup.ordinal}", shade(fg), if (muted) Theme.tint(fg, 14) else bg)
+        } else {
+            dupTag.isVisible = false
+            dupTag.set("", Theme.text, null)
+        }
 
         when {
             pending -> {
