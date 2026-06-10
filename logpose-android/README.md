@@ -19,8 +19,7 @@ it exceeds logcat's limit). It also:
 
 ## Install
 
-> Not yet published to Maven Central. For now, include the module locally or via
-> [JitPack](https://jitpack.io).
+> Not yet published to Maven Central. For now, pull it from [JitPack](https://jitpack.io).
 
 ```kotlin
 // settings.gradle.kts
@@ -30,9 +29,17 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    debugImplementation("com.github.siddharthjaswal:logpose:0.1.0") // JitPack coordinate
+    // Debug builds: the real interceptor.
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v0.9.10")
+    // Release builds: a zero-overhead no-op with the same API (no logcat, no extra deps).
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v0.9.10")
 }
 ```
+
+The no-op ([`no-op/`](no-op)) exposes the same `LogPoseInterceptor` / `LogPoseConfig`, so your
+`addInterceptor(...)` call compiles unchanged — release builds link the stub and LogPose
+vanishes from production. Prefer one artifact everywhere? Use only the `debugImplementation`
+line and rely on `enabled = BuildConfig.DEBUG`.
 
 ## Usage
 

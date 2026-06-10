@@ -189,18 +189,26 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    debugImplementation("com.github.siddharthjaswal:logpose:v0.9.8")
+    // Debug builds: the real interceptor.
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v0.9.10")
+    // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
+    // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v0.9.10")
 }
 ```
 
 ```kotlin
 val client = OkHttpClient.Builder()
     // Add LAST so LogPose sees the final request and the decoded response.
+    // Compiles unchanged in both variants — the no-op exposes the same LogPoseInterceptor.
     .addInterceptor(LogPoseInterceptor(LogPoseConfig(enabled = BuildConfig.DEBUG)))
     .build()
 ```
 
-`enabled = BuildConfig.DEBUG` keeps it inert in release. See
+With the `debug`/`release` split above, the release build links against the no-op stub, so
+LogPose is gone from production by construction. `enabled = BuildConfig.DEBUG` is then just
+belt-and-suspenders. (Prefer a single artifact in all variants? Use only the
+`debugImplementation` line and rely on the `enabled` flag.) See
 [`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
 header redaction, custom tag, custom transport).
 
@@ -241,10 +249,12 @@ for the device-side setup.
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal:logpose:v0.9.8`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v0.9.10`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **Plugin submitted** to the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
-      *(in review)*; signing + publishing wired via GitHub Actions (`RELEASING.md`).
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v0.9.10`
+      lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
+- [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
+      — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).
 - [ ] Maven Central for the interceptor (optional, more "official" than JitPack).
 
 ### Quality & trust
