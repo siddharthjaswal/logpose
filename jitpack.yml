@@ -1,11 +1,16 @@
-# JitPack builds only the `logpose-android` interceptor library — the IDE plugin at the
-# repo root is an application, not a consumable library.
+# JitPack builds the `logpose-android` composite (the IDE plugin at the repo root is an
+# application, not a consumable library). That composite now publishes TWO artifacts:
+#   - logpose-android : the real interceptor (debug builds)
+#   - logpose-no-op   : a zero-overhead stub with the same API (release builds)
 #
-# After you push a tag (e.g. v1.0.0), JitPack builds this and shows the exact dependency
-# coordinate at: https://jitpack.io/#siddharthjaswal/logpose
-# It will look like:
+# After you push a tag, JitPack builds both and shows the exact coordinates at:
+# https://jitpack.io/#siddharthjaswal/logpose
+# They look like:
 #   repositories { maven("https://jitpack.io") }
-#   dependencies { debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:<tag>") }
+#   dependencies {
+#     debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:<tag>")
+#     releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
+#   }
 jdk:
   - openjdk17
 install:

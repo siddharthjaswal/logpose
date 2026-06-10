@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "logpose-android"
+include(":no-op")
