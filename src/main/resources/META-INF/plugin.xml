@@ -26,6 +26,9 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Failed requests now show why</b> — instead of an opaque <code>"(failed)"</code>,
+                the Response and Overview cards display the captured exception (connection reset,
+                timeout, cleartext-not-permitted, …) so the failure is diagnosable.</li>
             <li><b>Duplicate-call detection</b> — repeated identical requests fired in a quick
                 burst are flagged with a <code>DUP ×N</code> tag; overlapping non-idempotent
                 calls (double-submits) are highlighted in red, with a warning in the overview

@@ -50,6 +50,14 @@ class OverviewPanel : CardPanel(null) {
         font = JBUI.Fonts.create("JetBrains Mono", 12)
         border = JBUI.Borders.empty(2, 0)
     }
+    // Shown only for failed calls (no response): the exception text from the interceptor.
+    private val errorText = JBTextArea(1, 10).apply {
+        isEditable = false; isOpaque = false; lineWrap = true; wrapStyleWord = false
+        foreground = Theme.danger
+        font = JBUI.Fonts.create("JetBrains Mono", 12)
+        border = JBUI.Borders.empty(2, 0)
+    }
+    private lateinit var errorRow: JPanel
     private val chips = JPanel().apply {
         isOpaque = false
         layout = BoxLayout(this, BoxLayout.X_AXIS)
@@ -155,6 +163,8 @@ class OverviewPanel : CardPanel(null) {
             add(row(hbox(statusPill, Box.createHorizontalStrut(JBUI.scale(8)), methodPill), fill = false))
             add(vGap(8))
             add(row(url, fill = true))
+            errorRow = row(errorText, fill = true)
+            add(errorRow)
             add(vGap(8))
             add(row(chips, fill = false))
             add(vGap(12))
@@ -166,6 +176,7 @@ class OverviewPanel : CardPanel(null) {
 
     fun show(tx: Transaction?, dup: DuplicateDetector.Mark? = null) {
         applyDuplicate(tx, dup)
+        applyError(tx)
         if (tx == null) {
             statusPill.set("—", Theme.textDim, Theme.bg2)
             methodPill.set("", Theme.textDim, null)
@@ -221,6 +232,18 @@ class OverviewPanel : CardPanel(null) {
         if (!pending) return
         liveDurationChip?.value("$elapsedMs ms")
         statusPill.set("${spinnerChar(frame)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
+    }
+
+    /** Shows the exception text for a failed call (no response), hidden otherwise. */
+    private fun applyError(tx: Transaction?) {
+        if (!::errorRow.isInitialized) return
+        val err = tx?.error?.takeIf { tx.response == null }
+        if (err == null) {
+            errorRow.isVisible = false
+            return
+        }
+        errorText.text = err
+        errorRow.isVisible = true
     }
 
     /** Shows/hides the duplicate warning strip and styles it by severity. */

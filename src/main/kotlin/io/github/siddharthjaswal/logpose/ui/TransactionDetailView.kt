@@ -85,12 +85,21 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     }
 
     private fun renderResponse(tx: Transaction) {
-        if (tx.isPending()) {
-            response.setStatus("…")
-            response.showMessage("Waiting for response…")
-        } else {
-            response.setStatus(tx.response?.let { "${it.code} ${it.message}".trim() } ?: "—")
-            response.setElement(responseJson(tx))
+        when {
+            tx.isPending() -> {
+                response.setStatus("…")
+                response.showMessage("Waiting for response…")
+            }
+            // The call never returned a response — OkHttp (or a downstream interceptor) threw.
+            // Show the captured exception instead of a bare "(failed)" so the failure is diagnosable.
+            tx.error != null -> {
+                response.setStatus("Failed")
+                response.setElement(responseJson(tx))
+            }
+            else -> {
+                response.setStatus(tx.response?.let { "${it.code} ${it.message}".trim() } ?: "—")
+                response.setElement(responseJson(tx))
+            }
         }
     }
 
@@ -130,7 +139,12 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     }
 
     private fun responseJson(tx: Transaction): JsonElement {
-        val r = tx.response ?: return JsonPrimitive(if (tx.error != null) "(failed)" else "(pending)")
+        val r = tx.response ?: return buildJsonObject {
+            // No response object reached the interceptor. Surface the exception text (connection
+            // reset, timeout, cleartext-not-permitted, a downstream interceptor's throw, …) which
+            // the wire transaction carries in `error` — this is the most useful thing we can show.
+            if (tx.error != null) put("error", tx.error) else put("status", "(pending)")
+        }
         return buildJsonObject {
             put("code", r.code)
             if (r.message.isNotBlank()) put("message", r.message)

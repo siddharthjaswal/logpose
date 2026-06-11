@@ -6,7 +6,6 @@ import io.github.siddharthjaswal.logpose.internal.BodyCapture
 import io.github.siddharthjaswal.logpose.wire.Transaction
 import okhttp3.Interceptor
 import okhttp3.Response
-import java.io.IOException
 import java.util.UUID
 import io.github.siddharthjaswal.logpose.wire.Request as WireRequest
 import io.github.siddharthjaswal.logpose.wire.Response as WireResponse
@@ -57,19 +56,23 @@ class LogPoseInterceptor @JvmOverloads constructor(
             emitter.emit(Transaction(id = id, startedAtMillis = startedAt, request = wireRequest))
         }
 
+        // Catch *any* failure, not just IOException: a downstream interceptor (auth, error
+        // mapping) can throw a RuntimeException after OkHttp produced a response, and OkHttp's
+        // own connection failures surface as IOException. Either way we emit the error-shaped
+        // transaction (so it never stays stuck "pending") and rethrow unchanged.
         val response: Response = try {
             chain.proceed(request)
-        } catch (e: IOException) {
+        } catch (t: Throwable) {
             emitter.emit(
                 Transaction(
                     id = id,
                     startedAtMillis = startedAt,
                     request = wireRequest,
-                    error = e.toString(),
+                    error = t.toString(),
                     durationMillis = elapsedMs(startNs),
                 )
             )
-            throw e
+            throw t
         }
 
         emitter.emit(

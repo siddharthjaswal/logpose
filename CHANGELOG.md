@@ -6,6 +6,19 @@ format may still change.
 
 ## [Unreleased]
 
+## [0.9.10]
+
+### Fixed
+- Failed requests no longer render an opaque `"(failed)"` in the Response card. When a call
+  throws before a response arrives (connection reset, timeout, cleartext-not-permitted, or a
+  downstream interceptor that converts errors into exceptions), the Response card and the
+  Overview card now show the captured exception text, so the failure is actually diagnosable.
+  ([#1](https://github.com/siddharthjaswal/logpose/issues/1))
+- **Library:** the interceptor now captures *any* throwable from the chain, not just
+  `IOException`. A downstream interceptor throwing a `RuntimeException` previously left the
+  transaction stuck "pending" forever; it now emits an error transaction (and rethrows
+  unchanged). Ships via JitPack on the next tag.
+
 ## [0.9.9]
 
 ### Added
