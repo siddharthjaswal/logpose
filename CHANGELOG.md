@@ -6,6 +6,12 @@ format may still change.
 
 ## [Unreleased]
 
+## [0.9.11]
+
+Version-alignment release: the plugin version now matches the `logpose-android` /
+`logpose-no-op` JitPack tag `v0.9.11`. No functional plugin changes since 0.9.10 — the
+failed-request fix below shipped in 0.9.10 and is included here unchanged.
+
 ## [0.9.10]
 
 ### Fixed
