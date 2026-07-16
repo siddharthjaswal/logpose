@@ -38,13 +38,19 @@ import java.awt.CardLayout
 import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
+import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
+import java.awt.event.ActionEvent
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.swing.AbstractAction
+import javax.swing.JComponent
 import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
+import javax.swing.KeyStroke
 import javax.swing.ListSelectionModel
 import javax.swing.SwingUtilities
 
@@ -127,7 +133,14 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
                 },
             )
         }
-        list.selectionMode = ListSelectionModel.SINGLE_SELECTION
+        // Multi-select so a run of rows can be copied as a compact timeline (⌘/Ctrl+C). The
+        // detail pane follows the lead selection.
+        list.selectionMode = ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
+        val copyKey = KeyStroke.getKeyStroke(KeyEvent.VK_C, Toolkit.getDefaultToolkit().menuShortcutKeyMaskEx)
+        list.inputMap.put(copyKey, "copyTimeline")
+        list.actionMap.put("copyTimeline", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent) = copySelectedTimeline()
+        })
         list.cellRenderer = renderer
         // Enable per-row tooltips (our JBList overrides getToolTipText for duplicate rows).
         javax.swing.ToolTipManager.sharedInstance().registerComponent(list)
@@ -307,6 +320,32 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         Toast.show(list, toast)
     }
 
+    /**
+     * Copies the selected rows as a compact, paste-ready timeline — one `METHOD path` (or
+     * `FCM channel`) per line, in list order — so the sequence of calls can be shared without
+     * any of the request/response detail. `selectedValuesList` is already index-ordered.
+     */
+    private fun copySelectedTimeline() {
+        val events = list.selectedValuesList
+        if (events.isEmpty()) return
+        val text = events.joinToString("\n") { timelineLabel(it) }
+        copyToClipboard(text, if (events.size == 1) "Copied 1 row" else "Copied ${events.size} rows")
+    }
+
+    private fun timelineLabel(event: LogEvent): String = when (event) {
+        is LogEvent.Http -> "${event.tx.request.method} ${event.tx.request.path.ifBlank { event.tx.request.url }}"
+        is LogEvent.Fcm -> "FCM ${fcmTimelineLabel(event.msg)}"
+    }
+
+    private fun fcmTimelineLabel(msg: FcmMessage): String {
+        val channel = msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
+            ?.value?.takeIf { it.isNotBlank() }
+        return channel
+            ?: msg.collapseKey?.takeIf { it.isNotBlank() }
+            ?: msg.from?.takeIf { it.isNotBlank() }
+            ?: if (msg.event == "token") "token refreshed" else "data message"
+    }
+
     /** Handles hover (cURL affordance), left-click cURL copy, and the right-click menu. */
     private inner class ListMouse : MouseAdapter() {
         override fun mouseMoved(e: MouseEvent) {
@@ -320,6 +359,8 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
 
         override fun mouseClicked(e: MouseEvent) {
             if (!SwingUtilities.isLeftMouseButton(e)) return
+            // Shift/⌘/Ctrl clicks are extending the selection — don't treat them as a cURL copy.
+            if (e.isShiftDown || e.isMetaDown || e.isControlDown) return
             val idx = indexAt(e)
             if (idx < 0) return
             // Only the hovered, non-muted row paints the cURL affordance (HTTP rows only).
@@ -344,7 +385,17 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         private fun maybePopup(e: MouseEvent) {
             if (!e.isPopupTrigger) return
             val idx = indexAt(e).takeIf { it >= 0 } ?: return
-            list.selectedIndex = idx
+            // Right-clicking outside the current selection moves to that row; within it, keep the
+            // whole multi-selection so "Copy timeline" acts on everything selected.
+            if (idx !in list.selectedIndices) list.selectedIndex = idx
+
+            if (list.selectedIndices.size > 1) {
+                JPopupMenu().apply {
+                    add(item("Copy timeline (${list.selectedIndices.size} rows)") { copySelectedTimeline() })
+                    show(list, e.x, e.y)
+                }
+                return
+            }
             when (val ev = list.selectedValue ?: return) {
                 is LogEvent.Http -> httpMenu(ev.tx, e)
                 is LogEvent.Fcm -> fcmMenu(ev.msg, e)

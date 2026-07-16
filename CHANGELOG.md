@@ -6,6 +6,14 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-07-16
+
+### Added
+- **Multi-select + copy timeline.** Select a range of rows (click, ⇧-click, ⌘/Ctrl-click) and
+  copy them as a compact, paste-ready list — one `METHOD /path` (or `FCM channel`) per line, in
+  order — via ⌘/Ctrl+C or right-click → "Copy timeline (N rows)". Great for sharing the
+  sequence of calls behind a flow without any request/response detail. Plugin-only change.
+
 ## [1.0.1] - 2026-07-16
 
 ### Changed
