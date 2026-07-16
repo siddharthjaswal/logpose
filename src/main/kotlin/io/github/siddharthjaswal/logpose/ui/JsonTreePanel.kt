@@ -40,6 +40,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.awt.BorderLayout
 import java.awt.CardLayout
+import java.awt.Container
+import java.awt.Dimension
+import java.awt.FlowLayout
 import java.awt.Font
 import java.awt.Graphics
 import java.awt.Graphics2D
@@ -190,11 +193,12 @@ class JsonTreePanel(
         }
 
         toggle = Segmented(listOf("Tree", "Raw")) { i -> showMode(raw = i == 1) }
-        val actions = JPanel().apply {
+        // A self-wrapping toolbar: when the card is too narrow to fit the title + every action
+        // on one line, the actions flow onto extra rows (right-aligned) instead of overlapping
+        // the title. Placed in BorderLayout.CENTER so it's width-constrained and can actually wrap.
+        val actions = JPanel(WrapLayout(FlowLayout.RIGHT, JBUI.scale(4), JBUI.scale(2))).apply {
             isOpaque = false
-            layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
             add(toggle)
-            add(javax.swing.Box.createHorizontalStrut(JBUI.scale(10)))
             add(togglesHolder)
             add(iconButton(AllIcons.Actions.Find, "Find (⌘F)") { showFind() })
             add(iconButton(AllIcons.Actions.Expandall, "Expand all") { expandAll() })
@@ -209,7 +213,7 @@ class JsonTreePanel(
                 JBUI.Borders.compound(it, JBUI.Borders.empty(5, 12))
             }
             add(titleBox, BorderLayout.WEST)
-            add(actions, BorderLayout.EAST)
+            add(actions, BorderLayout.CENTER)
         }
     }
 
@@ -599,5 +603,51 @@ class JsonTreePanel(
         const val DEFAULT_FOLD_DEPTH = 3
         /** Documents at or below this many lines open fully expanded (no auto-fold). */
         const val SMALL_DOC_LINES = 40
+    }
+}
+
+/**
+ * A [FlowLayout] that wraps for real: stock `FlowLayout` always reports a single-row preferred
+ * size, so in a width-constrained slot it overflows its bounds (here: the card-header actions
+ * drawing on top of the title). This variant computes the preferred height from how many rows
+ * the children actually break into at the container's current width, so the header grows taller
+ * instead of overlapping. (Standard well-known WrapLayout pattern.)
+ */
+private class WrapLayout(align: Int, hgap: Int, vgap: Int) : FlowLayout(align, hgap, vgap) {
+
+    override fun preferredLayoutSize(target: Container): Dimension = layoutSize(target, true)
+    override fun minimumLayoutSize(target: Container): Dimension = layoutSize(target, false)
+
+    private fun layoutSize(target: Container, preferred: Boolean): Dimension {
+        synchronized(target.treeLock) {
+            // Before the first real layout the target has no width yet; fall back to "infinite"
+            // so we report a single row, then re-wrap once a concrete width is assigned on resize.
+            val targetWidth = target.size.width.takeIf { it > 0 } ?: Int.MAX_VALUE
+            val insets = target.insets
+            val maxWidth = targetWidth - (insets.left + insets.right + hgap * 2)
+
+            val dim = Dimension(0, 0)
+            var rowWidth = 0
+            var rowHeight = 0
+            fun newRow() {
+                dim.width = maxOf(dim.width, rowWidth)
+                if (dim.height > 0) dim.height += vgap
+                dim.height += rowHeight
+                rowWidth = 0; rowHeight = 0
+            }
+            for (i in 0 until target.componentCount) {
+                val m = target.getComponent(i)
+                if (!m.isVisible) continue
+                val d = if (preferred) m.preferredSize else m.minimumSize
+                if (rowWidth > 0 && rowWidth + hgap + d.width > maxWidth) newRow()
+                if (rowWidth > 0) rowWidth += hgap
+                rowWidth += d.width
+                rowHeight = maxOf(rowHeight, d.height)
+            }
+            newRow()
+            dim.width += insets.left + insets.right + hgap * 2
+            dim.height += insets.top + insets.bottom + vgap * 2
+            return dim
+        }
     }
 }
