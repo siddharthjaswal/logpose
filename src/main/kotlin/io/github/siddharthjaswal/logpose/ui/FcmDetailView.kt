@@ -98,6 +98,7 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
 
         chips.removeAll()
         val items = buildList {
+            fcmChannel(msg)?.let { add(StatChip("channel", ellipsize(it), tip = it)) }
             if (msg.receivedAtMillis > 0) add(StatChip("received", timeFmt.format(Date(msg.receivedAtMillis))))
             if (msg.sentTimeMillis != null && msg.sentTimeMillis > 0)
                 add(StatChip("sent", timeFmt.format(Date(msg.sentTimeMillis))))
@@ -131,8 +132,15 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
             msg.notification.title?.takeIf { it.isNotBlank() },
             msg.notification.body?.takeIf { it.isNotBlank() },
         ).joinToString("\n").ifBlank { "(notification)" }
-        else -> msg.from?.takeIf { it.isNotBlank() }?.let { "from $it" } ?: "(data message)"
+        else -> fcmChannel(msg)
+            ?: msg.from?.takeIf { it.isNotBlank() }?.let { "from $it" }
+            ?: "(data message)"
     }
+
+    /** The channel a data message rides on, if the app put one in the data map. */
+    private fun fcmChannel(msg: FcmMessage): String? =
+        msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
+            ?.value?.takeIf { it.isNotBlank() }
 
     /** A composed view of the event for the tree: notification, data map, and token. */
     private fun payloadJson(msg: FcmMessage): JsonElement = buildJsonObject {

@@ -261,10 +261,18 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
             msg.notification.title?.takeIf { it.isNotBlank() }
                 ?: msg.notification.body?.takeIf { it.isNotBlank() }
                 ?: "(notification)"
-        else -> msg.from?.takeIf { it.isNotBlank() }
+        // A data message's most meaningful label is its channel (apps commonly carry one in the
+        // data map); the raw `from` is just an FCM sender/project number, so it's the last resort.
+        else -> fcmChannel(msg)
             ?: msg.collapseKey?.takeIf { it.isNotBlank() }
+            ?: msg.from?.takeIf { it.isNotBlank() }
             ?: "(data message)"
     }
+
+    /** The channel a data message rides on, if the app put one in the data map. */
+    private fun fcmChannel(msg: FcmMessage): String? =
+        msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
+            ?.value?.takeIf { it.isNotBlank() }
 
     /** The "⧉ cURL" affordance occupies the size column; match that band, not the whole right edge. */
     fun isInCurlZone(rowWidth: Int, x: Int): Boolean =

@@ -6,6 +6,14 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-16
+
+### Changed
+- FCM data-message rows now label themselves by their **channel** (read from a `channel` key
+  in the data map) instead of the raw FCM sender/project number, which was meaningless. The
+  channel also shows as a stat chip in the FCM detail view. Falls back to collapse key / from
+  when no channel is present. Plugin-only change — the library is unchanged.
+
 ## [1.0.0] - 2026-07-16
 
 ### Added
