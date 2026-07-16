@@ -36,10 +36,11 @@ dependencies {
 }
 ```
 
-The no-op ([`no-op/`](no-op)) exposes the same `LogPoseInterceptor` / `LogPoseConfig`, so your
-`addInterceptor(...)` call compiles unchanged — release builds link the stub and LogPose
-vanishes from production. Prefer one artifact everywhere? Use only the `debugImplementation`
-line and rely on `enabled = BuildConfig.DEBUG`.
+The no-op ([`no-op/`](no-op)) exposes the same `LogPoseInterceptor` / `LogPoseConfig` **and
+the same `LogPose` FCM API**, so your `addInterceptor(...)` and `LogPose.logFcmMessage(...)`
+calls compile unchanged — release builds link the stub and LogPose vanishes from production.
+Prefer one artifact everywhere? Use only the `debugImplementation` line and rely on
+`enabled = BuildConfig.DEBUG`.
 
 ## Usage
 
@@ -58,6 +59,39 @@ val client = OkHttpClient.Builder()
 
 That's it. Run the app, open the **LogPose** tool window in Android Studio, and hit
 **Start Capture**.
+
+## FCM messages (optional)
+
+To also see Firebase Cloud Messaging pushes and token refreshes in the same timeline, hand
+them to LogPose from your `FirebaseMessagingService`. LogPose stays Firebase-free — you copy
+the fields you need into a plain `FcmMessageInfo` (the no-op mirrors this API, so it compiles
+and disappears in release):
+
+```kotlin
+class MyMessagingService : FirebaseMessagingService() {
+    override fun onMessageReceived(m: RemoteMessage) {
+        LogPose.logFcmMessage(
+            FcmMessageInfo(
+                messageId = m.messageId,
+                from = m.from,
+                collapseKey = m.collapseKey,
+                sentTimeMillis = m.sentTime,
+                ttlSeconds = m.ttl,
+                priority = m.priority,
+                notificationTitle = m.notification?.title,
+                notificationBody = m.notification?.body,
+                data = m.data,
+            ),
+            LogPoseConfig(enabled = BuildConfig.DEBUG),
+        )
+        super.onMessageReceived(m)
+    }
+
+    override fun onNewToken(token: String) {
+        LogPose.logFcmToken(token, LogPoseConfig(enabled = BuildConfig.DEBUG))
+    }
+}
+```
 
 ## Configuration
 

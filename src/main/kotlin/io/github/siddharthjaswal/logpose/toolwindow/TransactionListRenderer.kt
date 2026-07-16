@@ -2,6 +2,8 @@ package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.model.FcmMessage
+import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.TagLabel
@@ -16,6 +18,8 @@ import java.awt.Dimension
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
+import java.text.SimpleDateFormat
+import java.util.Date
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JLabel
@@ -25,16 +29,19 @@ import javax.swing.ListCellRenderer
 import javax.swing.SwingConstants
 
 /**
- * Studio list row, laid out in FIXED columns so method / status / path align across
- * every row regardless of method length or muted state:
+ * Studio list row for the unified stream. HTTP rows are laid out in FIXED columns so
+ * method / status / path align across every row:
  *
  *   `METHOD   [status]   path … …                 size   duration`
  *
- * Per spec §4, METHOD is plain colored bold text in a fixed column; only the status
- * is a pill. Muted rows are shorter (26px) and faded (~0.34, 0.7 on hover); hover
- * reveals a cURL affordance in place of the size.
+ * FCM rows reuse the same column geometry with FCM-specific content:
+ *
+ *   `FCM      [NOTIF]    title / from … …          n keys  time`
+ *
+ * Per spec §4, METHOD is plain colored bold text in a fixed column; only the status is a
+ * pill. Muted (HTTP) rows are shorter (26px) and faded; hover reveals a cURL affordance.
  */
-class TransactionListRenderer : ListCellRenderer<Transaction> {
+class TransactionListRenderer : ListCellRenderer<LogEvent> {
 
     var hoveredIndex: Int = -1
 
@@ -47,6 +54,9 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
     /** Duplicate-burst mark for a transaction, or null if it isn't a repeated call. */
     var duplicateProvider: (Transaction) -> DuplicateDetector.Mark? = { null }
 
+    private val timeFmt = SimpleDateFormat("HH:mm:ss")
+
+    // ---- HTTP row -------------------------------------------------------------------------
     private val methodLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
     private val statusTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
     private val path = JLabel()
@@ -95,13 +105,57 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         add(meta, BorderLayout.EAST)
     }
 
+    // ---- FCM row --------------------------------------------------------------------------
+    private val fcmLabel = JLabel("FCM", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
+    private val fcmTag = TagLabel().fixed(JBUI.scale(52), JBUI.scale(20))
+    private val fcmText = JLabel()
+    private val fcmCount = JLabel("", SwingConstants.RIGHT)
+    private val fcmTime = JLabel("", SwingConstants.RIGHT)
+
+    private val fcmRow = RowPanel().apply {
+        border = JBUI.Borders.empty(0, 14)
+
+        fcmLabel.font = JBUI.Fonts.label(11f).asBold()
+        fcmLabel.foreground = Theme.methodColor("PATCH")
+        fcmTag.font = JBUI.Fonts.label(10f).asBold()
+
+        val badges = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(fcmLabel)
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
+            add(fcmTag)
+        }
+        fcmText.border = JBUI.Borders.emptyLeft(12)
+        fcmText.font = JBUI.Fonts.label(12.5f)
+        fcmCount.font = JBUI.Fonts.create("JetBrains Mono", 11)
+        fcmTime.font = JBUI.Fonts.create("JetBrains Mono", 11)
+
+        val meta = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(fcmCount.fixed(JBUI.scale(64), JBUI.scale(20)))
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
+            add(fcmTime.fixed(JBUI.scale(56), JBUI.scale(20)))
+        }
+
+        add(badges, BorderLayout.WEST)
+        add(fcmText, BorderLayout.CENTER)
+        add(meta, BorderLayout.EAST)
+    }
+
     override fun getListCellRendererComponent(
-        list: JList<out Transaction>,
-        value: Transaction,
+        list: JList<out LogEvent>,
+        value: LogEvent,
         index: Int,
         isSelected: Boolean,
         cellHasFocus: Boolean,
-    ): Component {
+    ): Component = when (value) {
+        is LogEvent.Http -> httpRow(value.tx, index, isSelected)
+        is LogEvent.Fcm -> fcmRow(value.msg, index, isSelected)
+    }
+
+    private fun httpRow(value: Transaction, index: Int, isSelected: Boolean): Component {
         val muted = MutedEndpoints.isMuted(value)
         val hovered = index == hoveredIndex
         row.selected = isSelected
@@ -167,6 +221,49 @@ class TransactionListRenderer : ListCellRenderer<Transaction> {
         }
 
         return row
+    }
+
+    private fun fcmRow(msg: FcmMessage, index: Int, isSelected: Boolean): Component {
+        fcmRow.selected = isSelected
+        fcmRow.hovered = index == hoveredIndex && !isSelected
+        fcmRow.rowHeight = 34
+
+        val kind = fcmKind(msg)
+        val kColor = when (kind) {
+            "TOKEN" -> Theme.accent
+            "NOTIF" -> Theme.methodColor("PATCH")
+            else -> Theme.textDim // DATA
+        }
+        fcmTag.set(kind, kColor, Theme.tint(kColor, 22))
+
+        fcmText.text = fcmSummary(msg)
+        fcmText.foreground = Theme.text
+
+        // "size" column: number of data keys (data messages carry the payload of interest).
+        fcmCount.text = msg.data.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "key" else "keys"}" } ?: ""
+        fcmCount.foreground = Theme.textMuted
+
+        fcmTime.text = msg.receivedAtMillis.takeIf { it > 0 }?.let { timeFmt.format(Date(it)) } ?: ""
+        fcmTime.foreground = Theme.textMuted
+
+        return fcmRow
+    }
+
+    private fun fcmKind(msg: FcmMessage): String = when {
+        msg.event == "token" -> "TOKEN"
+        msg.notification != null -> "NOTIF"
+        else -> "DATA"
+    }
+
+    private fun fcmSummary(msg: FcmMessage): String = when {
+        msg.event == "token" -> "Registration token refreshed"
+        msg.notification != null ->
+            msg.notification.title?.takeIf { it.isNotBlank() }
+                ?: msg.notification.body?.takeIf { it.isNotBlank() }
+                ?: "(notification)"
+        else -> msg.from?.takeIf { it.isNotBlank() }
+            ?: msg.collapseKey?.takeIf { it.isNotBlank() }
+            ?: "(data message)"
     }
 
     /** The "⧉ cURL" affordance occupies the size column; match that band, not the whole right edge. */

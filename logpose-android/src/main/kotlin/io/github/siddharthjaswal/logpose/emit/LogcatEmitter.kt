@@ -3,6 +3,7 @@ package io.github.siddharthjaswal.logpose.emit
 import android.util.Log
 import io.github.siddharthjaswal.logpose.LogPoseConfig
 import io.github.siddharthjaswal.logpose.wire.Chunk
+import io.github.siddharthjaswal.logpose.wire.FcmMessage
 import io.github.siddharthjaswal.logpose.wire.Transaction
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -22,8 +23,17 @@ class LogcatEmitter(private val config: LogPoseConfig) : TransactionEmitter {
         explicitNulls = false
     }
 
-    override fun emit(tx: Transaction) {
-        val line = json.encodeToString(tx)
+    override fun emit(tx: Transaction) = emitLine(tx.id, json.encodeToString(tx))
+
+    /** Emit an FCM event (incoming push or token refresh) on the same tag; see `LogPoseFcm.kt`. */
+    fun emit(fcm: FcmMessage) = emitLine(fcm.id, json.encodeToString(fcm))
+
+    /**
+     * Write [line] under the configured tag, splitting into ordered [Chunk]s (sharing [id])
+     * when it exceeds [LogPoseConfig.maxLineChars] so large payloads survive logcat's
+     * per-line truncation. Shared by every event type.
+     */
+    private fun emitLine(id: String, line: String) {
         if (line.length <= config.maxLineChars) {
             Log.println(Log.INFO, config.tag, line)
             return
@@ -35,7 +45,7 @@ class LogcatEmitter(private val config: LogPoseConfig) : TransactionEmitter {
         for (seq in 0 until total) {
             val from = seq * chunkSize
             val to = minOf(from + chunkSize, line.length)
-            val chunk = Chunk(id = tx.id, seq = seq, total = total, payload = line.substring(from, to))
+            val chunk = Chunk(id = id, seq = seq, total = total, payload = line.substring(from, to))
             Log.println(Log.INFO, config.tag, json.encodeToString(chunk))
         }
     }

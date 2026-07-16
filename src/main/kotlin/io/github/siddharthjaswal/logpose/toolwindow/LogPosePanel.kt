@@ -19,9 +19,12 @@ import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
+import io.github.siddharthjaswal.logpose.model.FcmMessage
+import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.TransactionStore
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
+import io.github.siddharthjaswal.logpose.ui.FcmDetailView
 import io.github.siddharthjaswal.logpose.ui.FilterBar
 import io.github.siddharthjaswal.logpose.ui.isPending
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
@@ -31,6 +34,7 @@ import io.github.siddharthjaswal.logpose.ui.Toast
 import io.github.siddharthjaswal.logpose.ui.TransactionDetailView
 import kotlinx.serialization.json.Json
 import java.awt.BorderLayout
+import java.awt.CardLayout
 import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
@@ -55,17 +59,25 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     // Latest duplicate-burst marks, keyed by transaction id; recomputed each refresh and read
     // by the renderer, the row tooltip, and the detail banner.
     private var duplicateMarks: Map<String, DuplicateDetector.Mark> = emptyMap()
-    private val list = object : JBList<Transaction>(javax.swing.DefaultListModel<Transaction>()) {
+    private val list = object : JBList<LogEvent>(javax.swing.DefaultListModel<LogEvent>()) {
         override fun getToolTipText(event: MouseEvent): String? {
             val idx = locationToIndex(event.point)
             if (idx < 0) return null
             val bounds = getCellBounds(idx, idx) ?: return null
             if (!bounds.contains(event.point)) return null
-            val tx = model.getElementAt(idx) ?: return null
+            val tx = (model.getElementAt(idx) as? LogEvent.Http)?.tx ?: return null
             return duplicateMarks[tx.id]?.let { duplicateTooltip(tx, it) }
         }
     }
     private val detail = TransactionDetailView(project)
+    private val fcmDetail = FcmDetailView(project)
+    // Routes the single detail slot between the HTTP and FCM views by event kind.
+    private val detailCards = CardLayout()
+    private val detailPane = JPanel(detailCards).apply {
+        isOpaque = true; background = Theme.bg0
+        add(detail, "http")
+        add(fcmDetail, "fcm")
+    }
     private val filterBar = FilterBar()
     private val statusDot = StatusDot()
 
@@ -73,7 +85,7 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
     private val refreshScheduled = AtomicBoolean(false)
     private var suppressSelectionEvents = false
-    private var lastShown: Transaction? = null
+    private var lastShown: LogEvent? = null
 
     // Drives the in-flight UI: ticking duration + spinner while any request is pending.
     private val liveTimer = javax.swing.Timer(250) { onLiveTick() }
@@ -104,6 +116,10 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
                 com.intellij.ui.SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES, null,
             )
             appendLine(
+                "3.  Optional: call LogPose.logFcmMessage(…) to see FCM pushes here too",
+                com.intellij.ui.SimpleTextAttributes.GRAYED_ATTRIBUTES, null,
+            )
+            appendLine(
                 "Setup guide →",
                 com.intellij.ui.SimpleTextAttributes.LINK_PLAIN_ATTRIBUTES,
                 java.awt.event.ActionListener {
@@ -128,10 +144,10 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
             border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0
             minimumSize = Dimension(JBUI.scale(220), 0)
         }
-        detail.minimumSize = Dimension(JBUI.scale(320), 0)
+        detailPane.minimumSize = Dimension(JBUI.scale(320), 0)
         val splitter = OnePixelSplitter(false, 0.44f).apply {
             firstComponent = listScroll
-            secondComponent = detail
+            secondComponent = detailPane
             setHonorComponentsMinimumSize(true)
         }
 
@@ -179,7 +195,12 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         statusDot.capturing = true
         reader.start(
             onLine = { line -> parser.accept(line)?.let { store.add(it) } },
-            onError = { msg -> refreshAlarm.addRequest({ detail.showError("⚠ LogPose capture error:\n\n$msg") }, 0) },
+            onError = { msg ->
+                refreshAlarm.addRequest({
+                    detailCards.show(detailPane, "http")
+                    detail.showError("⚠ LogPose capture error:\n\n$msg")
+                }, 0)
+            },
             // Reader ended (device disconnected / adb error) — reset capture state on the EDT.
             onStopped = { refreshAlarm.addRequest({ statusDot.capturing = false }, 0) },
         )
@@ -203,8 +224,10 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         val state = filterBar.state()
 
         // Detect duplicate bursts over the FULL (time-ordered) capture, not the filtered view —
-        // filtering must not break a burst chain or change a call's ordinal.
-        duplicateMarks = DuplicateDetector.analyze(all)
+        // filtering must not break a burst chain or change a call's ordinal. Duplicates are an
+        // HTTP-only concept, so only the HTTP events feed the detector.
+        val httpTxs = all.filterIsInstance<LogEvent.Http>().map { it.tx }
+        duplicateMarks = DuplicateDetector.analyze(httpTxs)
         renderer.duplicateProvider = { duplicateMarks[it.id] }
 
         val filtered = all.filter {
@@ -212,7 +235,7 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         }
         filterBar.setCount(filtered.size, all.size)
 
-        val model = javax.swing.DefaultListModel<Transaction>()
+        val model = javax.swing.DefaultListModel<LogEvent>()
         filtered.forEach { model.addElement(it) }
 
         suppressSelectionEvents = true
@@ -233,9 +256,22 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         if (sel != lastShown) showDetail(sel)
     }
 
-    private fun showDetail(tx: Transaction?) {
-        lastShown = tx
-        detail.show(tx, tx?.let { duplicateMarks[it.id] })
+    private fun showDetail(event: LogEvent?) {
+        lastShown = event
+        when (event) {
+            is LogEvent.Http -> {
+                detail.show(event.tx, duplicateMarks[event.id])
+                detailCards.show(detailPane, "http")
+            }
+            is LogEvent.Fcm -> {
+                fcmDetail.show(event.msg)
+                detailCards.show(detailPane, "fcm")
+            }
+            null -> {
+                detail.show(null)
+                detailCards.show(detailPane, "http")
+            }
+        }
     }
 
     private fun duplicateTooltip(tx: Transaction, mark: DuplicateDetector.Mark): String {
@@ -254,10 +290,10 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     private fun onLiveTick() {
         renderer.spinnerFrame++
         val model = list.model
-        val anyPending = (0 until model.size).any { model.getElementAt(it).isPending() }
+        val anyPending = (0 until model.size).any { (model.getElementAt(it) as? LogEvent.Http)?.tx?.isPending() == true }
         if (anyPending) list.repaint()
         val sel = list.selectedValue
-        if (sel != null && sel.isPending()) detail.tick(store.elapsedMillis(sel.id), renderer.spinnerFrame)
+        if (sel is LogEvent.Http && sel.tx.isPending()) detail.tick(store.elapsedMillis(sel.id), renderer.spinnerFrame)
     }
 
     override fun dispose() {
@@ -286,9 +322,9 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
             if (!SwingUtilities.isLeftMouseButton(e)) return
             val idx = indexAt(e)
             if (idx < 0) return
-            // Only the hovered, non-muted row paints the cURL affordance.
+            // Only the hovered, non-muted row paints the cURL affordance (HTTP rows only).
             if (idx != renderer.hoveredIndex) return
-            val tx = list.model.getElementAt(idx)
+            val tx = (list.model.getElementAt(idx) as? LogEvent.Http)?.tx ?: return
             val bounds = list.getCellBounds(idx, idx) ?: return
             if (!MutedEndpoints.isMuted(tx) && renderer.isInCurlZone(bounds.width, e.x - bounds.x)) {
                 copyToClipboard(CurlBuilder.build(tx), "cURL copied")
@@ -309,7 +345,13 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
             if (!e.isPopupTrigger) return
             val idx = indexAt(e).takeIf { it >= 0 } ?: return
             list.selectedIndex = idx
-            val tx = list.selectedValue ?: return
+            when (val ev = list.selectedValue ?: return) {
+                is LogEvent.Http -> httpMenu(ev.tx, e)
+                is LogEvent.Fcm -> fcmMenu(ev.msg, e)
+            }
+        }
+
+        private fun httpMenu(tx: Transaction, e: MouseEvent) {
             val key = MutedEndpoints.keyOf(tx)
             val muted = MutedEndpoints.isMuted(tx)
 
@@ -326,6 +368,25 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
                 add(item(if (muted) "Unmute  $key" else "Mute  $key") { MutedEndpoints.toggle(tx); list.repaint() })
                 if (MutedEndpoints.patterns().isNotEmpty()) {
                     add(item("Clear all mutes") { MutedEndpoints.clearAll(); list.repaint() })
+                }
+                show(list, e.x, e.y)
+            }
+        }
+
+        private fun fcmMenu(msg: FcmMessage, e: MouseEvent) {
+            JPopupMenu().apply {
+                add(item("Copy as JSON") {
+                    copyToClipboard(prettyJson.encodeToString(FcmMessage.serializer(), msg), "FCM JSON copied")
+                })
+                if (msg.data.isNotEmpty()) {
+                    add(item("Copy data payload") {
+                        copyToClipboard(
+                            prettyJson.encodeToString(
+                                kotlinx.serialization.serializer<Map<String, String>>(), msg.data,
+                            ),
+                            "Data payload copied",
+                        )
+                    })
                 }
                 show(list, e.x, e.y)
             }
@@ -355,7 +416,7 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         override fun actionPerformed(e: AnActionEvent) {
             store.clear()
             reader.clearBuffer()
-            detail.show(null)
+            showDetail(null)
             refreshList()
         }
     }

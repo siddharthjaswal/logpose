@@ -4,7 +4,7 @@ import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
-import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.model.LogEvent
 import java.awt.Color
 import java.awt.Component
 import java.awt.Cursor
@@ -22,19 +22,33 @@ import javax.swing.JPanel
 import javax.swing.SwingConstants
 import javax.swing.event.DocumentEvent
 
+/** The two kinds of event in the unified stream. */
+enum class EventType { NET, FCM }
+
 /** Structured filter state — replaces the free-text grammar with one-click toggles. */
 data class FilterState(
     val urlQuery: String = "",
     val methods: Set<String> = emptySet(),
     val statusClasses: Set<Int> = emptySet(), // 2,3,4,5 -> 2xx..5xx
     val hideNoise: Boolean = false,
+    /** Restrict to these event kinds; empty = show all. */
+    val types: Set<EventType> = emptySet(),
     /**
      * "Duplicates only" — applied by the panel (not [matches]), since duplicate membership
-     * is a property of the whole capture, not of a single transaction in isolation.
+     * is a property of the whole capture, not of a single event in isolation.
      */
     val duplicatesOnly: Boolean = false,
 ) {
-    fun matches(tx: Transaction): Boolean {
+    fun matches(event: LogEvent): Boolean = when (event) {
+        is LogEvent.Http -> types.allowsHttp() && matchesHttp(event)
+        is LogEvent.Fcm -> types.allowsFcm() && matchesFcm(event)
+    }
+
+    private fun Set<EventType>.allowsHttp() = isEmpty() || EventType.NET in this
+    private fun Set<EventType>.allowsFcm() = isEmpty() || EventType.FCM in this
+
+    private fun matchesHttp(event: LogEvent.Http): Boolean {
+        val tx = event.tx
         if (urlQuery.isNotBlank() && !tx.request.url.contains(urlQuery, ignoreCase = true)) return false
         if (methods.isNotEmpty() && tx.request.method.uppercase() !in methods) return false
         if (statusClasses.isNotEmpty()) {
@@ -42,6 +56,20 @@ data class FilterState(
             if (cls !in statusClasses) return false
         }
         if (hideNoise && MutedEndpoints.isMuted(tx)) return false
+        return true
+    }
+
+    private fun matchesFcm(event: LogEvent.Fcm): Boolean {
+        // HTTP-only chips (method / status) narrow to HTTP, so an active selection hides FCM.
+        if (methods.isNotEmpty() || statusClasses.isNotEmpty()) return false
+        if (urlQuery.isNotBlank()) {
+            val m = event.msg
+            val haystack = listOfNotNull(
+                m.notification?.title, m.notification?.body, m.from, m.messageId,
+                m.collapseKey, m.token,
+            )
+            if (haystack.none { it.contains(urlQuery, ignoreCase = true) }) return false
+        }
         return true
     }
 }
@@ -69,6 +97,10 @@ class FilterBar : JPanel() {
     )
     private val hideNoise = ToggleSwitch { onChange() }
     private val dupChip = chip("⚠ Dupes", Theme.warn, flat = false)
+    private val typeChips = linkedMapOf(
+        EventType.NET to chip("NET", Theme.accent, flat = true),
+        EventType.FCM to chip("FCM", Theme.methodColor("PATCH"), flat = true),
+    )
     private val count = JBLabel().apply { foreground = Theme.textMuted }
 
     init {
@@ -93,6 +125,7 @@ class FilterBar : JPanel() {
         methods = methodChips.filterValues { it.selected }.keys,
         statusClasses = statusChips.filterValues { it.selected }.keys,
         hideNoise = hideNoise.on,
+        types = typeChips.filterValues { it.selected }.keys,
         duplicatesOnly = dupChip.selected,
     )
 
@@ -115,8 +148,26 @@ class FilterBar : JPanel() {
             methodChips.values.forEach { add(it) }
         }
 
+        val typeGroup = object : JPanel() {
+            override fun paintComponent(g: Graphics) {
+                val g2 = g.create() as Graphics2D
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = Theme.borderStrong
+                g2.drawRoundRect(0, 0, width - 1, height - 1, 8, 8)
+                g2.dispose()
+                super.paintComponent(g)
+            }
+        }.apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            border = JBUI.Borders.empty(1)
+            typeChips.values.forEach { add(it) }
+        }
+
         return hbox(
             search, strut(12),
+            label("TYPE"), strut(6), typeGroup,
+            strut(12), divider(), strut(12),
             label("METHOD"), strut(6), methodGroup,
             strut(12), divider(), strut(12),
             label("STATUS"), strut(6),

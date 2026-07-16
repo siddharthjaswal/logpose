@@ -190,10 +190,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v0.9.11")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.0.0")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v0.9.11")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.0.0")
 }
 ```
 
@@ -211,6 +211,44 @@ belt-and-suspenders. (Prefer a single artifact in all variants? Use only the
 `debugImplementation` line and rely on the `enabled` flag.) See
 [`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
 header redaction, custom tag, custom transport).
+
+### 2b. (Optional) See FCM push messages too
+
+LogPose can show Firebase Cloud Messaging pushes and token refreshes inline in the same
+timeline as your HTTP traffic. Since a push isn't OkHttp traffic, you hand each one to
+LogPose from your `FirebaseMessagingService`. LogPose stays Firebase-free — you copy the
+fields you care about into a plain `FcmMessageInfo` (the no-op exposes the same API, so this
+compiles and disappears in release):
+
+```kotlin
+class MyMessagingService : FirebaseMessagingService() {
+    override fun onMessageReceived(m: RemoteMessage) {
+        LogPose.logFcmMessage(
+            FcmMessageInfo(
+                messageId = m.messageId,
+                from = m.from,
+                collapseKey = m.collapseKey,
+                sentTimeMillis = m.sentTime,
+                ttlSeconds = m.ttl,
+                priority = m.priority,
+                notificationTitle = m.notification?.title,
+                notificationBody = m.notification?.body,
+                data = m.data,
+            ),
+            LogPoseConfig(enabled = BuildConfig.DEBUG),
+        )
+        super.onMessageReceived(m)
+    }
+
+    override fun onNewToken(token: String) {
+        LogPose.logFcmToken(token, LogPoseConfig(enabled = BuildConfig.DEBUG))
+    }
+}
+```
+
+FCM rows show up with an `FCM` tag and a `NOTIF` / `DATA` / `TOKEN` badge; selecting one
+opens the notification, metadata (from, priority, ttl, collapse key), and the data payload
+as a JSON tree. Use the **TYPE** filter (`NET` / `FCM`) to narrow the stream.
 
 ### 3. Capture
 
@@ -249,9 +287,9 @@ for the device-side setup.
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v0.9.11`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.0.0`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v0.9.11`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.0.0`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).

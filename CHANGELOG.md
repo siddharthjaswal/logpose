@@ -6,6 +6,20 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-16
+
+### Added
+- **FCM support.** LogPose now shows Firebase Cloud Messaging events — incoming pushes and
+  registration-token refreshes — inline in the same timeline as HTTP traffic. FCM rows carry
+  an `FCM` tag with a `NOTIF` / `DATA` / `TOKEN` badge; selecting one opens a detail view with
+  the notification, metadata (from, priority, ttl, collapse key), and the data payload as a
+  JSON tree. A new **TYPE** filter (`NET` / `FCM`) narrows the unified stream.
+- **Library:** a new Firebase-free entry point — `LogPose.logFcmMessage(FcmMessageInfo(…))`
+  and `LogPose.logFcmToken(token)` — that the host app calls from its
+  `FirebaseMessagingService`. LogPose depends on no Firebase types, so the `logpose-no-op`
+  artifact stays a pure-JVM jar and the same call site compiles in release. Ships via JitPack
+  on the next tag.
+
 ## [0.9.11]
 
 Version-alignment release: the plugin version now matches the `logpose-android` /

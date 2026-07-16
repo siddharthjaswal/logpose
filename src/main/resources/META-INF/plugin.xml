@@ -26,6 +26,13 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>FCM push messages in the timeline</b> — Firebase Cloud Messaging pushes and
+                token refreshes now appear inline alongside HTTP traffic, tagged
+                <code>FCM</code> with a <code>NOTIF</code>/<code>DATA</code>/<code>TOKEN</code>
+                badge. Selecting one shows the notification, metadata, and the data payload as a
+                JSON tree. A new <b>TYPE</b> filter (<code>NET</code>/<code>FCM</code>) narrows the
+                stream. Feed events from your <code>FirebaseMessagingService</code> via the new
+                <code>LogPose.logFcmMessage</code> / <code>logFcmToken</code> library API.</li>
             <li><b>Failed requests now show why</b> — instead of an opaque <code>"(failed)"</code>,
                 the Response and Overview cards display the captured exception (connection reset,
                 timeout, cleartext-not-permitted, …) so the failure is diagnosable.</li>

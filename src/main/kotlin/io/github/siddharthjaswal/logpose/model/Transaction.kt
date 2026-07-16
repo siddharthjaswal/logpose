@@ -78,3 +78,42 @@ data class Chunk(
     val total: Int,
     val payload: String,
 )
+
+/**
+ * A Firebase Cloud Messaging event (an incoming push, or a registration-token refresh),
+ * emitted by the on-device library on the same logcat tag as [Transaction] and told apart
+ * by [kind] = "fcm". Mirrors the library's `wire/Wire.kt`.
+ */
+@Serializable
+data class FcmMessage(
+    /** Discriminator: always "fcm", so the parser can tell this from a [Transaction]. */
+    val kind: String = "fcm",
+    /** Correlation id — the FCM messageId when present, otherwise a generated short id. */
+    val id: String,
+    /** "message" (an incoming push) or "token" (onNewToken). */
+    val event: String = "message",
+    /** Host-device epoch millis when the app handed the event to LogPose. */
+    val receivedAtMillis: Long = 0,
+    // message events:
+    val messageId: String? = null,
+    val from: String? = null,
+    val to: String? = null,
+    val collapseKey: String? = null,
+    val messageType: String? = null,
+    val sentTimeMillis: Long? = null,
+    val ttlSeconds: Int? = null,
+    val priority: Int? = null,
+    val notification: FcmNotification? = null,
+    val data: Map<String, String> = emptyMap(),
+    // token events:
+    val token: String? = null,
+)
+
+@Serializable
+data class FcmNotification(
+    val title: String? = null,
+    val body: String? = null,
+    val channelId: String? = null,
+    val clickAction: String? = null,
+    val imageUrl: String? = null,
+)

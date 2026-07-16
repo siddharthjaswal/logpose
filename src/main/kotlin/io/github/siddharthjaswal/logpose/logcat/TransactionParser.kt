@@ -1,17 +1,20 @@
 package io.github.siddharthjaswal.logpose.logcat
 
 import io.github.siddharthjaswal.logpose.model.Chunk
+import io.github.siddharthjaswal.logpose.model.FcmMessage
+import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
 import kotlinx.serialization.json.Json
 
 /**
- * Turns raw logcat message payloads (one JSON object per line) into [Transaction]s,
+ * Turns raw logcat message payloads (one JSON object per line) into [LogEvent]s,
  * transparently reassembling multi-chunk payloads.
  *
- * A line is either:
- *  - a full [Transaction] JSON object, or
- *  - a [Chunk] envelope (has "seq"/"total"/"payload" fields) that must be joined
- *    with its siblings before parsing.
+ * A line is one of:
+ *  - a full HTTP [Transaction] JSON object,
+ *  - an [FcmMessage] JSON object (discriminated by `"kind":"fcm"`), or
+ *  - a [Chunk] envelope (has "seq"/"total"/"payload" fields) that must be joined with its
+ *    siblings before parsing — the joined payload is then dispatched like any full line.
  */
 class TransactionParser {
 
@@ -23,8 +26,8 @@ class TransactionParser {
     // id -> received chunks, keyed by seq
     private val pending = HashMap<String, MutableMap<Int, Chunk>>()
 
-    /** Returns a [Transaction] once a full payload is available, otherwise null. */
-    fun accept(line: String): Transaction? {
+    /** Returns a [LogEvent] once a full payload is available, otherwise null. */
+    fun accept(line: String): LogEvent? {
         val trimmed = line.trim()
         if (trimmed.isEmpty() || trimmed.first() != '{') return null
 
@@ -35,10 +38,21 @@ class TransactionParser {
             return acceptChunk(chunk)
         }
 
-        return runCatching { json.decodeFromString<Transaction>(trimmed) }.getOrNull()
+        return decodeEvent(trimmed)
     }
 
-    private fun acceptChunk(chunk: Chunk): Transaction? {
+    /** Decode a full (already reassembled) JSON payload into the right [LogEvent] variant. */
+    private fun decodeEvent(payload: String): LogEvent? {
+        // FCM events carry a "kind":"fcm" discriminator; everything else is an HTTP transaction.
+        if (payload.contains("\"kind\"") && payload.contains("\"fcm\"")) {
+            return runCatching { json.decodeFromString<FcmMessage>(payload) }.getOrNull()
+                ?.let { LogEvent.Fcm(it) }
+        }
+        return runCatching { json.decodeFromString<Transaction>(payload) }.getOrNull()
+            ?.let { LogEvent.Http(it) }
+    }
+
+    private fun acceptChunk(chunk: Chunk): LogEvent? {
         // Ignore malformed envelopes; an out-of-range seq would otherwise inflate the
         // part count and permanently wedge (and leak) this id's pending entry.
         if (chunk.total <= 0 || chunk.seq !in 0 until chunk.total) return null
@@ -51,7 +65,7 @@ class TransactionParser {
             for (i in 0 until chunk.total) append(parts[i]?.payload ?: "")
         }
         pending.remove(chunk.id)
-        return runCatching { json.decodeFromString<Transaction>(payload) }.getOrNull()
+        return decodeEvent(payload)
     }
 
     fun reset() = pending.clear()
