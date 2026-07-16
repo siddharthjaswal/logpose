@@ -41,6 +41,7 @@ import java.awt.FlowLayout
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import java.awt.event.ActionEvent
+import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -141,6 +142,14 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         list.actionMap.put("copyTimeline", object : AbstractAction() {
             override fun actionPerformed(e: ActionEvent) = copySelectedTimeline()
         })
+        // Keyboard range-select: Shift+↑/↓ extends the selection (the actions are provided by
+        // the list UI). Bound explicitly so a parent shortcut can't swallow them.
+        list.inputMap.put(
+            KeyStroke.getKeyStroke(KeyEvent.VK_DOWN, InputEvent.SHIFT_DOWN_MASK), "selectNextRowExtendSelection",
+        )
+        list.inputMap.put(
+            KeyStroke.getKeyStroke(KeyEvent.VK_UP, InputEvent.SHIFT_DOWN_MASK), "selectPreviousRowExtendSelection",
+        )
         list.cellRenderer = renderer
         // Enable per-row tooltips (our JBList overrides getToolTipText for duplicate rows).
         javax.swing.ToolTipManager.sharedInstance().registerComponent(list)

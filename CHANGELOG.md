@@ -6,6 +6,12 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-07-16
+
+### Added
+- **Shift+↑/↓ keyboard range-select** in the timeline, so a run of rows can be selected (and
+  then copied with ⌘/Ctrl+C) without the mouse. Plugin-only change.
+
 ## [1.0.2] - 2026-07-16
 
 ### Added
