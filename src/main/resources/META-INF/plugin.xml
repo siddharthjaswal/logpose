@@ -26,6 +26,12 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Mock &amp; replay</b> — right-click a captured request → <b>"Mock this
+                endpoint…"</b> to serve a response back to the app instead of hitting the
+                network: edit status/body/headers, add latency, or simulate a timeout /
+                connection failure. Rules live in a <b>Mocks</b> strip (toggle, edit, delete,
+                hit counts), persist per project, and mocked rows carry a purple <code>MOCK</code>
+                pill. Requires <code>logpose-android</code> &ge; 1.1.0 on the device.</li>
             <li><b>FCM push messages in the timeline</b> — Firebase Cloud Messaging pushes and
                 token refreshes now appear inline alongside HTTP traffic, tagged
                 <code>FCM</code> with a <code>NOTIF</code>/<code>DATA</code>/<code>TOKEN</code>

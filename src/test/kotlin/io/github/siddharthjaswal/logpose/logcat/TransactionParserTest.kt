@@ -64,6 +64,36 @@ class TransactionParserTest {
         assertNull(parser.accept(""))
     }
 
+    @Test
+    fun `mocked transaction line carries the mocked flag`() {
+        val line = """{"id":"m1","request":{"method":"GET","url":"https://x/y"},"response":{"code":503},"mocked":true}"""
+        val event = parser.accept(line)
+        assertTrue(event is LogEvent.Http)
+        assertTrue((event as LogEvent.Http).tx.mocked)
+    }
+
+    @Test
+    fun `hello line dispatches a control message and is not a row`() {
+        val control = mutableListOf<ControlMessage>()
+        parser.onControl = { control.add(it) }
+        val event = parser.accept("""{"kind":"hello","pkg":"com.x","libVersion":"1.1.0","mockRevision":3}""")
+        assertNull(event, "control messages are not timeline rows")
+        assertTrue(control.single() is ControlMessage.DeviceHello)
+        assertEquals("com.x", (control.single() as ControlMessage.DeviceHello).hello.pkg)
+        assertEquals(3, (control.single() as ControlMessage.DeviceHello).hello.mockRevision)
+    }
+
+    @Test
+    fun `mock_ack line dispatches a control message with hit counts`() {
+        val control = mutableListOf<ControlMessage>()
+        parser.onControl = { control.add(it) }
+        val event = parser.accept("""{"kind":"mock_ack","pkg":"com.x","revision":5,"hits":{"a":2}}""")
+        assertNull(event)
+        val ack = (control.single() as ControlMessage.MockApplied).ack
+        assertEquals(5, ack.revision)
+        assertEquals(2, ack.hits["a"])
+    }
+
     private fun quote(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
     private companion object {

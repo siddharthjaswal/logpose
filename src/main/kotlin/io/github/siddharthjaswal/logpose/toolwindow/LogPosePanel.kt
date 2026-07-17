@@ -19,6 +19,7 @@ import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
+import io.github.siddharthjaswal.logpose.mock.MocksController
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -27,6 +28,8 @@ import io.github.siddharthjaswal.logpose.ui.CurlBuilder
 import io.github.siddharthjaswal.logpose.ui.FcmDetailView
 import io.github.siddharthjaswal.logpose.ui.FilterBar
 import io.github.siddharthjaswal.logpose.ui.isPending
+import io.github.siddharthjaswal.logpose.ui.MockRuleDialog
+import io.github.siddharthjaswal.logpose.ui.MocksBar
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.StatusDot
 import io.github.siddharthjaswal.logpose.ui.Theme
@@ -56,7 +59,7 @@ import javax.swing.ListSelectionModel
 import javax.swing.SwingUtilities
 
 /** The LogPose tool window: a master/detail view over captured HTTP transactions. */
-class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()), Disposable {
+class LogPosePanel(private val project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()), Disposable {
 
     private val store = TransactionStore()
     private val parser = TransactionParser()
@@ -87,6 +90,14 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     }
     private val filterBar = FilterBar()
     private val statusDot = StatusDot()
+
+    private val mocksController = MocksController(project)
+    private val mocksBar = MocksBar(
+        onEdit = { editMockRule(it) },
+        onDelete = { mocksController.remove(it) },
+        onToggle = { id, on -> mocksController.setEnabled(id, on) },
+        onDisableAll = { mocksController.disableAll() },
+    )
 
     private val prettyJson = Json { prettyPrint = true; encodeDefaults = true }
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
@@ -177,6 +188,14 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
         add(splitter, BorderLayout.CENTER)
 
         store.addListener { scheduleRefresh() }
+
+        // Reverse channel: device hello / mock acks arrive on the reader thread → route to the
+        // controller, then repaint the mocks bar on the EDT.
+        parser.onControl = { msg -> mocksController.onControl(msg) }
+        mocksController.addListener {
+            refreshAlarm.addRequest({ mocksBar.refresh(mocksController.rules(), mocksController.deviceState()) }, 0)
+        }
+        mocksBar.refresh(mocksController.rules(), mocksController.deviceState())
     }
 
     private fun buildHeader(): Component {
@@ -205,16 +224,24 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
             add(filterBar, BorderLayout.CENTER)
         }
 
+        // Filter bar then the mocks strip (which self-hides when there are no rules).
+        val belowToolbar = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(filterWrap, BorderLayout.NORTH)
+            add(mocksBar, BorderLayout.CENTER)
+        }
+
         return JPanel(BorderLayout()).apply {
             isOpaque = false
             add(toolbarRow, BorderLayout.NORTH)
-            add(filterWrap, BorderLayout.CENTER)
+            add(belowToolbar, BorderLayout.CENTER)
         }
     }
 
     private fun startCapture() {
         parser.reset()
         statusDot.capturing = true
+        mocksController.onCaptureStarted()
         reader.start(
             onLine = { line -> parser.accept(line)?.let { store.add(it) } },
             onError = { msg ->
@@ -232,6 +259,9 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     private fun stopCapture() {
         statusDot.capturing = false
         reader.stop()
+        // Fail-safe: clear any rules the device is holding so a forgotten mock can't linger
+        // after capture ends. Local rules persist for the next session.
+        mocksController.onCaptureStopped()
     }
 
     private fun scheduleRefresh() {
@@ -321,12 +351,24 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
     override fun dispose() {
         liveTimer.stop()
         reader.stop()
+        mocksController.onCaptureStopped()
         statusDot.dispose()
     }
 
     private fun copyToClipboard(text: String, toast: String) {
         CopyPasteManager.getInstance().setContents(StringSelection(text))
         Toast.show(list, toast)
+    }
+
+    /** Opens the mock editor pre-filled from a captured transaction, and registers the rule. */
+    private fun mockTransaction(tx: Transaction) {
+        val dialog = MockRuleDialog(project, MockRuleDialog.fromTransaction(tx), "Mock endpoint")
+        if (dialog.showAndGet()) mocksController.addOrUpdate(dialog.result())
+    }
+
+    private fun editMockRule(rule: io.github.siddharthjaswal.logpose.model.MockRule) {
+        val dialog = MockRuleDialog(project, rule, "Edit mock rule")
+        if (dialog.showAndGet()) mocksController.addOrUpdate(dialog.result())
     }
 
     /**
@@ -424,6 +466,8 @@ class LogPosePanel(project: com.intellij.openapi.project.Project) : JPanel(Borde
                 tx.response?.body?.text?.let { body ->
                     add(item("Copy response body") { copyToClipboard(body, "Response body copied") })
                 }
+                addSeparator()
+                add(item("Mock this endpoint…") { mockTransaction(tx) })
                 addSeparator()
                 add(item(if (muted) "Unmute  $key" else "Mute  $key") { MutedEndpoints.toggle(tx); list.repaint() })
                 if (MutedEndpoints.patterns().isNotEmpty()) {

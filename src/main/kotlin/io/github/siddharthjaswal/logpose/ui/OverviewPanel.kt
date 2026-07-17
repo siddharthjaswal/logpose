@@ -191,11 +191,12 @@ class OverviewPanel : CardPanel(null) {
             statusPill.set("${spinnerChar(0)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
         } else {
             val sColor = Theme.statusColor(code, tx.error)
-            val label = when {
+            val base = when {
                 tx.error != null -> "ERR"
                 code != null -> "$code ${tx.response?.message?.ifBlank { reason(code) } ?: reason(code)}".trim()
                 else -> "pending"
             }
+            val label = if (tx.mocked) "MOCK · $base" else base
             statusPill.set(label, sColor, Theme.statusTint(code, tx.error))
         }
         val mColor = Theme.methodColor(tx.request.method)

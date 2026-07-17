@@ -61,6 +61,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     private val statusTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
     private val path = JLabel()
     private val dupTag = TagLabel()
+    private val mockTag = TagLabel()
     private val sizeLabel = JLabel("", SwingConstants.RIGHT)
     private val duration = JLabel("", SwingConstants.RIGHT)
 
@@ -81,15 +82,24 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         path.font = JBUI.Fonts.label(12.5f)
         dupTag.font = JBUI.Fonts.label(10f).asBold()
         dupTag.border = JBUI.Borders.empty(2, 7)
+        mockTag.font = JBUI.Fonts.label(10f).asBold()
+        mockTag.border = JBUI.Borders.empty(2, 7)
         sizeLabel.font = JBUI.Fonts.create("JetBrains Mono", 11)
         duration.font = JBUI.Fonts.create("JetBrains Mono", 11)
 
-        // The path fills the centre; the duplicate pill (when present) tucks in at its right
-        // end, just before the size/duration meta — so path-start alignment is never disturbed.
+        // The path fills the centre; the MOCK / duplicate pills (when present) tuck in at its
+        // right end, just before the size/duration meta — so path-start alignment is never
+        // disturbed.
+        val tags = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(mockTag)
+            add(dupTag)
+        }
         val center = JPanel(BorderLayout()).apply {
             isOpaque = false
             add(path, BorderLayout.CENTER)
-            add(dupTag, BorderLayout.EAST)
+            add(tags, BorderLayout.EAST)
         }
 
         val meta = JPanel().apply {
@@ -180,6 +190,15 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
 
         path.text = value.request.path.ifBlank { value.request.url }
         path.foreground = shade(Theme.text)
+
+        if (value.mocked) {
+            val mColorMock = Theme.methodColor("PATCH")
+            mockTag.isVisible = true
+            mockTag.set("MOCK", shade(mColorMock), if (muted) Theme.tint(mColorMock, 14) else Theme.tint(mColorMock, 30))
+        } else {
+            mockTag.isVisible = false
+            mockTag.set("", Theme.text, null)
+        }
 
         val dup = duplicateProvider(value)
         if (dup != null) {

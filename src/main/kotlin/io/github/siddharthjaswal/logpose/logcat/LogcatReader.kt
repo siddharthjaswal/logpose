@@ -1,7 +1,6 @@
 package io.github.siddharthjaswal.logpose.logcat
 
 import java.io.BufferedReader
-import java.io.File
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -107,24 +106,9 @@ class LogcatReader(
 
     fun isRunning(): Boolean = running.get()
 
-    private fun baseCmd(adb: String): List<String> = buildList {
-        add(adb)
-        if (!deviceSerial.isNullOrBlank()) {
-            add("-s"); add(deviceSerial)
-        }
-    }
+    private fun baseCmd(adb: String): List<String> = Adb.baseCmd(adb, deviceSerial)
 
-    private fun resolveAdb(): String? {
-        val candidates = buildList {
-            System.getenv("ANDROID_HOME")?.let { add("$it/platform-tools/adb") }
-            System.getenv("ANDROID_SDK_ROOT")?.let { add("$it/platform-tools/adb") }
-            val home = System.getProperty("user.home")
-            add("$home/Library/Android/sdk/platform-tools/adb") // macOS default
-            add("$home/Android/Sdk/platform-tools/adb")         // Linux default
-            add("adb")                                          // PATH fallback
-        }
-        return candidates.firstOrNull { it == "adb" || File(it).canExecute() }
-    }
+    private fun resolveAdb(): String? = Adb.resolve()
 
     companion object {
         const val DEFAULT_TAG = "LogPose"
