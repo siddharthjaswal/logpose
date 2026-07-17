@@ -65,12 +65,17 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
   `JsonTreePanel` (Tree + Raw JSON editor), `FilterBar` (incl. the `NET`/`FCM` TYPE toggle),
   `CurlBuilder`, `MutedEndpoints`.
 - `logcat/` — `LogcatReader` (tails `adb logcat`, all adb work **off the EDT**),
-  `TransactionParser` (reassembles chunked JSON; returns a `LogEvent`).
+  `TransactionParser` (reassembles chunked JSON; returns a `LogEvent`, and routes reverse-channel
+  `ControlMessage`s — hello / mock-ack — to `onControl`), `Adb` (shared adb resolve + cmd prefix).
+- `mock/` — `MocksController`: owns the rule set, persists it per project, and pushes rules to
+  the device via `adb shell am broadcast` (**off the EDT**); consumes hello/ack control messages
+  to track sync + hit counts. Clears device rules on Stop Capture.
 - `store/` — `TransactionStore` (capped, insertion-ordered, id-keyed; holds `LogEvent`s).
 - `analysis/` — `DuplicateDetector` (flags repeated requests; HTTP-only, pure + unit-tested).
-- `model/Transaction.kt` — the wire contract shared (by structure) with the library; also
-  carries `FcmMessage` (Firebase Cloud Messaging events). `model/LogEvent.kt` is the sealed
-  `Http`/`Fcm` union the whole UI switches on for the **unified** timeline.
+- `model/Transaction.kt` — the wire contract shared (by structure) with the library; carries
+  `FcmMessage` (FCM events) and the mock/reverse-channel types (`MockRule`, `MockRuleSet`,
+  `Hello`, `MockAck`; `Transaction.mocked`). `model/LogEvent.kt` is the sealed `Http`/`Fcm`
+  union the whole UI switches on for the **unified** timeline.
 - `src/main/resources/META-INF/plugin.xml` — plugin descriptor + `<change-notes>`.
 
 ### Library (`logpose-android/src/main/kotlin/io/github/siddharthjaswal/logpose/`)
@@ -79,11 +84,18 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
   (`logFcmMessage` / `logFcmToken`) plus the Firebase-free `FcmMessageInfo` holder the app
   fills from a `RemoteMessage`. LogPose references no Firebase types, so the no-op stays
   pure-JVM. Both are mirrored in `no-op/`.
-- `emit/` — `TransactionEmitter` + `LogcatEmitter` (chunked logcat output; `emit(Transaction)`
-  and `emit(FcmMessage)` share one chunker).
+- `emit/` — `TransactionEmitter` + `LogcatEmitter` (chunked logcat output; `emit(Transaction)`,
+  `emit(FcmMessage)`, `emit(Hello)`, `emit(MockAck)` share one chunker).
+- `mock/` — the device end of mock/replay: `MockRegistry` (process-wide active rules, pure +
+  unit-tested), `MockCommandReceiver` (DUMP-gated broadcast receiver that ingests chunked
+  rule pushes and acks), `LogPoseInitProvider`/`LogPoseRuntime` (zero-config auto-init that
+  learns the package name and emits the `Hello` handshake). Registered in `AndroidManifest.xml`
+  — real artifact only; the no-op ships none of it. `LogPoseInterceptor` consults
+  `MockRegistry` before `chain.proceed()` and serves matches with `mocked = true`.
 - `internal/BodyCapture` — body/header capture, gzip, multipart metadata, redaction.
-- `wire/Wire.kt` — the serialized transaction + `FcmMessage` model (must stay in sync with
-  the plugin's `model/Transaction.kt`).
+- `wire/Wire.kt` — the serialized transaction + `FcmMessage` + mock/reverse-channel model
+  (`MockRule`/`MockRuleSet`/`Hello`/`MockAck`; must stay in sync with the plugin's
+  `model/Transaction.kt`).
 - `no-op/` — the release stub; mirrors `LogPoseConfig`/`LogPoseInterceptor` exactly so call
   sites compile unchanged when swapping `debugImplementation` → `releaseImplementation`.
 

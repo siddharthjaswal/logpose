@@ -6,6 +6,22 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-17
+
+### Added
+- **Mock & replay.** Right-click any captured request → **"Mock this endpoint…"** to serve a
+  response back to the app instead of hitting the network — edit the status, body, headers,
+  add latency, or simulate a timeout / connection failure. Rules appear in a **Mocks** strip
+  under the filter bar (enable/disable, edit, delete, live hit counts, "Disable all"), persist
+  per project, and mocked rows are flagged with a purple **MOCK** pill so the timeline never
+  lies about what the app received.
+- **Library (1.1.0):** rules travel IDE → device over a new reverse channel
+  (`adb shell am broadcast` → a DUMP-permission-gated receiver that ships only in the real
+  debug artifact); the device confirms sync and reports hit counts back over the existing
+  logcat channel. `LogPoseInterceptor` short-circuits matching requests via a new
+  `MockRegistry`, gated by `LogPoseConfig(mocksEnabled = …)`. Rules clear automatically when
+  capture stops. Requires `logpose-android` ≥ 1.1.0 on the device.
+
 ## [1.0.3] - 2026-07-16
 
 ### Added

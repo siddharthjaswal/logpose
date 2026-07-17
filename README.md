@@ -261,6 +261,26 @@ as a JSON tree. Use the **TYPE** filter (`NET` / `FCM`) to narrow the stream.
 > Multiple devices attached? LogPose currently uses the default `adb` device — a picker
 > is on the roadmap.
 
+## Mock & replay
+
+LogPose can serve responses back to the app instead of hitting the network — reproduce a
+state-dependent bug, test an error/empty UI, or inject latency and failures, all without
+touching backend or app code.
+
+1. Right-click any captured request → **"Mock this endpoint…"**.
+2. Edit the status, body, headers; optionally add latency, cap the number of serves, or set
+   the behavior to **timeout** / **connection failure**. The path pattern accepts `*`
+   wildcards (e.g. `/app/v4/*/order/*`).
+3. The rule appears in the **Mocks** strip under the filter bar (toggle, edit, delete, live
+   hit counts, "Disable all"). While capture is running, matching requests are served locally
+   and the row shows a purple **MOCK** pill — the timeline always reflects what the app
+   actually received.
+
+Rules are pushed to the device over adb (`am broadcast` to a receiver gated by the `DUMP`
+permission, which only the adb shell holds — third-party apps can't reach it). The mock
+machinery ships **only in the real `logpose-android` artifact** (never the release no-op), and
+rules are cleared automatically when you stop capturing. Requires `logpose-android` ≥ 1.1.0.
+
 ## Repository layout
 
 ```
