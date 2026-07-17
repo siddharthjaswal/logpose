@@ -1,2 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Mock & replay plumbing. Ships ONLY in the real (debug) artifact — the no-op is a plain
+      JVM jar with no manifest, so release builds carry none of this.
+    -->
+    <application>
+
+        <!--
+          Zero-config auto-init: this provider starts before Application.onCreate, records the
+          host package name, and emits the LogPose `Hello` handshake. No host-app code needed.
+          The authority is app-scoped so multiple apps can't collide.
+        -->
+        <provider
+            android:name="io.github.siddharthjaswal.logpose.mock.LogPoseInitProvider"
+            android:authorities="${applicationId}.logpose-init"
+            android:exported="false"
+            android:initOrder="100" />
+
+        <!--
+          Reverse channel: the LogPose IDE plugin pushes mock rules here via
+          `adb shell am broadcast`. Exported so adb can reach it, but gated on the DUMP
+          permission (signature|privileged|development) which the adb shell holds and
+          third-party apps cannot obtain.
+        -->
+        <receiver
+            android:name="io.github.siddharthjaswal.logpose.mock.MockCommandReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP" />
+
+    </application>
+
+</manifest>

@@ -27,6 +27,12 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    testOptions {
+        // Let JVM unit tests call android.util.* (Log) without a Robolectric runtime — the
+        // mock machinery only uses Log for best-effort diagnostics.
+        unitTests.isReturnDefaultValues = true
+    }
+
     publishing {
         singleVariant("release") {
             withSourcesJar()
@@ -45,6 +51,9 @@ dependencies {
     // doesn't pin a version on consumers.
     compileOnly("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
 
 // Version comes from -Pversion (JitPack passes the git tag via $VERSION), defaulting

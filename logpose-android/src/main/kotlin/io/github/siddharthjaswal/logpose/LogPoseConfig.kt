@@ -27,4 +27,10 @@ data class LogPoseConfig(
         "Set-Cookie",
         "Proxy-Authorization",
     ),
+    /**
+     * Allow the LogPose IDE plugin to serve mock responses for matching requests
+     * (see `mock/MockRegistry`). Rules only ever arrive via adb from the developer's
+     * machine; set to false to make this build ignore them entirely.
+     */
+    val mocksEnabled: Boolean = true,
 )

@@ -102,8 +102,22 @@ LogPoseConfig(
     maxBodyBytes = 250_000,     // textual bodies larger than this are truncated
     maxLineChars = 3500,        // payloads larger than this are chunked
     redactHeaders = setOf("Authorization", "Cookie", "Set-Cookie", "Proxy-Authorization"),
+    mocksEnabled = true,        // let the IDE plugin serve mock responses (see below)
 )
 ```
+
+## Mock & replay
+
+The plugin can serve mock responses for matching requests (edit status/body/headers, add
+latency, simulate timeouts). Rules travel IDE → device via `adb shell am broadcast` to a
+receiver that ships in this artifact and is gated on the `DUMP` permission — only the adb
+shell holds it, so no third-party app can push rules. The interceptor short-circuits matching
+requests and emits them flagged `mocked = true`; the device confirms sync and reports hit
+counts back over the normal logcat channel.
+
+This lives **only in the real `logpose-android` artifact** — the release `no-op` jar contains
+no receiver, provider, or `MockRegistry`. Set `mocksEnabled = false` to opt this build out
+entirely.
 
 Want a different transport (e.g. a socket via `adb reverse`)? Implement
 `TransactionEmitter` and pass it to the interceptor:

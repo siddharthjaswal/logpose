@@ -13,6 +13,7 @@ package io.github.siddharthjaswal.logpose
  * @property maxLineChars unused.
  * @property emitPending  unused.
  * @property redactHeaders unused.
+ * @property mocksEnabled unused — the no-op never serves mocks regardless.
  */
 data class LogPoseConfig(
     val tag: String = "LogPose",
@@ -26,4 +27,5 @@ data class LogPoseConfig(
         "Set-Cookie",
         "Proxy-Authorization",
     ),
+    val mocksEnabled: Boolean = true,
 )

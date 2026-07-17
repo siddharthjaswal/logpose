@@ -4,7 +4,10 @@ import android.util.Log
 import io.github.siddharthjaswal.logpose.LogPoseConfig
 import io.github.siddharthjaswal.logpose.wire.Chunk
 import io.github.siddharthjaswal.logpose.wire.FcmMessage
+import io.github.siddharthjaswal.logpose.wire.Hello
+import io.github.siddharthjaswal.logpose.wire.MockAck
 import io.github.siddharthjaswal.logpose.wire.Transaction
+import java.util.UUID
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -27,6 +30,14 @@ class LogcatEmitter(private val config: LogPoseConfig) : TransactionEmitter {
 
     /** Emit an FCM event (incoming push or token refresh) on the same tag; see `LogPoseFcm.kt`. */
     fun emit(fcm: FcmMessage) = emitLine(fcm.id, json.encodeToString(fcm))
+
+    /** Emit the process handshake (package name + current mock revision); see `mock/`. */
+    fun emit(hello: Hello) = emitLine(controlId(), json.encodeToString(hello))
+
+    /** Emit a mock rule-set acknowledgement (revision + per-rule hit counts); see `mock/`. */
+    fun emit(ack: MockAck) = emitLine(controlId(), json.encodeToString(ack))
+
+    private fun controlId(): String = "ctl-" + UUID.randomUUID().toString().substring(0, 8)
 
     /**
      * Write [line] under the configured tag, splitting into ordered [Chunk]s (sharing [id])

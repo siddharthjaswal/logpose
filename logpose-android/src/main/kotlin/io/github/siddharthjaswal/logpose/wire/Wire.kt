@@ -15,6 +15,8 @@ data class Transaction(
     val response: Response? = null,
     val durationMillis: Long? = null,
     val error: String? = null,
+    /** True when the response was served by an active LogPose mock rule, not the network. */
+    val mocked: Boolean = false,
 )
 
 @Serializable
@@ -100,4 +102,71 @@ data class FcmNotification(
     val channelId: String? = null,
     val clickAction: String? = null,
     val imageUrl: String? = null,
+)
+
+// ---------------------------------------------------------------------------------------------
+// Mock & replay (reverse channel). Rules travel IDE → device via an adb broadcast to
+// MockCommandReceiver; Hello/MockAck travel device → IDE on the normal LogPose logcat tag
+// (discriminated by "kind", like FcmMessage). Kept structurally in sync with the plugin's
+// model/Transaction.kt.
+// ---------------------------------------------------------------------------------------------
+
+/** One mock rule: match by method + path pattern, serve the described response. */
+@Serializable
+data class MockRule(
+    /** Stable id assigned by the plugin; hit counts are keyed by it. */
+    val id: String,
+    /** HTTP method to match, or "*" for any. */
+    val method: String,
+    /** Exact request path, or a glob where '*' matches any run of characters. */
+    val pathPattern: String,
+    val status: Int = 200,
+    val headers: Map<String, String> = emptyMap(),
+    val body: String? = null,
+    val contentType: String = "application/json",
+    /** Delay before responding (also the delay before a timeout/failure fires). */
+    val latencyMillis: Long = 0,
+    /** "normal" | "timeout" | "connection_failure" */
+    val behavior: String = BEHAVIOR_NORMAL,
+    /** 0 = serve forever; N = serve N times, then the rule deactivates. */
+    val serveLimit: Int = 0,
+    val enabled: Boolean = true,
+) {
+    companion object {
+        const val BEHAVIOR_NORMAL = "normal"
+        const val BEHAVIOR_TIMEOUT = "timeout"
+        const val BEHAVIOR_CONNECTION_FAILURE = "connection_failure"
+    }
+}
+
+/** The full replacement rule set pushed by the IDE; applied atomically by revision. */
+@Serializable
+data class MockRuleSet(
+    val kind: String = "mock_rules",
+    /** Monotonic revision from the plugin; stale revisions are ignored. */
+    val revision: Int,
+    val rules: List<MockRule> = emptyList(),
+)
+
+/**
+ * Emitted on process start (init provider) and on the first intercept, so the IDE learns the
+ * app's package (needed to target the mock broadcast) and current mock revision (0 after a
+ * process death ⇒ the IDE knows to re-push).
+ */
+@Serializable
+data class Hello(
+    val kind: String = "hello",
+    val pkg: String,
+    val libVersion: String,
+    val mockRevision: Int = 0,
+)
+
+/** Emitted after a rule set applies; confirms sync and carries per-rule serve counts. */
+@Serializable
+data class MockAck(
+    val kind: String = "mock_ack",
+    val pkg: String,
+    val revision: Int,
+    /** rule id → times served so far in this process. */
+    val hits: Map<String, Int> = emptyMap(),
 )
