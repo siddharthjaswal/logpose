@@ -115,6 +115,35 @@ class MockServeTest {
         assertTrue(emitted.single().mocked)
     }
 
+    @Test fun `patch merges array elements by index without replacing the array`() {
+        MockRegistry.apply(
+            MockRuleSet(
+                revision = 1,
+                rules = listOf(
+                    MockRule(
+                        id = "arr", method = "GET", pathPattern = "/app/v1/x",
+                        mode = MockRule.MODE_PATCH,
+                        body = """{"data":[{"status":5}]}""", // override status in data[0] only
+                    )
+                ),
+            )
+        )
+        val realBody = """{"data":[{"status":3,"order_id":21047836},{"status":1}]}"""
+        val networkResponse = Response.Builder()
+            .request(request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+            .body(realBody.toResponseBody("application/json".toMediaTypeOrNull()))
+            .build()
+
+        val out = Json.parseToJsonElement(
+            interceptor.intercept(FakeChain(request()) { networkResponse }).body!!.string()
+        ).jsonObject
+        val data = out["data"]!!.let { (it as kotlinx.serialization.json.JsonArray) }
+        assertEquals(2, data.size)                                              // array not truncated
+        assertEquals(5, data[0].jsonObject["status"]!!.jsonPrimitive.int)       // element 0 overridden
+        assertEquals(21047836, data[0].jsonObject["order_id"]!!.jsonPrimitive.int) // sibling kept
+        assertEquals(1, data[1].jsonObject["status"]!!.jsonPrimitive.int)       // element 1 untouched
+    }
+
     @Test fun `unmatched request proceeds to the network`() {
         var proceeded = false
         val networkResponse = Response.Builder()

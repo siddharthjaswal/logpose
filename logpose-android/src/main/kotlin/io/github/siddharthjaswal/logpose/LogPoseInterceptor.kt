@@ -8,6 +8,7 @@ import io.github.siddharthjaswal.logpose.mock.MockRegistry
 import io.github.siddharthjaswal.logpose.wire.MockRule
 import io.github.siddharthjaswal.logpose.wire.Transaction
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import okhttp3.Interceptor
@@ -262,7 +263,12 @@ class LogPoseInterceptor @JvmOverloads constructor(
         return response
     }
 
-    /** Deep-merges [patch] into [base]: objects recurse; scalars/arrays/type-mismatches replace. */
+    /**
+     * Deep-merges [patch] into [base]: objects recurse by key; arrays recurse element-wise by
+     * index (so you can override one field inside `data[0]` without replacing the whole array —
+     * extra base elements are kept, extra patch elements appended); scalars and type-mismatches
+     * replace.
+     */
     private fun mergeJson(base: JsonElement, patch: JsonElement): JsonElement {
         if (base is JsonObject && patch is JsonObject) {
             val out = LinkedHashMap<String, JsonElement>(base)
@@ -271,6 +277,13 @@ class LogPoseInterceptor @JvmOverloads constructor(
                 out[key] = if (current != null) mergeJson(current, value) else value
             }
             return JsonObject(out)
+        }
+        if (base is JsonArray && patch is JsonArray) {
+            val out = base.toMutableList()
+            patch.forEachIndexed { i, value ->
+                if (i < out.size) out[i] = mergeJson(out[i], value) else out.add(value)
+            }
+            return JsonArray(out)
         }
         return patch
     }
