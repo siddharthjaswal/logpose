@@ -8,6 +8,12 @@ import io.github.siddharthjaswal.logpose.wire.Transaction
 import okhttp3.Call
 import okhttp3.Connection
 import okhttp3.Interceptor
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -77,6 +83,36 @@ class MockServeTest {
         assertEquals(1, emitted.size)
         assertTrue(emitted.single().mocked)
         assertTrue(emitted.single().error!!.contains("timeout"))
+    }
+
+    @Test fun `patch mode deep-merges into the real response`() {
+        MockRegistry.apply(
+            MockRuleSet(
+                revision = 1,
+                rules = listOf(
+                    MockRule(
+                        id = "p", method = "GET", pathPattern = "/app/v1/x",
+                        mode = MockRule.MODE_PATCH,
+                        body = """{"status":5,"nested":{"b":2},"added":true}""",
+                    )
+                ),
+            )
+        )
+        val realBody = """{"status":3,"name":"Vikram","nested":{"a":1}}"""
+        val networkResponse = Response.Builder()
+            .request(request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+            .body(realBody.toResponseBody("application/json".toMediaTypeOrNull()))
+            .build()
+
+        val response = interceptor.intercept(FakeChain(request()) { networkResponse })
+
+        val out = Json.parseToJsonElement(response.body!!.string()).jsonObject
+        assertEquals(5, out["status"]!!.jsonPrimitive.int)          // overridden
+        assertEquals("Vikram", out["name"]!!.jsonPrimitive.content) // kept from backend
+        assertTrue(out["added"]!!.jsonPrimitive.boolean)            // new key added
+        assertEquals(1, out["nested"]!!.jsonObject["a"]!!.jsonPrimitive.int) // nested kept
+        assertEquals(2, out["nested"]!!.jsonObject["b"]!!.jsonPrimitive.int) // nested merged
+        assertTrue(emitted.single().mocked)
     }
 
     @Test fun `unmatched request proceeds to the network`() {

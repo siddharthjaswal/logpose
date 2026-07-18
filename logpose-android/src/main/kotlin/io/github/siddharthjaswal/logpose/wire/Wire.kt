@@ -131,11 +131,20 @@ data class MockRule(
     /** 0 = serve forever; N = serve N times, then the rule deactivates. */
     val serveLimit: Int = 0,
     val enabled: Boolean = true,
+    /**
+     * "replace" — [body] is the whole response (default, back-compatible).
+     * "patch"   — let the real network response come back, then deep-merge [body] (a JSON
+     *             object) into it: object keys recurse, scalars/arrays are overwritten, new
+     *             keys are added. Lets you tweak one field and leave the rest backend-generated.
+     */
+    val mode: String = MODE_REPLACE,
 ) {
     companion object {
         const val BEHAVIOR_NORMAL = "normal"
         const val BEHAVIOR_TIMEOUT = "timeout"
         const val BEHAVIOR_CONNECTION_FAILURE = "connection_failure"
+        const val MODE_REPLACE = "replace"
+        const val MODE_PATCH = "patch"
     }
 }
 

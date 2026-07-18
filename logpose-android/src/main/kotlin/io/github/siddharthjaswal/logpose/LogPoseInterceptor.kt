@@ -7,6 +7,9 @@ import io.github.siddharthjaswal.logpose.mock.LogPoseRuntime
 import io.github.siddharthjaswal.logpose.mock.MockRegistry
 import io.github.siddharthjaswal.logpose.wire.MockRule
 import io.github.siddharthjaswal.logpose.wire.Transaction
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.Protocol
@@ -41,6 +44,8 @@ class LogPoseInterceptor @JvmOverloads constructor(
     private val emitter: TransactionEmitter = LogcatEmitter(config),
 ) : Interceptor {
 
+    private val patchJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         if (!config.enabled) return chain.proceed(request)
@@ -63,11 +68,17 @@ class LogPoseInterceptor @JvmOverloads constructor(
         )
 
         // Mock short-circuit: if an active rule matches, serve it instead of hitting the
-        // network. The transaction is still emitted (flagged mocked=true) so the timeline
-        // never lies about what the app actually received.
+        // network (replace mode), or let the real response through and patch it (patch mode).
+        // Either way the transaction is emitted flagged mocked=true, so the timeline never
+        // lies about what the app actually received.
         if (config.mocksEnabled) {
             val rule = MockRegistry.match(request.method, request.url.encodedPath)
-            if (rule != null) return serveMock(rule, request, wireRequest, id, startedAt, startNs)
+            if (rule != null) {
+                return if (rule.mode == MockRule.MODE_PATCH)
+                    servePatch(rule, chain, request, wireRequest, id, startedAt, startNs)
+                else
+                    serveMock(rule, request, wireRequest, id, startedAt, startNs)
+            }
         }
 
         // Emit a "pending" event (request only, no response) the instant the call starts,
@@ -183,6 +194,85 @@ class LogPoseInterceptor @JvmOverloads constructor(
             )
         )
         return response
+    }
+
+    /**
+     * Patch mode: hit the real network, then deep-merge the rule's JSON [MockRule.body] into
+     * the response body — override existing keys, add new ones, keep everything else the
+     * backend sent. Non-JSON responses (or an unparseable patch) pass through unchanged.
+     */
+    private fun servePatch(
+        rule: MockRule,
+        chain: Interceptor.Chain,
+        request: okhttp3.Request,
+        wireRequest: WireRequest,
+        id: String,
+        startedAt: Long,
+        startNs: Long,
+    ): Response {
+        MockRegistry.recordServe(rule)
+        if (rule.latencyMillis > 0) {
+            runCatching { Thread.sleep(rule.latencyMillis) }
+                .onFailure { Thread.currentThread().interrupt() }
+        }
+
+        val real: Response = try {
+            chain.proceed(request)
+        } catch (t: Throwable) {
+            emitter.emit(
+                Transaction(
+                    id = id, startedAtMillis = startedAt, request = wireRequest,
+                    error = t.toString(), durationMillis = elapsedMs(startNs), mocked = true,
+                )
+            )
+            throw t
+        }
+
+        val realBody = real.body
+        val mediaType = realBody?.contentType()
+        val original = runCatching { realBody?.string() ?: "" }.getOrDefault("")
+        val mergedText = runCatching {
+            val base = patchJson.parseToJsonElement(original)
+            val patch = patchJson.parseToJsonElement(rule.body ?: "{}")
+            patchJson.encodeToString(JsonElement.serializer(), mergeJson(base, patch))
+        }.getOrDefault(original) // not JSON / bad patch → leave the real body untouched
+
+        val response = real.newBuilder()
+            // Body length/encoding change, so drop the stale framing headers.
+            .removeHeader("Content-Length")
+            .removeHeader("Content-Encoding")
+            .body(mergedText.toByteArray(Charsets.UTF_8).toResponseBody(mediaType))
+            .build()
+
+        emitter.emit(
+            Transaction(
+                id = id,
+                startedAtMillis = startedAt,
+                durationMillis = elapsedMs(startNs),
+                request = wireRequest,
+                response = WireResponse(
+                    code = response.code,
+                    message = response.message,
+                    headers = BodyCapture.headersToMap(response.headers, config),
+                    body = runCatching { BodyCapture.captureResponse(response, config) }.getOrNull(),
+                ),
+                mocked = true,
+            )
+        )
+        return response
+    }
+
+    /** Deep-merges [patch] into [base]: objects recurse; scalars/arrays/type-mismatches replace. */
+    private fun mergeJson(base: JsonElement, patch: JsonElement): JsonElement {
+        if (base is JsonObject && patch is JsonObject) {
+            val out = LinkedHashMap<String, JsonElement>(base)
+            for ((key, value) in patch) {
+                val current = out[key]
+                out[key] = if (current != null) mergeJson(current, value) else value
+            }
+            return JsonObject(out)
+        }
+        return patch
     }
 
     private fun httpReason(code: Int): String = when (code) {
