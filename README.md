@@ -271,6 +271,10 @@ touching backend or app code.
 2. Edit the status, body, headers; optionally add latency, cap the number of serves, or set
    the behavior to **timeout** / **connection failure**. The path pattern accepts `*`
    wildcards (e.g. `/app/v4/*/order/*`).
+   - **Replace** mode serves your body as the whole response.
+   - **Merge** mode keeps the real backend response and deep-merges your JSON on top — change
+     one field or add keys while everything else stays backend-generated (needs
+     `logpose-android` ≥ 1.2.0).
 3. The rule appears in the **Mocks** strip under the filter bar (toggle, edit, delete, live
    hit counts, "Disable all"). While capture is running, matching requests are served locally
    and the row shows a purple **MOCK** pill — the timeline always reflects what the app

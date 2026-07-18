@@ -6,6 +6,32 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-17
+
+### Added
+- **Merge (patch) mocks** — a rule can now keep the real backend response and deep-merge your
+  JSON on top of it, instead of replacing the whole body: override a single field, add new
+  keys, and leave everything else backend-generated. Pick **"Merge into the real response"** in
+  the rule dialog's Mode selector; merge rules show a purple **MERGE** pill in the strip.
+  Requires `logpose-android` ≥ 1.2.0 on the device.
+
+### Fixed
+- The Mocks strip no longer reads "waiting for device" while mocks are actually syncing — an
+  ack now counts as device confirmation (a `Hello` only fires once per process and can predate
+  capture, so it isn't a reliable signal on its own).
+
+### Changed
+- The mock rule editor pretty-prints the response body (captured bodies arrive as one long
+  line), so values are easy to find and edit. Non-JSON bodies are shown as-is.
+- Restyled the Mocks strip to match the timeline: carded rows with a colored method badge, a
+  status / `MERGE` / `TIMEOUT` / `FAILED` pill, latency and hit chips, an on/off switch, and a
+  clearer device-sync indicator. Disabled rules read as dimmed.
+- Redesigned the mock editor dialog: grouped into Match / Behavior / Response sections with
+  titled separators, a colored method dropdown, properly sized fields (no more clipped
+  Content-Type), a bordered headers area, body line numbers + folding, and fields that gray out
+  when they don't apply (merge mode, timeout / connection failure).
+- Row context menus now carry icons, with **"Mock this endpoint…"** emphasized.
+
 ## [1.1.0] - 2026-07-17
 
 ### Added
