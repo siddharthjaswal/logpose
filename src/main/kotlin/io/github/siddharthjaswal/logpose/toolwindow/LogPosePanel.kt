@@ -2,15 +2,20 @@ package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionToolbar
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.Toggleable
 import com.intellij.openapi.ide.CopyPasteManager
+import com.intellij.openapi.project.DumbAwareAction
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.ui.OnePixelSplitter
+import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
@@ -51,9 +56,7 @@ import java.awt.event.MouseEvent
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.AbstractAction
 import javax.swing.JComponent
-import javax.swing.JMenuItem
 import javax.swing.JPanel
-import javax.swing.JPopupMenu
 import javax.swing.KeyStroke
 import javax.swing.ListSelectionModel
 import javax.swing.SwingUtilities
@@ -214,7 +217,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         }
         val toolbarRow = JPanel(BorderLayout()).apply {
             isOpaque = true; background = Theme.bg0
-            border = JBUI.Borders.empty(0, 6)
+            border = JBUI.Borders.empty(3, 8)
             add(actionsLeft, BorderLayout.WEST)
         }
 
@@ -362,13 +365,13 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     /** Opens the mock editor pre-filled from a captured transaction, and registers the rule. */
     private fun mockTransaction(tx: Transaction) {
-        val dialog = MockRuleDialog(project, MockRuleDialog.fromTransaction(tx), "Mock endpoint")
-        if (dialog.showAndGet()) mocksController.addOrUpdate(dialog.result())
+        val dialog = MockRuleDialog(project, MockRuleDialog.fromTransaction(tx), tx.response?.body?.text, "Mock endpoint")
+        if (dialog.showAndGet()) mocksController.addOrUpdate(dialog.result(), dialog.capturedBaseBody())
     }
 
     private fun editMockRule(rule: io.github.siddharthjaswal.logpose.model.MockRule) {
-        val dialog = MockRuleDialog(project, rule, "Edit mock rule")
-        if (dialog.showAndGet()) mocksController.addOrUpdate(dialog.result())
+        val dialog = MockRuleDialog(project, rule, mocksController.baseBodyFor(rule.id), "Edit mock rule")
+        if (dialog.showAndGet()) mocksController.addOrUpdate(dialog.result(), dialog.capturedBaseBody())
     }
 
     /**
@@ -440,71 +443,68 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             // whole multi-selection so "Copy timeline" acts on everything selected.
             if (idx !in list.selectedIndices) list.selectedIndex = idx
 
-            if (list.selectedIndices.size > 1) {
-                JPopupMenu().apply {
-                    add(item("Copy timeline (${list.selectedIndices.size} rows)", AllIcons.Actions.Copy) { copySelectedTimeline() })
-                    show(list, e.x, e.y)
+            val group = if (list.selectedIndices.size > 1) {
+                DefaultActionGroup().apply {
+                    add(act("Copy timeline (${list.selectedIndices.size} rows)", AllIcons.Actions.Copy) { copySelectedTimeline() })
                 }
-                return
+            } else when (val ev = list.selectedValue ?: return) {
+                is LogEvent.Http -> httpGroup(ev.tx)
+                is LogEvent.Fcm -> fcmGroup(ev.msg)
             }
-            when (val ev = list.selectedValue ?: return) {
-                is LogEvent.Http -> httpMenu(ev.tx, e)
-                is LogEvent.Fcm -> fcmMenu(ev.msg, e)
-            }
+            showActionPopup(group, e)
         }
 
-        private fun httpMenu(tx: Transaction, e: MouseEvent) {
+        private fun httpGroup(tx: Transaction): ActionGroup {
             val key = MutedEndpoints.keyOf(tx)
             val muted = MutedEndpoints.isMuted(tx)
-
-            JPopupMenu().apply {
-                add(item("Copy as cURL", AllIcons.Actions.Copy) { copyToClipboard(CurlBuilder.build(tx), "cURL copied") })
-                add(item("Copy as JSON", AllIcons.Actions.Copy) {
+            return DefaultActionGroup().apply {
+                add(act("Copy as cURL", AllIcons.Actions.Copy) { copyToClipboard(CurlBuilder.build(tx), "cURL copied") })
+                add(act("Copy as JSON", AllIcons.Actions.Copy) {
                     copyToClipboard(prettyJson.encodeToString(Transaction.serializer(), tx), "Transaction JSON copied")
                 })
-                add(item("Copy URL", AllIcons.Actions.Copy) { copyToClipboard(tx.request.url, "URL copied") })
+                add(act("Copy URL", AllIcons.Actions.Copy) { copyToClipboard(tx.request.url, "URL copied") })
                 tx.response?.body?.text?.let { body ->
-                    add(item("Copy response body", AllIcons.Actions.Copy) { copyToClipboard(body, "Response body copied") })
+                    add(act("Copy response body", AllIcons.Actions.Copy) { copyToClipboard(body, "Response body copied") })
                 }
                 addSeparator()
-                add(item("Mock this endpoint…", AllIcons.Actions.Execute, bold = true) { mockTransaction(tx) })
+                add(act("Mock this endpoint…", AllIcons.Actions.Execute) { mockTransaction(tx) })
                 addSeparator()
-                add(item(if (muted) "Unmute  $key" else "Mute  $key", AllIcons.Actions.Suspend) { MutedEndpoints.toggle(tx); list.repaint() })
+                add(act(if (muted) "Unmute  $key" else "Mute  $key", AllIcons.Actions.Suspend) { MutedEndpoints.toggle(tx); list.repaint() })
                 if (MutedEndpoints.patterns().isNotEmpty()) {
-                    add(item("Clear all mutes", AllIcons.Actions.GC) { MutedEndpoints.clearAll(); list.repaint() })
+                    add(act("Clear all mutes", AllIcons.Actions.GC) { MutedEndpoints.clearAll(); list.repaint() })
                 }
-                show(list, e.x, e.y)
             }
         }
 
-        private fun fcmMenu(msg: FcmMessage, e: MouseEvent) {
-            JPopupMenu().apply {
-                add(item("Copy as JSON", AllIcons.Actions.Copy) {
-                    copyToClipboard(prettyJson.encodeToString(FcmMessage.serializer(), msg), "FCM JSON copied")
+        private fun fcmGroup(msg: FcmMessage): ActionGroup = DefaultActionGroup().apply {
+            add(act("Copy as JSON", AllIcons.Actions.Copy) {
+                copyToClipboard(prettyJson.encodeToString(FcmMessage.serializer(), msg), "FCM JSON copied")
+            })
+            if (msg.data.isNotEmpty()) {
+                add(act("Copy data payload", AllIcons.Actions.Copy) {
+                    copyToClipboard(
+                        prettyJson.encodeToString(kotlinx.serialization.serializer<Map<String, String>>(), msg.data),
+                        "Data payload copied",
+                    )
                 })
-                if (msg.data.isNotEmpty()) {
-                    add(item("Copy data payload", AllIcons.Actions.Copy) {
-                        copyToClipboard(
-                            prettyJson.encodeToString(
-                                kotlinx.serialization.serializer<Map<String, String>>(), msg.data,
-                            ),
-                            "Data payload copied",
-                        )
-                    })
-                }
-                show(list, e.x, e.y)
             }
         }
 
-        private fun item(
-            text: String,
-            icon: javax.swing.Icon? = null,
-            bold: Boolean = false,
-            action: () -> Unit,
-        ) = JMenuItem(text, icon).apply {
-            addActionListener { action() }
-            iconTextGap = JBUI.scale(8)
-            if (bold) font = font.deriveFont(java.awt.Font.BOLD)
+        /** A one-off menu action (native IDE popup item). */
+        private fun act(text: String, icon: javax.swing.Icon?, run: () -> Unit): AnAction =
+            object : DumbAwareAction(text, null, icon) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun actionPerformed(e: AnActionEvent) = run()
+            }
+
+        /** Shows a native, rounded, keyboard-navigable action-group popup at the click. */
+        private fun showActionPopup(group: ActionGroup, e: MouseEvent) {
+            JBPopupFactory.getInstance()
+                .createActionGroupPopup(
+                    null, group, DataContext.EMPTY_CONTEXT,
+                    JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
+                )
+                .show(RelativePoint(e))
         }
     }
 

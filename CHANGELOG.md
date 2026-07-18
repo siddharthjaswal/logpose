@@ -6,6 +6,40 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-18
+
+### Fixed
+- The mock editor dialog failed to open ("Mock this endpoint…" and edit did nothing) — a
+  property init-order bug in the new field-tree editor threw during construction. Fixed.
+
+## [1.4.0] - 2026-07-18
+
+### Added
+- **Field-by-field mock editor.** The mock dialog now edits a captured response as a JSON
+  **tree**: fold the parts you don't care about, edit any value in place, and in merge mode tick
+  exactly the fields to override (a changed value shows the original beside it). Add new keys,
+  or drop to a raw-text view. Everything unticked stays backend-generated.
+- **Compare with original** — a native side-by-side diff of the captured response vs. what the
+  app will actually receive (the merged result in merge mode).
+- **Library (1.2.1):** the merge now recurses into arrays element-wise by index, so you can
+  override one field inside `data[0]` without replacing the whole array. Requires
+  `logpose-android` ≥ 1.2.1 on the device for array merges.
+
+### Changed
+- The mock dialog reads top-to-bottom as a sentence (When a request matches → Then → Send) and
+  hides fields that don't apply to the chosen mode/behavior instead of graying them out.
+
+## [1.3.0] - 2026-07-17
+
+### Changed
+- **Row context menus are now native IDE popups** (`JBPopupFactory` action groups) instead of
+  raw Swing menus — rounded corners, proper drop shadow, themed hover, keyboard navigation, and
+  type-to-filter, matching the IDE's own right-click menus.
+- Polished spacing throughout — roomier tool window header, filter bar, and detail padding.
+
+### Added
+- The tool window header shows the installed plugin version (e.g. `LogPose  v1.3.0`).
+
 ## [1.2.0] - 2026-07-17
 
 ### Added

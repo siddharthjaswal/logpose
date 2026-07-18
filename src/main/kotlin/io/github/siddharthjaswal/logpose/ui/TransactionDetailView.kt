@@ -44,7 +44,7 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     init {
         isOpaque = true
         background = Theme.bg0
-        border = JBUI.Borders.empty(6)
+        border = JBUI.Borders.empty(8)
 
         overview.onCopyCurl = { current?.let { copy(CurlBuilder.build(it), "cURL copied") } }
         overview.onCopyJson = { current?.let { copy(pretty.encodeToString(Transaction.serializer(), it), "Transaction JSON copied") } }

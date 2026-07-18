@@ -106,7 +106,7 @@ class FilterBar : JPanel() {
     init {
         isOpaque = false
         layout = java.awt.BorderLayout()
-        border = JBUI.Borders.empty(6, 10)
+        border = JBUI.Borders.empty(7, 12)
 
         search.textEditor.emptyText.text = "URL or path…"
         val sd = Dimension(JBUI.scale(168), search.preferredSize.height)

@@ -9,6 +9,8 @@ import io.github.siddharthjaswal.logpose.model.MockAck
 import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.MockRuleSet
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.util.Base64
 import java.util.concurrent.TimeUnit
@@ -40,6 +42,9 @@ class MocksController(private val project: Project) {
     // Rules are newest-first: the device matches first-in-list, so a newer rule for the same
     // endpoint overrides an older one.
     private val rules = mutableListOf<MockRule>()
+    // ruleId -> the captured response the rule was seeded from, so the field-tree editor can be
+    // rebuilt when editing later. Plugin-side only; never pushed to the device.
+    private val baseBodies = mutableMapOf<String, String>()
     private var revision: Int = props.getInt(KEY_REVISION, 0)
 
     private var pkg: String? = props.getValue(KEY_PKG)
@@ -58,6 +63,7 @@ class MocksController(private val project: Project) {
 
     init {
         loadRules()
+        loadBaseBodies()
     }
 
     // ---- Rule CRUD (EDT) ------------------------------------------------------------------
@@ -66,13 +72,24 @@ class MocksController(private val project: Project) {
 
     @Synchronized fun activeCount(): Int = rules.count { it.enabled }
 
+    /** The captured response a rule was seeded from, if known (for the field-tree editor). */
+    @Synchronized fun baseBodyFor(id: String): String? = baseBodies[id]
+
     /** Adds a new rule (newest-first) or replaces an existing one with the same id. */
-    fun addOrUpdate(rule: MockRule) = mutate {
-        val i = rules.indexOfFirst { it.id == rule.id }
-        if (i >= 0) rules[i] = rule else rules.add(0, rule)
+    fun addOrUpdate(rule: MockRule, baseBody: String? = null) {
+        if (baseBody != null) synchronized(this) { baseBodies[rule.id] = baseBody }
+        mutate {
+            val i = rules.indexOfFirst { it.id == rule.id }
+            if (i >= 0) rules[i] = rule else rules.add(0, rule)
+        }
+        persistBaseBodies()
     }
 
-    fun remove(id: String) = mutate { rules.removeAll { it.id == id } }
+    fun remove(id: String) {
+        synchronized(this) { baseBodies.remove(id) }
+        mutate { rules.removeAll { it.id == id } }
+        persistBaseBodies()
+    }
 
     fun setEnabled(id: String, enabled: Boolean) = mutate {
         val i = rules.indexOfFirst { it.id == id }
@@ -203,6 +220,17 @@ class MocksController(private val project: Project) {
 
     private fun persistRevision() = props.setValue(KEY_REVISION, revision, 0)
 
+    private fun persistBaseBodies() {
+        val serializer = MapSerializer(String.serializer(), String.serializer())
+        props.setValue(KEY_BASES, json.encodeToString(serializer, synchronized(this) { HashMap(baseBodies) }))
+    }
+
+    private fun loadBaseBodies() {
+        val raw = props.getValue(KEY_BASES) ?: return
+        val serializer = MapSerializer(String.serializer(), String.serializer())
+        runCatching { json.decodeFromString(serializer, raw) }.getOrNull()?.let { baseBodies.putAll(it) }
+    }
+
     private companion object {
         const val RECEIVER = "io.github.siddharthjaswal.logpose.mock.MockCommandReceiver"
         const val FLAG_INCLUDE_STOPPED_PACKAGES = "0x00000020"
@@ -210,5 +238,6 @@ class MocksController(private val project: Project) {
         const val KEY_RULES = "logpose.mock.rules"
         const val KEY_REVISION = "logpose.mock.revision"
         const val KEY_PKG = "logpose.mock.pkg"
+        const val KEY_BASES = "logpose.mock.baseBodies"
     }
 }

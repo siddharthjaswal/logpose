@@ -58,7 +58,7 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
     init {
         isOpaque = true
         background = Theme.bg0
-        border = JBUI.Borders.empty(6)
+        border = JBUI.Borders.empty(8)
 
         overview.add(row(hbox(kindPill, Box.createHorizontalStrut(JBUI.scale(8)), eventLabel), fill = false))
         overview.add(vGap(8))
