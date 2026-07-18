@@ -442,7 +442,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
             if (list.selectedIndices.size > 1) {
                 JPopupMenu().apply {
-                    add(item("Copy timeline (${list.selectedIndices.size} rows)") { copySelectedTimeline() })
+                    add(item("Copy timeline (${list.selectedIndices.size} rows)", AllIcons.Actions.Copy) { copySelectedTimeline() })
                     show(list, e.x, e.y)
                 }
                 return
@@ -458,20 +458,20 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             val muted = MutedEndpoints.isMuted(tx)
 
             JPopupMenu().apply {
-                add(item("Copy as cURL") { copyToClipboard(CurlBuilder.build(tx), "cURL copied") })
-                add(item("Copy as JSON") {
+                add(item("Copy as cURL", AllIcons.Actions.Copy) { copyToClipboard(CurlBuilder.build(tx), "cURL copied") })
+                add(item("Copy as JSON", AllIcons.Actions.Copy) {
                     copyToClipboard(prettyJson.encodeToString(Transaction.serializer(), tx), "Transaction JSON copied")
                 })
-                add(item("Copy URL") { copyToClipboard(tx.request.url, "URL copied") })
+                add(item("Copy URL", AllIcons.Actions.Copy) { copyToClipboard(tx.request.url, "URL copied") })
                 tx.response?.body?.text?.let { body ->
-                    add(item("Copy response body") { copyToClipboard(body, "Response body copied") })
+                    add(item("Copy response body", AllIcons.Actions.Copy) { copyToClipboard(body, "Response body copied") })
                 }
                 addSeparator()
-                add(item("Mock this endpoint…") { mockTransaction(tx) })
+                add(item("Mock this endpoint…", AllIcons.Actions.Execute, bold = true) { mockTransaction(tx) })
                 addSeparator()
-                add(item(if (muted) "Unmute  $key" else "Mute  $key") { MutedEndpoints.toggle(tx); list.repaint() })
+                add(item(if (muted) "Unmute  $key" else "Mute  $key", AllIcons.Actions.Suspend) { MutedEndpoints.toggle(tx); list.repaint() })
                 if (MutedEndpoints.patterns().isNotEmpty()) {
-                    add(item("Clear all mutes") { MutedEndpoints.clearAll(); list.repaint() })
+                    add(item("Clear all mutes", AllIcons.Actions.GC) { MutedEndpoints.clearAll(); list.repaint() })
                 }
                 show(list, e.x, e.y)
             }
@@ -479,11 +479,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
         private fun fcmMenu(msg: FcmMessage, e: MouseEvent) {
             JPopupMenu().apply {
-                add(item("Copy as JSON") {
+                add(item("Copy as JSON", AllIcons.Actions.Copy) {
                     copyToClipboard(prettyJson.encodeToString(FcmMessage.serializer(), msg), "FCM JSON copied")
                 })
                 if (msg.data.isNotEmpty()) {
-                    add(item("Copy data payload") {
+                    add(item("Copy data payload", AllIcons.Actions.Copy) {
                         copyToClipboard(
                             prettyJson.encodeToString(
                                 kotlinx.serialization.serializer<Map<String, String>>(), msg.data,
@@ -496,8 +496,16 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             }
         }
 
-        private fun item(text: String, action: () -> Unit) =
-            JMenuItem(text).apply { addActionListener { action() } }
+        private fun item(
+            text: String,
+            icon: javax.swing.Icon? = null,
+            bold: Boolean = false,
+            action: () -> Unit,
+        ) = JMenuItem(text, icon).apply {
+            addActionListener { action() }
+            iconTextGap = JBUI.scale(8)
+            if (bold) font = font.deriveFont(java.awt.Font.BOLD)
+        }
     }
 
     private inner class CaptureToggleAction :

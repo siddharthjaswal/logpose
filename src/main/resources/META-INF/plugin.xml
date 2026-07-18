@@ -26,6 +26,10 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Merge (patch) mocks</b> — keep the real backend response and deep-merge your
+                JSON on top: override one field, add keys, leave the rest untouched. Pick
+                "Merge into the real response" in the rule dialog. Needs
+                <code>logpose-android</code> &ge; 1.2.0.</li>
             <li><b>Mock &amp; replay</b> — right-click a captured request → <b>"Mock this
                 endpoint…"</b> to serve a response back to the app instead of hitting the
                 network: edit status/body/headers, add latency, or simulate a timeout /

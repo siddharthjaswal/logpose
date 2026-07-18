@@ -246,8 +246,8 @@ class ToggleChip(text: String, private val color: Color, private val flat: Boole
 }
 
 /** A small on/off switch. */
-class ToggleSwitch(private val onToggle: () -> Unit) : JComponent() {
-    var on = false
+class ToggleSwitch(initialOn: Boolean = false, private val onToggle: () -> Unit) : JComponent() {
+    var on = initialOn
         private set
 
     init {

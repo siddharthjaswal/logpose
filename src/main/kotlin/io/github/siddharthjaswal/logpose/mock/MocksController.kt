@@ -122,9 +122,15 @@ class MocksController(private val project: Project) {
 
     private fun onAck(ack: MockAck) {
         synchronized(this) {
+            // An ack is proof the device is alive and running ≥ 1.1.0 — even stronger than a
+            // Hello, which only fires once per process and can predate capture. So mark the
+            // device confirmed here too; otherwise the bar reads "waiting" while mocks work.
+            pkg = ack.pkg
+            helloSeen = true
             syncedRevision = ack.revision
             hits = ack.hits
         }
+        props.setValue(KEY_PKG, ack.pkg)
         notifyChanged()
     }
 
