@@ -17,6 +17,7 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
+import com.intellij.ui.components.panels.VerticalLayout
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -96,6 +97,19 @@ class MockRuleDialog(
         font = JBUI.Fonts.create("JetBrains Mono", 12)
         emptyText.text = "X-Header: value"
     }
+    // Response headers are rarely mocked, so keep them collapsed unless the rule already has some.
+    private var headersExpanded = initial.headers.isNotEmpty()
+    private val headersScroll = JBScrollPane(headers).apply {
+        border = JBUI.Borders.customLine(Theme.borderStrong, 1)
+        preferredSize = Dimension(JBUI.scale(520), JBUI.scale(58))
+    }
+    private val headersToggle = JBLabel().apply {
+        foreground = Theme.accent
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) { headersExpanded = !headersExpanded; updateHeaders() }
+        })
+    }
     private val body = EditorTextField(
         EditorFactory.getInstance().createDocument(prettyBody(initial.body)),
         project, JsonFileType.INSTANCE, false, false,
@@ -114,7 +128,6 @@ class MockRuleDialog(
     private var fieldsActive = false
     private val viewToggle = link("Edit as text") { toggleView() }
     private val diffLink = link("Compare with original") { showDiff() }
-    private val bodyHint = JBLabel().apply { foreground = Theme.textMuted; font = JBUI.Fonts.label(11f) }
 
     // rows/sections we show & hide
     private lateinit var behaviorRow: JComponent
@@ -132,8 +145,9 @@ class MockRuleDialog(
     }
 
     override fun createCenterPanel(): JComponent {
-        val column = JPanel().apply {
-            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+        // VerticalLayout stretches every child to the full width, so labels/separators/links
+        // all align left/right cleanly (a plain vertical BoxLayout centres narrow rows).
+        val column = JPanel(VerticalLayout(JBUI.scale(3))).apply {
             preferredSize = Dimension(JBUI.scale(700), JBUI.scale(640))
         }
 
@@ -142,34 +156,35 @@ class MockRuleDialog(
         column.add(hint("Path may use * as a wildcard, e.g. /app/v4/*/order/*"))
 
         column.add(TitledSeparator("Then"))
-        column.add(row("Mode", hbox(mode, Box.createHorizontalGlue())))
+        column.add(row("Mode", hbox(mode, glue())))
         behaviorRow = row("On match", hbox(behavior, hgap(12), muted("Latency"), hgap(6), latency, small("ms"),
-            hgap(12), muted("Serve limit"), hgap(6), serveLimit, small("0 = always"), Box.createHorizontalGlue()))
+            hgap(12), muted("Serve limit"), hgap(6), serveLimit, small("0 = always"), glue()))
         column.add(behaviorRow)
 
-        sendSeparator = TitledSeparator("Send")
+        sendSeparator = TitledSeparator("Response")
         column.add(sendSeparator)
-        replaceFields = JPanel().apply {
-            isOpaque = false; layout = BoxLayout(this, BoxLayout.Y_AXIS); alignmentX = Component.LEFT_ALIGNMENT
-            add(row("Status", hbox(status, hgap(12), muted("Content-Type"), hgap(6), contentType, Box.createHorizontalGlue())))
-            add(row("Headers", JBScrollPane(headers).apply {
-                border = JBUI.Borders.customLine(Theme.borderStrong, 1)
-                preferredSize = Dimension(JBUI.scale(560), JBUI.scale(58)); alignmentX = Component.LEFT_ALIGNMENT
-            }))
+        replaceFields = JPanel(VerticalLayout(JBUI.scale(2))).apply {
+            isOpaque = false
+            add(row("Status", hbox(status, hgap(12), muted("Content-Type"), hgap(6), contentType, glue())))
+            add(JPanel(BorderLayout()).apply { isOpaque = false; add(headersToggle, BorderLayout.WEST) })
+            add(JPanel(BorderLayout()).apply {
+                isOpaque = false; border = JBUI.Borders.empty(2, 106, 2, 0)
+                add(headersScroll, BorderLayout.CENTER)
+            })
         }
         column.add(replaceFields)
+        updateHeaders()
 
         val bodyHeader = JPanel(BorderLayout()).apply {
-            isOpaque = false; alignmentX = Component.LEFT_ALIGNMENT
-            border = JBUI.Borders.emptyTop(4)
-            add(JBLabel("Response body").apply { foreground = Theme.textDim }, BorderLayout.WEST)
-            add(hbox(viewToggle, hgap(14), diffLink, hgap(2)), BorderLayout.EAST)
-            maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+            isOpaque = false
+            border = JBUI.Borders.empty(6, 0, 4, 0)
+            add(JBLabel("Body").apply { foreground = Theme.textDim; font = JBUI.Fonts.label(12f).asBold() }, BorderLayout.WEST)
+            add(hbox(viewToggle, hgap(16), diffLink), BorderLayout.EAST)
         }
-        bodyPanel.preferredSize = Dimension(JBUI.scale(660), JBUI.scale(300))
-        sendBody = JPanel().apply {
-            isOpaque = false; layout = BoxLayout(this, BoxLayout.Y_AXIS); alignmentX = Component.LEFT_ALIGNMENT
-            add(bodyHeader); add(vgap(4)); add(bodyHint); add(vgap(4)); add(bodyPanel)
+        bodyPanel.preferredSize = Dimension(JBUI.scale(660), JBUI.scale(348))
+        sendBody = JPanel(VerticalLayout(JBUI.scale(2))).apply {
+            isOpaque = false
+            add(bodyHeader); add(bodyPanel)
         }
         column.add(sendBody)
         return column
@@ -186,12 +201,15 @@ class MockRuleDialog(
             replaceFields.isVisible = !patch && behaviorKey() == MockRule.BEHAVIOR_NORMAL
             sendBody.isVisible = serves
         }
-        bodyHint.text = if (patch)
-            "Tick the fields to override — everything else stays exactly as the backend sent it."
-        else
-            "The full response body sent to the app."
         diffLink.isVisible = baseBody != null
         if (fieldsActive) seedTree()
+    }
+
+    private fun updateHeaders() {
+        val count = parseHeaders(headers.text).size
+        headersToggle.text = (if (headersExpanded) "▾  " else "▸  ") + "Response headers" + if (count > 0) "  ($count)" else ""
+        (headersScroll.parent as? JComponent)?.isVisible = headersExpanded
+        (headersScroll.parent?.parent as? JComponent)?.let { it.revalidate(); it.repaint() }
     }
 
     private fun toggleView() = setView(!fieldsActive)
@@ -327,7 +345,7 @@ class MockRuleDialog(
     }
 
     private fun hgap(px: Int) = Box.createHorizontalStrut(JBUI.scale(px))
-    private fun vgap(px: Int) = Box.createVerticalStrut(JBUI.scale(px))
+    private fun glue() = Box.createHorizontalGlue()
 
     private fun link(text: String, onClick: () -> Unit) = JBLabel(text).apply {
         foreground = Theme.accent; font = JBUI.Fonts.label(11f)

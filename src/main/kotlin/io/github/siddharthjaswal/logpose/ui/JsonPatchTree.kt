@@ -53,7 +53,8 @@ class JsonPatchTree : JPanel(BorderLayout()) {
         isRootVisible = false
         showsRootHandles = true
         selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
-        rowHeight = JBUI.scale(24)
+        rowHeight = JBUI.scale(28)
+        border = JBUI.Borders.empty(6, 8)
     }
     private val model get() = tree.model as DefaultTreeModel
 
@@ -63,7 +64,10 @@ class JsonPatchTree : JPanel(BorderLayout()) {
     init {
         isOpaque = false
         add(toolbar(), BorderLayout.NORTH)
-        add(JBScrollPane(tree).apply { border = JBUI.Borders.customLine(Theme.borderStrong, 1) }, BorderLayout.CENTER)
+        add(JBScrollPane(tree).apply {
+            border = JBUI.Borders.customLine(Theme.borderStrong, 1)
+            viewport.isOpaque = false; isOpaque = false
+        }, BorderLayout.CENTER)
         add(inspector, BorderLayout.SOUTH)
 
         tree.addTreeSelectionListener { inspector.bind(selectedLeaf()) }
@@ -151,8 +155,9 @@ class JsonPatchTree : JPanel(BorderLayout()) {
 
     // ---- toolbar + inspector --------------------------------------------------------------
 
-    private fun toolbar(): JComponent = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), JBUI.scale(2))).apply {
+    private fun toolbar(): JComponent = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(12), JBUI.scale(2))).apply {
         isOpaque = false
+        border = JBUI.Borders.empty(2, 2, 8, 2)
         add(iconLink(AllIcons.General.Add, "Add a new field") { addField() })
         add(hintLabel)
     }
@@ -224,7 +229,8 @@ class JsonPatchTree : JPanel(BorderLayout()) {
                     val changed = node.edited != null && node.edited != node.original
                     tr.append(preview(v), if (changed) CHANGED else valueAttr(v))
                     if (changed && node.original != null) {
-                        tr.append("   was ${preview(node.original)}", STRUCK)
+                        tr.append("     was ", WAS_LABEL)
+                        tr.append(preview(node.original), STRUCK)
                     }
                 }
             }
@@ -242,7 +248,7 @@ class JsonPatchTree : JPanel(BorderLayout()) {
         init {
             layout = BoxLayout(this, BoxLayout.X_AXIS)
             isOpaque = false
-            border = JBUI.Borders.empty(6, 2)
+            border = JBUI.Borders.empty(8, 2, 2, 2)
             add(JBLabel("Field").withMuted()); add(strut(6)); add(keyField); add(strut(10))
             add(JBLabel("Value").withMuted()); add(strut(6)); add(valueField); add(strut(8))
             add(typeCombo); add(strut(10)); add(removeBtn); add(Box.createHorizontalGlue())
@@ -358,6 +364,9 @@ class JsonPatchTree : JPanel(BorderLayout()) {
 
     private companion object {
         val CHANGED = SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, Theme.accent)
-        val STRUCK = SimpleTextAttributes(SimpleTextAttributes.STYLE_STRIKEOUT, Theme.textMuted)
+        val WAS_LABEL = SimpleTextAttributes(SimpleTextAttributes.STYLE_SMALLER, Theme.textMuted)
+        val STRUCK = SimpleTextAttributes(
+            SimpleTextAttributes.STYLE_STRIKEOUT or SimpleTextAttributes.STYLE_SMALLER, Theme.textMuted,
+        )
     }
 }
