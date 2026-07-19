@@ -6,6 +6,28 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.4.5] - 2026-07-18
+
+### Changed
+- New brand icon set: a terminal-prompt mark (`>` + cursor) inside a radial "log-data" tick
+  ring. Monochrome tool-window / action glyphs per the IntelliJ icon spec, and a full-color
+  tile (lavender + amber on `#161222`) for the Marketplace logo, in light and dark. Master
+  marks archived under `docs/brand/`.
+
+## [1.4.3] - 2026-07-18
+
+### Changed
+- Mock editor breathing room: taller body area, roomier tree rows and padding, and the
+  response **Headers** field is now collapsed behind a "▸ Response headers" toggle (expanded
+  only when the rule already has headers) since it's rarely edited.
+
+## [1.4.2] - 2026-07-18
+
+### Changed
+- Polished the mock editor: the response-body header (label + "Edit as text" / "Compare with
+  original") now aligns cleanly left/right instead of centering, section separators span the
+  full width, and an edited field reads `new  was old` with the old value smaller + struck.
+
 ## [1.4.1] - 2026-07-18
 
 ### Fixed

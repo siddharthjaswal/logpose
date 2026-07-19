@@ -69,7 +69,7 @@
         <toolWindow
             id="LogPose"
             anchor="bottom"
-            icon="/icons/logpose.svg"
+            icon="/icons/toolWindowLogPose.svg"
             factoryClass="io.github.siddharthjaswal.logpose.toolwindow.LogPoseToolWindowFactory" />
     </extensions>
 </idea-plugin>
