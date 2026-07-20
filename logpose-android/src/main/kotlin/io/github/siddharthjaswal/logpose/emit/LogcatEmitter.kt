@@ -3,21 +3,23 @@ package io.github.siddharthjaswal.logpose.emit
 import android.util.Log
 import io.github.siddharthjaswal.logpose.LogPoseConfig
 import io.github.siddharthjaswal.logpose.wire.Chunk
-import io.github.siddharthjaswal.logpose.wire.FcmMessage
+import io.github.siddharthjaswal.logpose.wire.Envelope
 import io.github.siddharthjaswal.logpose.wire.Hello
 import io.github.siddharthjaswal.logpose.wire.MockAck
-import io.github.siddharthjaswal.logpose.wire.Transaction
 import java.util.UUID
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 /**
- * Default emitter: writes each transaction as a single logcat line under the
- * configured tag. Payloads longer than [LogPoseConfig.maxLineChars] are split into
- * ordered [Chunk]s that the plugin reassembles — this is what makes large bodies
- * (and S3/GCS multipart metadata) survive logcat's per-line truncation.
+ * Default emitter: writes each event as a single logcat line under the configured tag.
+ * Payloads longer than [LogPoseConfig.maxLineChars] are split into ordered [Chunk]s that the
+ * plugin reassembles — this is what makes large bodies (and S3/GCS multipart metadata)
+ * survive logcat's per-line truncation.
+ *
+ * Timeline events go out wrapped in an [Envelope]. Reverse-channel control messages ([Hello],
+ * [MockAck]) are written bare: they are a separate IDE ↔ device protocol, not timeline rows.
  */
-class LogcatEmitter(private val config: LogPoseConfig) : TransactionEmitter {
+class LogcatEmitter(private val config: LogPoseConfig) : EventEmitter {
 
     // explicitNulls=false keeps lines compact by omitting null fields; the plugin
     // side fills them back in via schema defaults.
@@ -26,10 +28,7 @@ class LogcatEmitter(private val config: LogPoseConfig) : TransactionEmitter {
         explicitNulls = false
     }
 
-    override fun emit(tx: Transaction) = emitLine(tx.id, json.encodeToString(tx))
-
-    /** Emit an FCM event (incoming push or token refresh) on the same tag; see `LogPoseFcm.kt`. */
-    fun emit(fcm: FcmMessage) = emitLine(fcm.id, json.encodeToString(fcm))
+    override fun emit(event: Envelope) = emitLine(event.id, json.encodeToString(event))
 
     /** Emit the process handshake (package name + current mock revision); see `mock/`. */
     fun emit(hello: Hello) = emitLine(controlId(), json.encodeToString(hello))

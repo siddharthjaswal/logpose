@@ -29,11 +29,3 @@ data class FcmMessageInfo(
     val notificationImageUrl: String? = null,
     val data: Map<String, String> = emptyMap(),
 )
-
-object LogPose {
-    @Suppress("UNUSED_PARAMETER")
-    fun logFcmMessage(info: FcmMessageInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
-
-    @Suppress("UNUSED_PARAMETER")
-    fun logFcmToken(token: String, config: LogPoseConfig = LogPoseConfig()) = Unit
-}

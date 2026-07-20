@@ -1,7 +1,8 @@
 package io.github.siddharthjaswal.logpose
 
 import io.github.siddharthjaswal.logpose.emit.LogcatEmitter
-import io.github.siddharthjaswal.logpose.emit.TransactionEmitter
+import io.github.siddharthjaswal.logpose.emit.EventEmitter
+import io.github.siddharthjaswal.logpose.emit.emit
 import io.github.siddharthjaswal.logpose.internal.BodyCapture
 import io.github.siddharthjaswal.logpose.mock.LogPoseRuntime
 import io.github.siddharthjaswal.logpose.mock.MockRegistry
@@ -42,7 +43,7 @@ import io.github.siddharthjaswal.logpose.wire.Response as WireResponse
  */
 class LogPoseInterceptor @JvmOverloads constructor(
     private val config: LogPoseConfig = LogPoseConfig(),
-    private val emitter: TransactionEmitter = LogcatEmitter(config),
+    private val emitter: EventEmitter = LogcatEmitter(config),
 ) : Interceptor {
 
     private val patchJson = Json { ignoreUnknownKeys = true; isLenient = true }

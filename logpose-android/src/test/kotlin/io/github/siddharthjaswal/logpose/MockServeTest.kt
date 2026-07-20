@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose
 
-import io.github.siddharthjaswal.logpose.emit.TransactionEmitter
+import io.github.siddharthjaswal.logpose.emit.EventEmitter
+import io.github.siddharthjaswal.logpose.wire.Envelope
 import io.github.siddharthjaswal.logpose.mock.MockRegistry
 import io.github.siddharthjaswal.logpose.wire.MockRule
 import io.github.siddharthjaswal.logpose.wire.MockRuleSet
@@ -29,12 +30,18 @@ import java.net.SocketTimeoutException
 /** Exercises the mock short-circuit in [LogPoseInterceptor] without a device/network. */
 class MockServeTest {
 
-    private val emitted = mutableListOf<Transaction>()
-    private val emitter = TransactionEmitter { emitted.add(it) }
+    private val wireJson = Json { ignoreUnknownKeys = true }
+
+    private val envelopes = mutableListOf<Envelope>()
+    // Decoding the payload back out of the envelope keeps these assertions readable and
+    // doubles as a round-trip check that HTTP still survives the wrapping.
+    private val emitted: List<Transaction>
+        get() = envelopes.map { wireJson.decodeFromJsonElement(Transaction.serializer(), it.payload) }
+    private val emitter = EventEmitter { envelopes.add(it) }
     private val config = LogPoseConfig(enabled = true, mocksEnabled = true, emitPending = false)
     private val interceptor = LogPoseInterceptor(config, emitter)
 
-    @Before fun setUp() { MockRegistry.reset(); emitted.clear() }
+    @Before fun setUp() { MockRegistry.reset(); envelopes.clear() }
     @After fun tearDown() = MockRegistry.reset()
 
     private fun request(method: String = "GET", url: String = "https://ex.com/app/v1/x"): Request =

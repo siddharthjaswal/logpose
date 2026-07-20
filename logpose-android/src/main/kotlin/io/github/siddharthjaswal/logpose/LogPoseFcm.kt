@@ -1,10 +1,5 @@
 package io.github.siddharthjaswal.logpose
 
-import io.github.siddharthjaswal.logpose.emit.LogcatEmitter
-import io.github.siddharthjaswal.logpose.wire.FcmNotification
-import java.util.UUID
-import io.github.siddharthjaswal.logpose.wire.FcmMessage as WireFcmMessage
-
 /**
  * A Firebase-free snapshot of an incoming FCM push, filled by the host app from a
  * `RemoteMessage` and handed to [LogPose.logFcmMessage].
@@ -60,64 +55,3 @@ data class FcmMessageInfo(
     val notificationImageUrl: String? = null,
     val data: Map<String, String> = emptyMap(),
 )
-
-/**
- * Entry point for feeding push-messaging events to the LogPose IDE plugin. These are emitted
- * on the same logcat tag as HTTP transactions and show up inline in the unified timeline.
- *
- * Both calls no-op when [LogPoseConfig.enabled] is false, so wiring them to `BuildConfig.DEBUG`
- * keeps them out of release traffic.
- */
-object LogPose {
-
-    /** Record an incoming FCM push. Call from `FirebaseMessagingService.onMessageReceived`. */
-    fun logFcmMessage(info: FcmMessageInfo, config: LogPoseConfig = LogPoseConfig()) {
-        if (!config.enabled) return
-        val notification = if (
-            info.notificationTitle != null || info.notificationBody != null ||
-            info.notificationChannelId != null || info.notificationClickAction != null ||
-            info.notificationImageUrl != null
-        ) {
-            FcmNotification(
-                title = info.notificationTitle,
-                body = info.notificationBody,
-                channelId = info.notificationChannelId,
-                clickAction = info.notificationClickAction,
-                imageUrl = info.notificationImageUrl,
-            )
-        } else null
-
-        LogcatEmitter(config).emit(
-            WireFcmMessage(
-                id = info.messageId ?: newId(),
-                event = "message",
-                receivedAtMillis = System.currentTimeMillis(),
-                messageId = info.messageId,
-                from = info.from,
-                to = info.to,
-                collapseKey = info.collapseKey,
-                messageType = info.messageType,
-                sentTimeMillis = info.sentTimeMillis,
-                ttlSeconds = info.ttlSeconds,
-                priority = info.priority,
-                notification = notification,
-                data = info.data,
-            )
-        )
-    }
-
-    /** Record an FCM registration-token refresh. Call from `onNewToken`. */
-    fun logFcmToken(token: String, config: LogPoseConfig = LogPoseConfig()) {
-        if (!config.enabled) return
-        LogcatEmitter(config).emit(
-            WireFcmMessage(
-                id = newId(),
-                event = "token",
-                receivedAtMillis = System.currentTimeMillis(),
-                token = token,
-            )
-        )
-    }
-
-    private fun newId(): String = UUID.randomUUID().toString().substring(0, 8)
-}

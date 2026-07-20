@@ -1,6 +1,98 @@
 package io.github.siddharthjaswal.logpose.wire
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+
+/**
+ * The transport envelope every **timeline** event travels in. The plugin only needs to
+ * understand this much to place a row on the timeline; [payload] is opaque to it until a
+ * renderer registered for [kind] decodes it.
+ *
+ * That split is what makes LogPose a framework rather than an HTTP tool: an app can emit a
+ * [kind] the plugin has never heard of (see [GenericEvent]) and still get a first-class row.
+ *
+ * Timing follows a span convention:
+ *  - `endedAt == null` — still open (an in-flight request).
+ *  - `endedAt == at`   — a point-in-time event (a push, a log line).
+ *  - `endedAt > at`    — a completed span; the difference is its duration.
+ *
+ * [traceId] / [parentId] group related events (a push and the calls it triggered). They are
+ * always set explicitly by the caller — LogPose does not propagate them implicitly.
+ *
+ * Note the reverse-channel control messages ([Hello], [MockAck], [MockRuleSet]) are NOT
+ * enveloped: they are a separate IDE ↔ device protocol, not timeline rows.
+ *
+ * MUST stay structurally in sync with the plugin's `model/Transaction.kt`.
+ */
+@Serializable
+data class Envelope(
+    /** Wire version. Bumped only for breaking changes to the envelope itself. */
+    val v: Int = 1,
+    val kind: String,
+    /** Correlation id; re-emitting the same id updates that row in place. */
+    val id: String,
+    /** Device epoch millis the event started. */
+    val at: Long,
+    val endedAt: Long? = null,
+    val traceId: String? = null,
+    val parentId: String? = null,
+    val payload: JsonElement,
+) {
+    companion object {
+        const val KIND_HTTP = "http"
+        const val KIND_FCM = "fcm"
+        const val KIND_EVENT = "event"
+    }
+}
+
+/**
+ * The payload of the built-in `"event"` kind: an event that describes its own presentation,
+ * so any subsystem (Room, WorkManager, analytics, feature flags…) can appear on the timeline
+ * without a plugin release.
+ *
+ * Presentation stays **semantic** — a [Badge] carries a tone, never a color, and a [Section]
+ * carries a type, never a layout. The plugin maps those onto the active IDE theme; putting
+ * raw colors on the wire would make every theme change a wire break.
+ */
+@Serializable
+data class GenericEvent(
+    val title: String,
+    val subtitle: String? = null,
+    val badges: List<Badge> = emptyList(),
+    val sections: List<Section> = emptyList(),
+)
+
+/** A short pill on the row — a category ("DB"), a count, a duration. */
+@Serializable
+data class Badge(
+    val text: String,
+    /** One of [TONE_INFO], [TONE_WARN], [TONE_ERROR], [TONE_MUTED]. */
+    val tone: String = TONE_MUTED,
+) {
+    companion object {
+        const val TONE_INFO = "info"
+        const val TONE_WARN = "warn"
+        const val TONE_ERROR = "error"
+        const val TONE_MUTED = "muted"
+    }
+}
+
+/** One labelled block in the detail pane. */
+@Serializable
+data class Section(
+    val label: String,
+    /** One of [TYPE_TEXT], [TYPE_JSON], [TYPE_KV], [TYPE_CODE]. */
+    val type: String = TYPE_TEXT,
+    /** Shape depends on [type]: a string for text/code, any JSON for json, an object for kv. */
+    val body: JsonElement,
+) {
+    companion object {
+        const val TYPE_TEXT = "text"
+        const val TYPE_JSON = "json"
+        const val TYPE_KV = "kv"
+        const val TYPE_CODE = "code"
+    }
+}
 
 /**
  * The on-the-wire representation emitted by the LogPose interceptor and consumed
