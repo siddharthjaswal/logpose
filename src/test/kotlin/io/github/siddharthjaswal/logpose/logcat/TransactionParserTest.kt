@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.logcat
 
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -92,6 +93,96 @@ class TransactionParserTest {
         val ack = (control.single() as ControlMessage.MockApplied).ack
         assertEquals(5, ack.revision)
         assertEquals(2, ack.hits["a"])
+    }
+
+    // ---- Envelopes (logpose-android >= 1.3.0) ---------------------------------------------
+
+    @Test
+    fun `decodes an enveloped http transaction`() {
+        val line = """
+            {"v":1,"kind":"http","id":"e1","at":1000,"endedAt":1120,
+             "payload":{"id":"e1","request":{"method":"POST","url":"https://x/y"},"response":{"code":201}}}
+        """.trimIndent().replace("\n", "")
+        val event = parser.accept(line)
+        assertTrue(event is LogEvent.Http)
+        val http = event as LogEvent.Http
+        assertEquals("POST", http.tx.request.method)
+        assertEquals(201, http.tx.response?.code)
+        assertEquals(120, http.durationMillis, "endedAt - at is the span duration")
+    }
+
+    @Test
+    fun `an http envelope with no endedAt is still in flight`() {
+        val line = """
+            {"v":1,"kind":"http","id":"p1","at":1000,
+             "payload":{"id":"p1","request":{"method":"GET","url":"https://x/y"}}}
+        """.trimIndent().replace("\n", "")
+        val event = parser.accept(line)!!
+        assertTrue(event.isOpen, "a null endedAt means the span is still open")
+        assertNull(event.durationMillis)
+    }
+
+    @Test
+    fun `decodes a self-describing app event`() {
+        val line = """
+            {"v":1,"kind":"event","id":"g1","at":50,"endedAt":64,"traceId":"tr1",
+             "payload":{"title":"UserDao.insert","subtitle":"users (3 rows)",
+                        "badges":[{"text":"DB","tone":"info"}],
+                        "sections":[{"label":"SQL","type":"code","body":"INSERT INTO users"}]}}
+        """.trimIndent().replace("\n", "")
+        val event = parser.accept(line)
+        assertTrue(event is LogEvent.Generic)
+        val generic = event as LogEvent.Generic
+        assertEquals("UserDao.insert", generic.event?.title)
+        assertEquals("DB", generic.event?.badges?.single()?.text)
+        assertEquals("SQL", generic.event?.sections?.single()?.label)
+        assertEquals("tr1", generic.traceId)
+        assertEquals(14, generic.durationMillis)
+    }
+
+    @Test
+    fun `an unknown kind still becomes a row instead of being dropped`() {
+        // The whole point of the envelope: a kind this plugin has never heard of is renderable.
+        val line = """{"v":1,"kind":"acme.telemetry","id":"u1","at":10,"payload":{"anything":[1,2,3]}}"""
+        val event = parser.accept(line)
+        assertTrue(event is LogEvent.Generic)
+        val generic = event as LogEvent.Generic
+        assertEquals("acme.telemetry", generic.kind)
+        assertNull(generic.event, "payload wasn't self-describing, so there's no presentation")
+        assertTrue(generic.envelope.payload.toString().contains("anything"), "raw payload is kept")
+    }
+
+    @Test
+    fun `reassembles a chunked envelope`() {
+        val payload = """{"v":1,"kind":"event","id":"big","at":1,"payload":{"title":"T","subtitle":"$LONG"}}"""
+        val half = payload.length / 2
+        val c0 = """{"id":"big","seq":0,"total":2,"payload":${quote(payload.substring(0, half))}}"""
+        val c1 = """{"id":"big","seq":1,"total":2,"payload":${quote(payload.substring(half))}}"""
+
+        assertNull(parser.accept(c0))
+        val event = parser.accept(c1)
+        assertTrue(event is LogEvent.Generic)
+        assertEquals(LONG, (event as LogEvent.Generic).event?.subtitle)
+    }
+
+    @Test
+    fun `legacy payloads are flagged so the panel can prompt for a library upgrade`() {
+        assertFalse(parser.sawLegacyPayload)
+        parser.accept("""{"v":1,"kind":"http","id":"e1","at":1,"payload":{"id":"e1","request":{"method":"GET","url":"u"}}}""")
+        assertFalse(parser.sawLegacyPayload, "an envelope is not legacy")
+
+        parser.accept("""{"id":"old","request":{"method":"GET","url":"https://x/y"}}""")
+        assertTrue(parser.sawLegacyPayload)
+    }
+
+    @Test
+    fun `a legacy transaction is wrapped in an envelope so downstream sees one shape`() {
+        val event = parser.accept(
+            """{"id":"old","startedAtMillis":500,"durationMillis":40,"request":{"method":"GET","url":"https://x/y"}}"""
+        )!!
+        assertEquals("http", event.kind)
+        assertEquals(500, event.timestampMillis)
+        assertEquals(40, event.durationMillis)
     }
 
     private fun quote(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""

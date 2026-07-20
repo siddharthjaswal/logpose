@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.model.Badge
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -154,6 +155,45 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         add(meta, BorderLayout.EAST)
     }
 
+    // ---- Generic row (any app-defined kind) ------------------------------------------------
+    private val genLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
+    private val genTag = TagLabel().fixed(JBUI.scale(52), JBUI.scale(20))
+    private val genText = JLabel()
+    private val genCount = JLabel("", SwingConstants.RIGHT)
+    private val genTime = JLabel("", SwingConstants.RIGHT)
+
+    private val genRow = RowPanel().apply {
+        border = JBUI.Borders.empty(0, 14)
+
+        genLabel.font = JBUI.Fonts.label(11f).asBold()
+        genLabel.foreground = Theme.accent
+        genTag.font = JBUI.Fonts.label(10f).asBold()
+
+        val badges = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(genLabel)
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
+            add(genTag)
+        }
+        genText.border = JBUI.Borders.emptyLeft(12)
+        genText.font = JBUI.Fonts.label(12.5f)
+        genCount.font = JBUI.Fonts.create("JetBrains Mono", 11)
+        genTime.font = JBUI.Fonts.create("JetBrains Mono", 11)
+
+        val meta = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(genCount.fixed(JBUI.scale(64), JBUI.scale(20)))
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
+            add(genTime.fixed(JBUI.scale(56), JBUI.scale(20)))
+        }
+
+        add(badges, BorderLayout.WEST)
+        add(genText, BorderLayout.CENTER)
+        add(meta, BorderLayout.EAST)
+    }
+
     override fun getListCellRendererComponent(
         list: JList<out LogEvent>,
         value: LogEvent,
@@ -163,6 +203,54 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     ): Component = when (value) {
         is LogEvent.Http -> httpRow(value.tx, index, isSelected)
         is LogEvent.Fcm -> fcmRow(value.msg, index, isSelected)
+        is LogEvent.Generic -> genericRow(value, index, isSelected)
+    }
+
+    /**
+     * Row for a kind the plugin has no special support for. Everything shown comes from the
+     * device: the kind takes the method column, the first badge takes the status column, and
+     * the title/subtitle fill the centre — so app-defined events line up with HTTP and FCM
+     * instead of looking bolted on.
+     */
+    private fun genericRow(value: LogEvent.Generic, index: Int, isSelected: Boolean): Component {
+        genRow.selected = isSelected
+        genRow.hovered = index == hoveredIndex && !isSelected
+        genRow.rowHeight = 34
+
+        genLabel.text = value.kind.uppercase().take(6)
+
+        val badge = value.event?.badges?.firstOrNull()
+        if (badge != null) {
+            val color = when (badge.tone) {
+                Badge.TONE_INFO -> Theme.accent
+                Badge.TONE_WARN -> Theme.warn
+                Badge.TONE_ERROR -> Theme.danger
+                else -> Theme.textDim
+            }
+            genTag.set(badge.text.take(8), color, Theme.tint(color, 30))
+        } else {
+            genTag.set("", Theme.text, null)
+        }
+
+        val title = value.event?.title ?: value.kind
+        val subtitle = value.event?.subtitle?.takeIf { it.isNotBlank() }
+        genText.text = if (subtitle != null) "$title  ·  $subtitle" else title
+        genText.foreground = Theme.text
+
+        // Extra badges beyond the first would crowd the status column, so surface the count
+        // where HTTP shows body size.
+        val extras = (value.event?.badges?.size ?: 0) - 1
+        genCount.text = if (extras > 0) "+$extras" else ""
+        genCount.foreground = Theme.textDim
+
+        genTime.text = when {
+            value.isOpen -> spinnerChar(spinnerFrame).toString()
+            value.durationMillis != null -> "${value.durationMillis}ms"
+            value.timestampMillis > 0 -> timeFmt.format(Date(value.timestampMillis))
+            else -> ""
+        }
+        genTime.foreground = Theme.textDim
+        return genRow
     }
 
     private fun httpRow(value: Transaction, index: Int, isSelected: Boolean): Component {

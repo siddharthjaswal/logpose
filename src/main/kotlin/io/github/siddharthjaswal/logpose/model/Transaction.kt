@@ -1,6 +1,91 @@
 package io.github.siddharthjaswal.logpose.model
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+
+/**
+ * The transport envelope every **timeline** event arrives in. This plugin only needs to
+ * understand this much to place a row on the timeline; [payload] stays opaque until a
+ * renderer for [kind] decodes it.
+ *
+ * That split is what makes LogPose a framework rather than an HTTP tool: a device can emit a
+ * [kind] this plugin has never heard of (see [GenericEvent]) and still get a first-class row.
+ *
+ * Timing follows a span convention:
+ *  - `endedAt == null` — still open (an in-flight request).
+ *  - `endedAt == at`   — a point-in-time event (a push, a log line).
+ *  - `endedAt > at`    — a completed span.
+ *
+ * Reverse-channel control messages ([Hello], [MockAck]) are NOT enveloped — they are a
+ * separate IDE ↔ device protocol, not timeline rows.
+ *
+ * MUST stay structurally in sync with the library's `wire/Wire.kt`.
+ */
+@Serializable
+data class Envelope(
+    val v: Int = 1,
+    val kind: String,
+    val id: String,
+    val at: Long,
+    val endedAt: Long? = null,
+    val traceId: String? = null,
+    val parentId: String? = null,
+    val payload: JsonElement,
+) {
+    companion object {
+        const val KIND_HTTP = "http"
+        const val KIND_FCM = "fcm"
+        const val KIND_EVENT = "event"
+    }
+}
+
+/**
+ * The payload of the built-in `"event"` kind: an event that describes its own presentation,
+ * so any subsystem (Room, WorkManager, analytics, feature flags…) appears on the timeline
+ * without a plugin release.
+ *
+ * Presentation is **semantic** — a [Badge] carries a tone, never a color, and a [Section]
+ * carries a type, never a layout — so the plugin can map it onto the active IDE theme.
+ */
+@Serializable
+data class GenericEvent(
+    val title: String,
+    val subtitle: String? = null,
+    val badges: List<Badge> = emptyList(),
+    val sections: List<Section> = emptyList(),
+)
+
+/** A short pill on the row — a category ("DB"), a count, a duration. */
+@Serializable
+data class Badge(
+    val text: String,
+    /** One of [TONE_INFO], [TONE_WARN], [TONE_ERROR], [TONE_MUTED]. */
+    val tone: String = TONE_MUTED,
+) {
+    companion object {
+        const val TONE_INFO = "info"
+        const val TONE_WARN = "warn"
+        const val TONE_ERROR = "error"
+        const val TONE_MUTED = "muted"
+    }
+}
+
+/** One labelled block in the detail pane. */
+@Serializable
+data class Section(
+    val label: String,
+    /** One of [TYPE_TEXT], [TYPE_JSON], [TYPE_KV], [TYPE_CODE]. */
+    val type: String = TYPE_TEXT,
+    /** Shape depends on [type]: a string for text/code, any JSON for json, an object for kv. */
+    val body: JsonElement,
+) {
+    companion object {
+        const val TYPE_TEXT = "text"
+        const val TYPE_JSON = "json"
+        const val TYPE_KV = "kv"
+        const val TYPE_CODE = "code"
+    }
+}
 
 /**
  * The wire contract between the on-device LogPose interceptor and this plugin.

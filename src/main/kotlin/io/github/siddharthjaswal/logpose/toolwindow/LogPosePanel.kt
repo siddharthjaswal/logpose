@@ -25,13 +25,15 @@ import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.mock.MocksController
+import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
-import io.github.siddharthjaswal.logpose.store.TransactionStore
+import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
 import io.github.siddharthjaswal.logpose.ui.FcmDetailView
 import io.github.siddharthjaswal.logpose.ui.FilterBar
+import io.github.siddharthjaswal.logpose.ui.GenericDetailView
 import io.github.siddharthjaswal.logpose.ui.isPending
 import io.github.siddharthjaswal.logpose.ui.MockRuleDialog
 import io.github.siddharthjaswal.logpose.ui.MocksBar
@@ -41,6 +43,7 @@ import io.github.siddharthjaswal.logpose.ui.Theme
 import io.github.siddharthjaswal.logpose.ui.Toast
 import io.github.siddharthjaswal.logpose.ui.TransactionDetailView
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.Component
@@ -64,7 +67,7 @@ import javax.swing.SwingUtilities
 /** The LogPose tool window: a master/detail view over captured HTTP transactions. */
 class LogPosePanel(private val project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()), Disposable {
 
-    private val store = TransactionStore()
+    private val store = EventStore()
     private val parser = TransactionParser()
     private val reader = LogcatReader()
 
@@ -84,12 +87,15 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     }
     private val detail = TransactionDetailView(project)
     private val fcmDetail = FcmDetailView(project)
-    // Routes the single detail slot between the HTTP and FCM views by event kind.
+    private val genericDetail = GenericDetailView(project)
+    // Routes the single detail slot between the per-kind views. "generic" is the fallback for
+    // every app-defined kind, so an unknown event is still inspectable.
     private val detailCards = CardLayout()
     private val detailPane = JPanel(detailCards).apply {
         isOpaque = true; background = Theme.bg0
         add(detail, "http")
         add(fcmDetail, "fcm")
+        add(genericDetail, "generic")
     }
     private val filterBar = FilterBar()
     private val statusDot = StatusDot()
@@ -322,6 +328,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 fcmDetail.show(event.msg)
                 detailCards.show(detailPane, "fcm")
             }
+            is LogEvent.Generic -> {
+                genericDetail.show(event)
+                detailCards.show(detailPane, "generic")
+            }
             null -> {
                 detail.show(null)
                 detailCards.show(detailPane, "http")
@@ -389,6 +399,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun timelineLabel(event: LogEvent): String = when (event) {
         is LogEvent.Http -> "${event.tx.request.method} ${event.tx.request.path.ifBlank { event.tx.request.url }}"
         is LogEvent.Fcm -> "FCM ${fcmTimelineLabel(event.msg)}"
+        is LogEvent.Generic ->
+            "${event.kind.uppercase()} ${event.event?.title ?: event.id}"
     }
 
     private fun fcmTimelineLabel(msg: FcmMessage): String {
@@ -450,6 +462,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             } else when (val ev = list.selectedValue ?: return) {
                 is LogEvent.Http -> httpGroup(ev.tx)
                 is LogEvent.Fcm -> fcmGroup(ev.msg)
+                is LogEvent.Generic -> genericGroup(ev)
             }
             showActionPopup(group, e)
         }
@@ -486,6 +499,26 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                         prettyJson.encodeToString(kotlinx.serialization.serializer<Map<String, String>>(), msg.data),
                         "Data payload copied",
                     )
+                })
+            }
+        }
+
+        private fun genericGroup(ev: LogEvent.Generic): ActionGroup = DefaultActionGroup().apply {
+            add(act("Copy as JSON", AllIcons.Actions.Copy) {
+                copyToClipboard(
+                    prettyJson.encodeToString(Envelope.serializer(), ev.envelope),
+                    "Event JSON copied",
+                )
+            })
+            add(act("Copy payload", AllIcons.Actions.Copy) {
+                copyToClipboard(
+                    prettyJson.encodeToString(JsonElement.serializer(), ev.envelope.payload),
+                    "Payload copied",
+                )
+            })
+            ev.traceId?.let { trace ->
+                add(act("Filter by trace  $trace", AllIcons.Actions.Find) {
+                    filterBar.setQuery(trace)
                 })
             }
         }
