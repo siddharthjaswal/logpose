@@ -31,7 +31,7 @@ TRACE="demo$(date +%s)"
 # A database query: a completed span with a code section and a key/value section.
 emit '{"v":1,"kind":"event","id":"demo-db","at":'"$TS"',"endedAt":'"$((TS + 14))"',"traceId":"'"$TRACE"'",
 "payload":{"title":"UserDao.insert","subtitle":"users (3 rows)",
-"badges":[{"text":"DB","tone":"info"},{"text":"14ms","tone":"muted"}],
+"badges":[{"text":"DB","tone":"info"},{"text":"users","tone":"muted"}],
 "sections":[{"label":"SQL","type":"code","body":"INSERT INTO users (id, name) VALUES (?, ?)"},
 {"label":"Params","type":"kv","body":{"id":"7","name":"Vikram"}}]}}'
 
