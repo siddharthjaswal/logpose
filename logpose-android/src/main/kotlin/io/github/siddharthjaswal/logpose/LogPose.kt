@@ -3,7 +3,11 @@ package io.github.siddharthjaswal.logpose
 import io.github.siddharthjaswal.logpose.emit.LogcatEmitter
 import io.github.siddharthjaswal.logpose.emit.emit
 import io.github.siddharthjaswal.logpose.wire.Envelope
+import io.github.siddharthjaswal.logpose.wire.ConfigChange
+import io.github.siddharthjaswal.logpose.wire.ConfigUpdate
+import io.github.siddharthjaswal.logpose.wire.DbQuery
 import io.github.siddharthjaswal.logpose.wire.FcmNotification
+import io.github.siddharthjaswal.logpose.wire.WorkerEvent
 import java.util.UUID
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -101,6 +105,183 @@ object LogPose {
     /** A fresh trace id, to correlate a group of related events. */
     fun newTraceId(): String = newId()
 
+    // ---- Database -----------------------------------------------------------------------
+
+    /**
+     * Record a database access. See [DbQueryInfo] for the one-call Room integration.
+     *
+     * Gated by [LogPoseConfig.dbEnabled] as well as `enabled`: a query callback on a busy screen
+     * can emit hundreds of events a minute, and that switch is how a build opts out without
+     * unpicking the integration.
+     */
+    fun logDbQuery(info: DbQueryInfo, config: LogPoseConfig = LogPoseConfig()) {
+        if (!config.enabled || !config.dbEnabled) return
+        val at = System.currentTimeMillis()
+        emit(
+            Envelope(
+                kind = Envelope.KIND_DB,
+                id = newId(),
+                at = at,
+                // A measured query is a span; an unmeasured one (Room's callback gives no
+                // timing) is a point in time rather than a span of unknown length.
+                endedAt = at + (info.durationMillis ?: 0L),
+                payload = json.encodeToJsonElement(
+                    DbQuery(
+                        sql = info.sql,
+                        args = info.args,
+                        database = info.database,
+                        rows = info.rows,
+                        error = info.error,
+                        operation = info.operation,
+                        table = info.table,
+                    )
+                ),
+            ),
+            config,
+        )
+    }
+
+    // ---- Background work ----------------------------------------------------------------
+
+    /**
+     * Record a background work request's state.
+     *
+     * Emitted under the request's own [WorkerEventInfo.workId], so enqueued → running →
+     * succeeded collapse into **one row that updates in place** instead of three. The span opens
+     * when the request is first seen and closes on a terminal state.
+     */
+    fun logWorker(info: WorkerEventInfo, config: LogPoseConfig = LogPoseConfig()) {
+        if (!config.enabled || !config.workersEnabled) return
+        val id = info.workId ?: newId()
+        val now = System.currentTimeMillis()
+        val terminal = info.state.lowercase() in WorkerEvent.TERMINAL
+
+        // First sighting starts the span; a terminal state closes it and forgets the request so
+        // a long session can't leak entries.
+        val startedAt = synchronized(workerStarts) {
+            val started = workerStarts.getOrPut(id) { now }
+            if (terminal) workerStarts.remove(id)
+            started
+        }
+
+        emit(
+            Envelope(
+                kind = Envelope.KIND_WORKER,
+                id = id,
+                at = startedAt,
+                endedAt = if (terminal) now else null,
+                payload = json.encodeToJsonElement(
+                    WorkerEvent(
+                        worker = info.worker,
+                        state = info.state.lowercase(),
+                        workId = info.workId,
+                        uniqueName = info.uniqueName,
+                        runAttempt = info.runAttempt,
+                        tags = info.tags,
+                        inputData = info.inputData,
+                        outputData = info.outputData,
+                        error = info.error,
+                    )
+                ),
+            ),
+            config,
+        )
+    }
+
+    // ---- Remote config --------------------------------------------------------------------
+
+    /**
+     * Record a config activation by handing LogPose the **whole** current snapshot; it diffs
+     * against what it last saw and reports only what changed.
+     *
+     * That's the right split because Firebase Remote Config won't tell you what changed — you
+     * get a map and a boolean. Call it once, wherever activation completes:
+     *
+     * ```kotlin
+     * firebaseRemoteConfig.fetchAndActivate().addOnCompleteListener {
+     *     LogPose.logConfigSnapshot(
+     *         firebaseRemoteConfig.all.mapValues { it.value.asString() },
+     *         source = "remote",
+     *         config = LogPoseConfig(enabled = BuildConfig.DEBUG),
+     *     )
+     * }
+     * ```
+     *
+     * The first snapshot in a process is recorded as a baseline count rather than reporting
+     * every key as new.
+     */
+    fun logConfigSnapshot(
+        values: Map<String, String>,
+        source: String? = null,
+        fetchStatus: String? = null,
+        config: LogPoseConfig = LogPoseConfig(),
+    ) {
+        if (!config.enabled) return
+
+        val update = synchronized(configSnapshot) {
+            val previous = configSnapshot.toMap()
+            configSnapshot.clear()
+            configSnapshot.putAll(values)
+
+            if (previous.isEmpty()) {
+                ConfigUpdate(
+                    source = source, fetchStatus = fetchStatus,
+                    baseline = true, totalKeys = values.size,
+                )
+            } else {
+                val changes = values.mapNotNull { (key, value) ->
+                    val before = previous[key]
+                    if (before == value) null
+                    else ConfigChange(key, value, before, isNew = !previous.containsKey(key))
+                }
+                ConfigUpdate(
+                    source = source, fetchStatus = fetchStatus,
+                    totalKeys = values.size, changes = changes,
+                )
+            }
+        }
+
+        // A fetch that changed nothing is the common case; don't spend a row on it.
+        if (!update.baseline && update.changes.isEmpty()) return
+
+        val at = System.currentTimeMillis()
+        emit(
+            Envelope(
+                kind = Envelope.KIND_CONFIG, id = newId(), at = at, endedAt = at,
+                payload = json.encodeToJsonElement(update),
+            ),
+            config,
+        )
+    }
+
+    /** Record a single known config change, for apps that already track their own flags. */
+    fun logConfigChange(
+        key: String,
+        value: String,
+        previous: String? = null,
+        source: String? = null,
+        config: LogPoseConfig = LogPoseConfig(),
+    ) {
+        if (!config.enabled) return
+        synchronized(configSnapshot) { configSnapshot[key] = value }
+        val at = System.currentTimeMillis()
+        emit(
+            Envelope(
+                kind = Envelope.KIND_CONFIG, id = newId(), at = at, endedAt = at,
+                payload = json.encodeToJsonElement(
+                    ConfigUpdate(
+                        source = source,
+                        totalKeys = 1,
+                        changes = listOf(
+                            ConfigChange(key, value, previous, isNew = previous == null),
+                        ),
+                    )
+                ),
+            ),
+            config,
+        )
+    }
+
     // ---- Push messaging ---------------------------------------------------------------
 
     /** Record an incoming FCM push. Call from `FirebaseMessagingService.onMessageReceived`. */
@@ -155,6 +336,12 @@ object LogPose {
     // ---- internals --------------------------------------------------------------------
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
+
+    /** workId → when the request was first seen, so a worker row spans its whole life. */
+    private val workerStarts = mutableMapOf<String, Long>()
+
+    /** Last config snapshot seen, so an activation can be reported as a diff. */
+    private val configSnapshot = mutableMapOf<String, String>()
 
     private fun newId(): String = UUID.randomUUID().toString().substring(0, 8)
 

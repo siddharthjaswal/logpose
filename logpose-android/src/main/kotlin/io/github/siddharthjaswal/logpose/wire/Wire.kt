@@ -42,8 +42,94 @@ data class Envelope(
         const val KIND_HTTP = "http"
         const val KIND_FCM = "fcm"
         const val KIND_EVENT = "event"
+        const val KIND_DB = "db"
+        const val KIND_WORKER = "worker"
+        const val KIND_CONFIG = "config"
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// First-class app-runtime kinds. Unlike [GenericEvent], these carry **structure** rather than
+// presentation: the plugin derives the title, badges and sections, which keeps the wire free of
+// theme decisions and lets the IDE filter and analyse them (slow queries, worker retries, flag
+// changes). Kept structurally in sync with the plugin's model/Transaction.kt.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * One database access. Operation and table are deliberately **not** required: the plugin parses
+ * them out of [sql], so that logic lives in one place instead of on both sides of the wire.
+ * Set them explicitly only for stores that aren't SQL (DataStore, MMKV, a key-value cache).
+ */
+@Serializable
+data class DbQuery(
+    val sql: String,
+    /** Bound arguments, already stringified — never raw values that could carry PII wholesale. */
+    val args: List<String> = emptyList(),
+    val database: String? = null,
+    /** Rows returned or affected, when the caller knows. */
+    val rows: Int? = null,
+    val error: String? = null,
+    /** Override for non-SQL stores; normally derived from [sql]. */
+    val operation: String? = null,
+    val table: String? = null,
+)
+
+/**
+ * A background work request at one point in its life. Emitted with the envelope id set to
+ * [workId], so a request occupies **one row that updates in place** as it moves
+ * enqueued → running → succeeded, rather than spraying a row per transition.
+ */
+@Serializable
+data class WorkerEvent(
+    val worker: String,
+    /** [STATE_ENQUEUED], [STATE_RUNNING], [STATE_SUCCEEDED], [STATE_FAILED], … */
+    val state: String,
+    val workId: String? = null,
+    val uniqueName: String? = null,
+    val runAttempt: Int = 0,
+    val tags: List<String> = emptyList(),
+    val inputData: Map<String, String> = emptyMap(),
+    val outputData: Map<String, String> = emptyMap(),
+    val error: String? = null,
+) {
+    companion object {
+        const val STATE_ENQUEUED = "enqueued"
+        const val STATE_RUNNING = "running"
+        const val STATE_SUCCEEDED = "succeeded"
+        const val STATE_FAILED = "failed"
+        const val STATE_CANCELLED = "cancelled"
+        const val STATE_BLOCKED = "blocked"
+
+        /** States after which no further transition is expected, so the span can close. */
+        val TERMINAL = setOf(STATE_SUCCEEDED, STATE_FAILED, STATE_CANCELLED)
+    }
+}
+
+/**
+ * A remote-config activation, as **one event listing what changed** rather than one event per
+ * key: a fetch typically flips several flags at once and an app can carry hundreds of them, so
+ * per-key rows would bury the timeline.
+ */
+@Serializable
+data class ConfigUpdate(
+    val source: String? = null,
+    val fetchStatus: String? = null,
+    /**
+     * True for the first snapshot in a process: it establishes what "unchanged" means, so it's
+     * recorded as a count instead of reporting every key as new.
+     */
+    val baseline: Boolean = false,
+    val totalKeys: Int = 0,
+    val changes: List<ConfigChange> = emptyList(),
+)
+
+@Serializable
+data class ConfigChange(
+    val key: String,
+    val value: String,
+    val previous: String? = null,
+    val isNew: Boolean = false,
+)
 
 /**
  * The payload of the built-in `"event"` kind: an event that describes its own presentation,

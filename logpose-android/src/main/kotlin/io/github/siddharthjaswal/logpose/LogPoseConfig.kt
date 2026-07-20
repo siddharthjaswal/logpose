@@ -33,4 +33,12 @@ data class LogPoseConfig(
      * machine; set to false to make this build ignore them entirely.
      */
     val mocksEnabled: Boolean = true,
+    /**
+     * Emit database events (see `LogPose.logDbQuery`). A Room query callback on a busy screen
+     * can produce hundreds of events a minute, so this is the switch to turn that off without
+     * unpicking the integration.
+     */
+    val dbEnabled: Boolean = true,
+    /** Emit background-work events (see `LogPose.logWorker`). */
+    val workersEnabled: Boolean = true,
 )

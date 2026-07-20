@@ -28,4 +28,6 @@ data class LogPoseConfig(
         "Proxy-Authorization",
     ),
     val mocksEnabled: Boolean = true,
+    val dbEnabled: Boolean = true,
+    val workersEnabled: Boolean = true,
 )

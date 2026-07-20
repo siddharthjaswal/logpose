@@ -36,6 +36,25 @@ object LogPose {
 
     fun newTraceId(): String = ""
 
+    fun logDbQuery(info: DbQueryInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
+
+    fun logWorker(info: WorkerEventInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
+
+    fun logConfigSnapshot(
+        values: Map<String, String>,
+        source: String? = null,
+        fetchStatus: String? = null,
+        config: LogPoseConfig = LogPoseConfig(),
+    ) = Unit
+
+    fun logConfigChange(
+        key: String,
+        value: String,
+        previous: String? = null,
+        source: String? = null,
+        config: LogPoseConfig = LogPoseConfig(),
+    ) = Unit
+
     fun logFcmMessage(info: FcmMessageInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
 
     fun logFcmToken(token: String, config: LogPoseConfig = LogPoseConfig()) = Unit
