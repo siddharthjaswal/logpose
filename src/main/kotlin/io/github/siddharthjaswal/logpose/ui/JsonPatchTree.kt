@@ -216,7 +216,8 @@ class JsonPatchTree : JPanel(BorderLayout()) {
             expanded: Boolean, leaf: Boolean, row: Int, hasFocus: Boolean,
         ) {
             val node = value as? JNode ?: return
-            checkbox.isVisible = merge && node.kind == Kind.LEAF
+            // myCheckbox, not the deprecated getCheckbox().
+            myCheckbox.isVisible = merge && node.kind == Kind.LEAF
             val tr = textRenderer
             val name = if (node.added) (node.objectKey ?: "") else node.label
             if (name.isNotEmpty()) tr.append("$name", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)

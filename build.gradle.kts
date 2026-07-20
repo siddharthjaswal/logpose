@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.siddharthjaswal"
-version = "1.4.7"
+version = "1.4.8"
 
 repositories {
     mavenCentral()
@@ -67,6 +67,8 @@ intellijPlatform {
             ide("2024.1")
             ide("2024.3")
             ide("2025.1")
+            ide("2025.2") // newest release that resolves from the IDE repo for this platform
+
         }
     }
 }

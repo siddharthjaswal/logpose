@@ -6,6 +6,19 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.4.8] - 2026-07-20
+
+### Fixed
+- Cleared the last two JetBrains Marketplace compatibility warnings, so LogPose now verifies
+  clean on every checked IDE (2024.1 → 2026.2):
+  - the mock dialog's method dropdown subclasses `SimpleListCellRenderer` instead of the
+    `create(Customizer)` overload, which is **scheduled for removal**;
+  - the mock field tree reads `myCheckbox` instead of the **deprecated**
+    `CheckboxTreeCellRendererBase.getCheckbox()`.
+
+### Changed
+- `verifyPlugin` also runs against 2025.2 (the newest IDE the repo resolves for this platform).
+
 ## [1.4.7] - 2026-07-20
 
 ### Fixed

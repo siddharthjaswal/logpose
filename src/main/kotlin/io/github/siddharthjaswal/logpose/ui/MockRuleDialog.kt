@@ -19,6 +19,7 @@ import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.components.panels.VerticalLayout
 import com.intellij.util.ui.JBUI
+import com.intellij.util.ui.UIUtil
 import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.Transaction
 import kotlinx.serialization.json.Json
@@ -36,6 +37,7 @@ import java.util.UUID
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JComponent
+import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.SwingConstants
 
@@ -61,10 +63,18 @@ class MockRuleDialog(
     }
     private val method = ComboBox(methodItems.toTypedArray()).apply {
         selectedItem = initial.method.uppercase()
-        renderer = SimpleListCellRenderer.create { label, value, _ ->
-            label.text = value
-            label.font = JBUI.Fonts.label(12f).asBold()
-            if (value != null && value != "*") label.foreground = Theme.methodColor(value)
+        // Subclass rather than SimpleListCellRenderer.create(Customizer) — that overload is
+        // scheduled for removal from the platform.
+        renderer = object : SimpleListCellRenderer<String>() {
+            override fun customize(
+                list: JList<out String>, value: String?, index: Int,
+                selected: Boolean, hasFocus: Boolean,
+            ) {
+                text = value
+                font = JBUI.Fonts.label(12f).asBold()
+                foreground = if (value != null && value != "*") Theme.methodColor(value)
+                else UIUtil.getLabelForeground()
+            }
         }
     }
     private val path = JBTextField(initial.pathPattern)
