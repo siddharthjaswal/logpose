@@ -3,6 +3,7 @@ package io.github.siddharthjaswal.logpose.toolwindow
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.model.Badge
+import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -217,9 +218,14 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         genRow.hovered = index == hoveredIndex && !isSelected
         genRow.rowHeight = 34
 
-        genLabel.text = value.kind.uppercase().take(6)
+        // The kind column is narrow, and app-defined kinds are often dotted and long
+        // ("acme.telemetry"), so abbreviating them there produces junk like "ACME.T". Show the
+        // family instead — matching the APP filter chip — and let the centre carry the real
+        // kind, which is already the title when the payload isn't self-describing.
+        genLabel.text = if (value.kind == Envelope.KIND_EVENT) "EVENT" else "APP"
 
-        val badge = value.event?.badges?.firstOrNull()
+        val badges = value.event?.badges.orEmpty()
+        val badge = badges.firstOrNull()
         if (badge != null) {
             val color = when (badge.tone) {
                 Badge.TONE_INFO -> Theme.accent
@@ -237,15 +243,21 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         genText.text = if (subtitle != null) "$title  ·  $subtitle" else title
         genText.foreground = Theme.text
 
-        // Extra badges beyond the first would crowd the status column, so surface the count
-        // where HTTP shows body size.
-        val extras = (value.event?.badges?.size ?: 0) - 1
-        genCount.text = if (extras > 0) "+$extras" else ""
+        // Only one badge fits the status column, so the second one goes where HTTP shows body
+        // size — its text, not a "+1", since "retry 2" tells you something and a count doesn't.
+        genCount.text = when {
+            badges.size == 2 -> badges[1].text.take(9)
+            badges.size > 2 -> "+${badges.size - 1}"
+            else -> ""
+        }
         genCount.foreground = Theme.textDim
 
         genTime.text = when {
-            value.isOpen -> spinnerChar(spinnerFrame).toString()
             value.durationMillis != null -> "${value.durationMillis}ms"
+            // Deliberately no spinner here, unlike HTTP. A foreign producer that never sets
+            // endedAt is far more likely than a genuinely long-running span, and a row that
+            // spins forever reads as a hang. If the close does arrive, the row updates in
+            // place and the duration replaces the timestamp.
             value.timestampMillis > 0 -> timeFmt.format(Date(value.timestampMillis))
             else -> ""
         }
