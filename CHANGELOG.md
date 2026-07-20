@@ -6,6 +6,19 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.4.7] - 2026-07-20
+
+### Fixed
+- Stop using internal platform API: the tool-window version label now reads the plugin
+  descriptor via `PluginManager.findEnabledPlugin` instead of `PluginManagerCore.getPlugin`,
+  which the JetBrains Marketplace verifier flags as internal ("must not be used outside the
+  IntelliJ Platform").
+
+### Changed
+- `verifyPlugin` now also runs against a recent IDE (2025.1), not just 2024.x. `untilBuild` is
+  open, so APIs deprecated or removed after 2024.x were previously only caught by the
+  Marketplace, never locally.
+
 ## [1.4.6] - 2026-07-19
 
 ### Changed

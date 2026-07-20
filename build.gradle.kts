@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.siddharthjaswal"
-version = "1.4.6"
+version = "1.4.7"
 
 repositories {
     mavenCentral()
@@ -60,10 +60,13 @@ intellijPlatform {
 
     // `verifyPlugin` runs the JetBrains Plugin Verifier against specific, released IDEs.
     // (recommended() can resolve to an unreleased build that 404s on download.)
+    // untilBuild is open, so we must also verify against a RECENT IDE — otherwise APIs that
+    // were deprecated/removed after 2024.x only surface on the Marketplace, not locally.
     pluginVerification {
         ides {
             ide("2024.1")
             ide("2024.3")
+            ide("2025.1")
         }
     }
 }

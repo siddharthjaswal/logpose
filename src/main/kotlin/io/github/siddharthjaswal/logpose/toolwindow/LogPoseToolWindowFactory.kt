@@ -1,6 +1,6 @@
 package io.github.siddharthjaswal.logpose.toolwindow
 
-import com.intellij.ide.plugins.PluginManagerCore
+import com.intellij.ide.plugins.PluginManager
 import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
@@ -18,6 +18,8 @@ class LogPoseToolWindowFactory : ToolWindowFactory {
         toolWindow.contentManager.addContent(content)
     }
 
+    // PluginManager (not the internal PluginManagerCore) is the public way to read our own
+    // descriptor — the Marketplace verifier flags PluginManagerCore as internal API.
     private fun pluginVersion(): String? =
-        PluginManagerCore.getPlugin(PluginId.getId("io.github.siddharthjaswal.logpose"))?.version
+        PluginManager.getInstance().findEnabledPlugin(PluginId.getId("io.github.siddharthjaswal.logpose"))?.version
 }
