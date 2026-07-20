@@ -6,6 +6,44 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-07-21
+
+Database access, background work, and remote-config flags become first-class kinds — the three
+things essentially every Android app has, now understood rather than merely displayed.
+
+Needs `logpose-android` ≥ 1.4.0 to emit them.
+
+### Added
+- **DB events.** `LogPose.logDbQuery(DbQueryInfo(…))`, a one-line integration with Room's
+  `setQueryCallback`. Rows read `users · SELECT id FROM users` — the operation and table are
+  parsed from the statement by the plugin, so the device only sends what it knows. Reads are
+  toned quietly and mutations stand out, because a busy screen is mostly SELECTs.
+- **Worker events.** `LogPose.logWorker(WorkerEventInfo(…))`, typically from a single
+  `WorkManager.getWorkInfosLiveData` observer that covers every worker without touching any of
+  them. A request is emitted under its own `workId`, so enqueued → running → succeeded update
+  **one row** rather than adding three. Retries are badged.
+- **Config events.** `LogPose.logConfigSnapshot(values, …)` hands LogPose the whole snapshot and
+  it reports the diff — Firebase Remote Config won't tell you what changed. One row per
+  activation listing the changed flags with before → after values, not one row per key. The
+  first snapshot of a process is recorded as a baseline count.
+- **Three MCP tools** for the questions these kinds exist to answer: `find_slow_queries`,
+  `worker_history`, `config_changes`.
+- `DB` / `WORK` / `CONF` filter chips.
+
+### Changed
+- The row layouts for db, worker, config and app-defined kinds collapsed into one
+  presenter-driven row; `KindPresenter` maps every structured payload onto the same
+  title/badges/sections model that a self-describing event supplies for itself, so one detail
+  view serves them all.
+- Long durations read as `1.2s` / `2m 5s` rather than `94210ms`.
+
+### Notes
+- `find_slow_queries` **excludes** queries the app didn't measure rather than reporting them as
+  0ms — Room's query callback carries no timing, and calling them instant would sort them to the
+  fast end of a slowness ranking.
+- Worker durations are derived from `WorkInfo` state changes, so they include queue time. The
+  detail says so rather than implying precision.
+
 ## [1.5.0] - 2026-07-20
 
 The release where LogPose stops being an HTTP tool. Two changes: the timeline is now open to

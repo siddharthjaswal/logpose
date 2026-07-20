@@ -66,10 +66,16 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
 ### Plugin (`src/main/kotlin/io/github/siddharthjaswal/logpose/`)
 - `toolwindow/` — `LogPosePanel` (master/detail UI), `TransactionListRenderer` (list rows),
   `LogPoseToolWindowFactory`.
+- `ui/KindPresenter.kt` — maps a structured payload (db / worker / config) onto the
+  title/badges/sections model a self-describing event supplies for itself, so one row layout and
+  one detail view serve every non-HTTP/FCM kind. **Presentation decisions live here, never on
+  the wire.**
 - `ui/` — `Ui.kt` (`Theme` tokens as `JBColor` light/dark pairs, `TagLabel`, helpers),
   `OverviewPanel`, `TransactionDetailView` (HTTP), `FcmDetailView` (FCM),
-  `GenericDetailView` (every app-defined kind), `JsonTreePanel` (Tree + Raw JSON editor),
-  `FilterBar` (incl. the `NET`/`FCM`/`APP` TYPE toggle), `CurlBuilder`, `MutedEndpoints`.
+  `GenericDetailView` (db / worker / config / app-defined), `JsonTreePanel` (Tree + Raw JSON
+  editor),
+  `FilterBar` (incl. the `NET`/`FCM`/`DB`/`WORK`/`CONF`/`APP` TYPE toggle), `CurlBuilder`,
+  `MutedEndpoints`.
 - `logcat/` — `LogcatReader` (tails `adb logcat`, all adb work **off the EDT**),
   `TransactionParser` (reassembles chunked JSON; returns a `LogEvent`, and routes reverse-channel
   `ControlMessage`s — hello / mock-ack — to `onControl`), `Adb` (shared adb resolve + cmd prefix).
@@ -83,13 +89,16 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
   **note that EP resolves under `com.intellij`, not `org.jetbrains`, or it silently never
   loads**). Runs on a Netty IO thread: **never touch Swing there**.
 - `store/` — `EventStore` (capped, arrival-ordered, id-keyed; holds `LogEvent`s of every kind).
-- `analysis/` — `DuplicateDetector` (flags repeated requests; HTTP-only, pure + unit-tested).
+- `analysis/` — `DuplicateDetector` (flags repeated requests; HTTP-only) and `SqlSummary`
+  (operation + table from a statement). Both pure + unit-tested; SQL parsing lives **only**
+  here, never in the library, so there's one implementation.
 - `model/Transaction.kt` — the wire contract shared (by structure) with the library: the
   `Envelope` every timeline event travels in, `GenericEvent`/`Badge`/`Section` (self-describing
   app events), `Transaction`, `FcmMessage`, and the mock/reverse-channel types (`MockRule`,
   `MockRuleSet`, `Hello`, `MockAck`; `Transaction.mocked`). `model/LogEvent.kt` is the decoded
-  form the UI works with — `Http`/`Fcm`/`Generic` over an envelope, exposing id, kind, timing
-  and trace without knowing the kind.
+  form the UI works with — `Http`/`Fcm`/`Db`/`Worker`/`Config`/`Generic` over an envelope,
+  exposing id, kind, timing and trace without knowing the kind. `DbQuery`/`WorkerEvent`/
+  `ConfigUpdate` carry **structure, not presentation** — see `ui/KindPresenter.kt`.
 - `src/main/resources/META-INF/plugin.xml` — plugin descriptor + `<change-notes>`.
 
 ### Library (`logpose-android/src/main/kotlin/io/github/siddharthjaswal/logpose/`)
@@ -98,6 +107,10 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
   `logFcmMessage` / `logFcmToken` (push). **Its public surface takes only strings and maps** —
   the no-op has no kotlinx-serialization dependency and must mirror it exactly.
 - `LogPoseEvent.kt` — `EventBuilder` (badges, typed sections, `took`/`open` spans) + `Tone`.
+- `LogPoseRuntimeEvents.kt` — `DbQueryInfo` / `WorkerEventInfo` holders (dependency-free, like
+  `FcmMessageInfo`), fed by `LogPose.logDbQuery` / `logWorker` / `logConfigSnapshot`. Worker
+  events reuse `workId` as the envelope id so a request is one updating row; config snapshots
+  are diffed in the library, since Firebase reports no change list.
 - `LogPoseFcm.kt` — the Firebase-free `FcmMessageInfo` holder the app fills from a
   `RemoteMessage`. LogPose references no Firebase types, so the no-op stays pure-JVM.
 - `emit/` — `EventEmitter` (sink over `Envelope`, with `emit(Transaction)`/`emit(FcmMessage)`

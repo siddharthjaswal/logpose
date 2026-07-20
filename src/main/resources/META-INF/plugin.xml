@@ -55,6 +55,15 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Database, background work and remote config on the timeline</b> — the three
+                things every Android app has, now first-class alongside HTTP and FCM. Room
+                queries show their operation and table (<code>users · SELECT id FROM users</code>),
+                a WorkManager request occupies one row that updates as it runs and badges its
+                retries, and a remote-config activation reports exactly which flags changed,
+                with before &rarr; after values. New <b>DB</b> / <b>WORK</b> / <b>CONF</b> filter
+                chips, and MCP tools for "what's making this screen slow?", "did SyncWorker
+                retry?" and "what flag changed before this broke?". Needs
+                <code>logpose-android</code> &ge; 1.4.0.</li>
             <li><b>Your coding agent can read the running app</b> — LogPose now exposes the live
                 capture over <b>MCP</b>, so Claude Code (or any MCP client) can answer "what did
                 the app actually request, and why did it fail?" from real traffic instead of a

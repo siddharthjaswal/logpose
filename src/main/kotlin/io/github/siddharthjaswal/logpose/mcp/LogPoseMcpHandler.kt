@@ -203,6 +203,6 @@ class LogPoseMcpHandler : HttpRequestHandler() {
         const val PATH = "/api/logpose/mcp"
         const val TOKEN_HEADER = "X-LogPose-Token"
         private const val PROTOCOL_VERSION = "2025-06-18"
-        private const val PROTOCOL_SERVER_VERSION = "1.5.0"
+        private const val PROTOCOL_SERVER_VERSION = "1.6.0"
     }
 }

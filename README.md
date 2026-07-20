@@ -46,9 +46,12 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
   **MCP**, so Claude Code (or any MCP client) can answer "what did the app actually request,
   and why did it fail?" from real traffic instead of a pasted log line — and can create a mock
   to reproduce or unblock a state. See [Connect a coding agent](#connect-a-coding-agent).
-- **Log anything, not just HTTP** — `LogPose.event("UserDao.insert") { … }` puts *your*
-  subsystems on the same timeline: database queries, background jobs, analytics, feature
-  flags, navigation. Events carry their own presentation, so they render with no plugin
+- **Database, background work and remote config, first class** — Room queries show their
+  operation and table, a WorkManager request occupies one row that updates as it runs (and
+  badges its retries), and a config activation reports exactly which flags changed, with
+  before → after. See [Database, workers and config](#database-workers-and-config).
+- **Log anything else too** — `LogPose.event("PaymentSheet") { … }` puts any other subsystem on
+  the same timeline. Events carry their own presentation, so they render with no plugin
   changes. See [Log your own events](#log-your-own-events).
 - **Mock & replay** — right-click any captured request → **Mock this endpoint** and serve a
   response instead of hitting the network. **Replace** the whole body, or **merge** your JSON
@@ -351,6 +354,70 @@ Rules are pushed to the device over adb (`am broadcast` to a receiver gated by t
 permission, which only the adb shell holds — third-party apps can't reach it). The mock
 machinery ships **only in the real `logpose-android` artifact** (never the release no-op), and
 rules are cleared automatically when you stop capturing. Requires `logpose-android` ≥ 1.1.0.
+
+## Database, workers and config
+
+Three kinds LogPose understands without being told how to draw them — you supply the facts, the
+IDE decides how they read.
+
+**Database** — one line in a Room builder covers every query:
+
+```kotlin
+Room.databaseBuilder(app, AppDb::class.java, "app-db")
+    .apply {
+        if (BuildConfig.DEBUG) setQueryCallback({ sql, args ->
+            LogPose.logDbQuery(DbQueryInfo(sql = sql, args = args.map { it.toString() },
+                                           database = "app-db"))
+        }, Executors.newSingleThreadExecutor())
+    }
+    .build()
+```
+
+The row reads `users · SELECT id, name FROM users WHERE id = ?` — operation and table are parsed
+from the statement, so nothing extra has to be passed. Reads are toned quietly and writes stand
+out. Pass `durationMillis` if you measure it; Room's callback doesn't provide one.
+
+**Background work** — one observer covers every worker, including ones written later:
+
+```kotlin
+WorkManager.getInstance(this)
+    .getWorkInfosLiveData(WorkQuery.fromStates(WorkInfo.State.values().toList()))
+    .observeForever { infos ->
+        infos.forEach { info ->
+            LogPose.logWorker(WorkerEventInfo(
+                worker = info.tags.firstOrNull { it.contains('.') }?.substringAfterLast('.') ?: "Worker",
+                state = info.state.name.lowercase(),
+                workId = info.id.toString(),
+                runAttempt = info.runAttemptCount,
+                tags = info.tags.toList(),
+            ))
+        }
+    }
+```
+
+Because the event carries the request's `workId`, enqueued → running → succeeded update **one
+row** instead of stacking up three. Durations come from state changes, so they include queue
+time — the detail says so.
+
+**Remote config** — hand over the whole snapshot and LogPose reports the diff, since Firebase
+gives you a map and a boolean, not a list of what changed:
+
+```kotlin
+firebaseRemoteConfig.fetchAndActivate().addOnCompleteListener {
+    LogPose.logConfigSnapshot(
+        firebaseRemoteConfig.all.mapValues { it.value.asString() },
+        source = "remote",
+        config = LogPoseConfig(enabled = BuildConfig.DEBUG),
+    )
+}
+```
+
+One row per activation — `3 flags changed · IS_CAMERAX_ENABLED, …` — with before → after in the
+detail. The first snapshot after launch is recorded as a baseline rather than reporting all 187
+flags as new, and a fetch that changed nothing costs no row at all.
+
+All three need `logpose-android` ≥ 1.4.0, and `dbEnabled` / `workersEnabled` on `LogPoseConfig`
+turn them off without unpicking the integration.
 
 ## Log your own events
 

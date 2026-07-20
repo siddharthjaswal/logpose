@@ -93,6 +93,56 @@ class MyMessagingService : FirebaseMessagingService() {
 }
 ```
 
+## Database, workers and config (optional)
+
+Three kinds the IDE understands structurally — you send facts, it decides how they read.
+
+```kotlin
+// Room: one line, every query.
+Room.databaseBuilder(app, AppDb::class.java, "app-db")
+    .apply {
+        if (BuildConfig.DEBUG) setQueryCallback({ sql, args ->
+            LogPose.logDbQuery(DbQueryInfo(sql = sql, args = args.map { it.toString() },
+                                           database = "app-db"))
+        }, Executors.newSingleThreadExecutor())
+    }
+    .build()
+
+// WorkManager: one observer, every worker — no Worker class is touched.
+WorkManager.getInstance(context)
+    .getWorkInfosLiveData(WorkQuery.fromStates(WorkInfo.State.values().toList()))
+    .observeForever { infos ->
+        infos.forEach {
+            LogPose.logWorker(WorkerEventInfo(
+                worker = it.tags.firstOrNull { t -> t.contains('.') }?.substringAfterLast('.') ?: "Worker",
+                state = it.state.name.lowercase(),
+                workId = it.id.toString(),
+                runAttempt = it.runAttemptCount,
+            ))
+        }
+    }
+
+// Remote config: hand over the snapshot, LogPose reports the diff.
+firebaseRemoteConfig.fetchAndActivate().addOnCompleteListener {
+    LogPose.logConfigSnapshot(firebaseRemoteConfig.all.mapValues { v -> v.value.asString() },
+                              source = "remote")
+}
+```
+
+Notes worth knowing:
+
+- Operation and table are parsed from the SQL **by the plugin**, so you don't pass them (set
+  `operation` / `table` yourself only for non-SQL stores). Pass `durationMillis` if you measure
+  it — Room's callback has no timing, and unmeasured queries are excluded from slow-query
+  reports rather than counted as instant.
+- A worker event is keyed by `workId`, so a request's states collapse into one updating row.
+  Durations derive from `WorkInfo` state changes and therefore include queue time.
+- The first config snapshot in a process is a baseline; only later activations report changes.
+- `dbEnabled` / `workersEnabled` on `LogPoseConfig` switch these off — a query callback on a
+  busy screen can emit hundreds of events a minute.
+
+Requires plugin 1.6.0+ to render as first-class rows (older plugins show them as generic rows).
+
 ## Your own events (optional)
 
 HTTP and FCM are just two *kinds* on the timeline. Any subsystem can put a row there, and the
