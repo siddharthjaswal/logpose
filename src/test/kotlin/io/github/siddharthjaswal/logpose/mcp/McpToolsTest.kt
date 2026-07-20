@@ -1,6 +1,9 @@
 package io.github.siddharthjaswal.logpose.mcp
 
 import io.github.siddharthjaswal.logpose.model.Badge
+import io.github.siddharthjaswal.logpose.model.ConfigChange
+import io.github.siddharthjaswal.logpose.model.ConfigUpdate
+import io.github.siddharthjaswal.logpose.model.DbQuery
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.GenericEvent
 import io.github.siddharthjaswal.logpose.model.LogEvent
@@ -9,6 +12,7 @@ import io.github.siddharthjaswal.logpose.model.Request
 import io.github.siddharthjaswal.logpose.model.Response
 import io.github.siddharthjaswal.logpose.model.Body
 import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -196,6 +200,197 @@ class McpToolsTest {
         assertEquals(2, top["calls"]!!.jsonPrimitive.int())
     }
 
+    // ---- app-runtime kinds -----------------------------------------------------------------
+
+    private fun db(
+        id: String,
+        sql: String = "SELECT * FROM users",
+        durationMillis: Long? = 10,
+        rows: Int? = null,
+        at: Long = 1_000,
+    ): LogEvent.Db {
+        val query = DbQuery(sql = sql, rows = rows, database = "app-db")
+        return LogEvent.Db(
+            query,
+            Envelope(
+                kind = Envelope.KIND_DB, id = id, at = at,
+                endedAt = durationMillis?.let { at + it },
+                payload = json.encodeToJsonElement(query),
+            ),
+        )
+    }
+
+    private fun worker(
+        id: String,
+        name: String = "SyncWorker",
+        state: String = WorkerEvent.STATE_SUCCEEDED,
+        attempt: Int = 1,
+        at: Long = 1_000,
+        durationMillis: Long? = 500,
+    ): LogEvent.Worker {
+        val work = WorkerEvent(worker = name, state = state, workId = id, runAttempt = attempt)
+        return LogEvent.Worker(
+            work,
+            Envelope(
+                kind = Envelope.KIND_WORKER, id = id, at = at,
+                endedAt = durationMillis?.let { at + it },
+                payload = json.encodeToJsonElement(work),
+            ),
+        )
+    }
+
+    private fun config(id: String, vararg changes: Pair<String, Pair<String?, String>>, at: Long = 1_000): LogEvent.Config {
+        val update = ConfigUpdate(
+            source = "remote",
+            totalKeys = 187,
+            changes = changes.map { (key, values) ->
+                ConfigChange(key = key, previous = values.first, value = values.second)
+            },
+        )
+        return LogEvent.Config(
+            update,
+            Envelope(
+                kind = Envelope.KIND_CONFIG, id = id, at = at, endedAt = at,
+                payload = json.encodeToJsonElement(update),
+            ),
+        )
+    }
+
+    @Test fun `find_slow_queries ranks by duration and reports the SQL`() {
+        val events = listOf(
+            db("fast", "SELECT * FROM users", durationMillis = 3),
+            db("slow", "SELECT * FROM orders JOIN items", durationMillis = 240),
+            db("mid", "UPDATE riders SET x = 1", durationMillis = 40),
+        )
+        val out = call("find_slow_queries", events)
+        val ids = out["queries"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
+        assertEquals(listOf("slow", "mid", "fast"), ids)
+
+        val slowest = out["queries"]!!.jsonArray.first().jsonObject
+        assertEquals("orders", slowest["table"]!!.jsonPrimitive.content, "table is parsed from the SQL")
+        assertEquals(240, slowest["duration_ms"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `find_slow_queries excludes unmeasured queries instead of calling them instant`() {
+        // Room's query callback gives no timing. Treating those as 0ms would sort them to the
+        // fast end of a slowness ranking — exactly backwards — so they're excluded and counted.
+        val events = listOf(db("measured", durationMillis = 50), db("unmeasured", durationMillis = null))
+        val out = call("find_slow_queries", events)
+
+        assertEquals(2, out["total_queries"]!!.jsonPrimitive.int())
+        assertEquals(1, out["measured"]!!.jsonPrimitive.int())
+        assertTrue(out.containsKey("note"), "the exclusion must be stated, not silent")
+        assertEquals(
+            listOf("measured"),
+            out["queries"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content },
+        )
+    }
+
+    @Test fun `find_slow_queries filters by threshold and table`() {
+        val events = listOf(
+            db("a", "SELECT * FROM users", durationMillis = 5),
+            db("b", "SELECT * FROM orders", durationMillis = 300),
+            db("c", "SELECT * FROM users", durationMillis = 100),
+        )
+        assertEquals(
+            listOf("b", "c"),
+            call("find_slow_queries", events, buildJsonObject { put("min_ms", 50) })
+                .queryIds(),
+        )
+        assertEquals(
+            listOf("c", "a"),
+            call("find_slow_queries", events, buildJsonObject { put("table", "users") }).queryIds(),
+        )
+    }
+
+    @Test fun `worker_history reports attempts, failures and filters`() {
+        val events = listOf(
+            worker("w1", "SyncWorker", WorkerEvent.STATE_SUCCEEDED, attempt = 3),
+            worker("w2", "CleanupWorker", WorkerEvent.STATE_FAILED, attempt = 1),
+            worker("w3", "SyncWorker", WorkerEvent.STATE_RUNNING, attempt = 1, durationMillis = null),
+        )
+        val all = call("worker_history", events)
+        assertEquals(3, all["count"]!!.jsonPrimitive.int())
+        assertEquals(1, all["retried"]!!.jsonPrimitive.int(), "attempt > 1 counts as a retry")
+        assertEquals(1, all["failed"]!!.jsonPrimitive.int())
+
+        val filtered = call("worker_history", events, buildJsonObject { put("worker", "sync") })
+        assertEquals(2, filtered["count"]!!.jsonPrimitive.int(), "worker match is case-insensitive")
+
+        val failed = call("worker_history", events, buildJsonObject { put("state", "failed") })
+        assertEquals(1, failed["count"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `worker durations say what they include`() {
+        // WorkInfo reports state, not execution time, so a duration covers queue time too.
+        val out = call("worker_history", listOf(worker("w1", durationMillis = 1_500)))
+        val entry = out["workers"]!!.jsonArray.single().jsonObject
+        assertEquals(1_500, entry["duration_ms"]!!.jsonPrimitive.int())
+        assertTrue(entry["duration_note"]!!.jsonPrimitive.content.contains("queue time"))
+    }
+
+    @Test fun `config_changes flattens activations into individual flags`() {
+        val events = listOf(
+            config("c1", "new_checkout" to (null to "true")),
+            config("c2", "feed_v2" to ("false" to "true"), "timeout_ms" to ("3000" to "5000")),
+        )
+        val out = call("config_changes", events)
+
+        assertEquals(2, out["activations"]!!.jsonPrimitive.int())
+        assertEquals(3, out["count"]!!.jsonPrimitive.int(), "an agent wants flags, not activations")
+
+        val keys = out["changes"]!!.jsonArray.map { it.jsonObject["key"]!!.jsonPrimitive.content }
+        assertEquals(listOf("new_checkout", "feed_v2", "timeout_ms"), keys)
+
+        val first = out["changes"]!!.jsonArray.first().jsonObject
+        assertTrue(first["new_key"]!!.jsonPrimitive.content.toBoolean(), "no previous value means new")
+
+        val second = out["changes"]!!.jsonArray[1].jsonObject
+        assertEquals("false", second["previous"]!!.jsonPrimitive.content)
+        assertEquals("true", second["value"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `config_changes can narrow to one flag`() {
+        val events = listOf(config("c1", "feed_v2" to ("false" to "true"), "other" to ("1" to "2")))
+        val out = call("config_changes", events, buildJsonObject { put("key", "feed") })
+        assertEquals(1, out["count"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `db and worker failures show up in find_failures`() {
+        val failingQuery = DbQuery(sql = "SELECT 1", error = "SQLiteException: no such table")
+        val events = listOf(
+            LogEvent.Db(
+                failingQuery,
+                Envelope(
+                    kind = Envelope.KIND_DB, id = "bad-sql", at = 1, endedAt = 1,
+                    payload = json.encodeToJsonElement(failingQuery),
+                ),
+            ),
+            worker("w-failed", state = WorkerEvent.STATE_FAILED),
+            worker("w-ok", state = WorkerEvent.STATE_SUCCEEDED),
+            config("c1", "flag" to ("a" to "b")),
+        )
+        assertEquals(listOf("bad-sql", "w-failed"), call("find_failures", events).ids())
+    }
+
+    @Test fun `summaries for the new kinds read like the rows do`() {
+        val out = call(
+            "list_events",
+            listOf(
+                db("q", "SELECT id FROM users WHERE id = 7"),
+                worker("w", "SyncWorker", WorkerEvent.STATE_FAILED),
+                config("c", "new_checkout" to ("false" to "true")),
+            ),
+        )
+        val summaries = out["events"]!!.jsonArray.map { it.jsonObject["summary"]!!.jsonPrimitive.content }
+        assertTrue(summaries[0].startsWith("users · SELECT id FROM users"), summaries[0])
+        assertTrue(summaries[1].startsWith("SyncWorker"), summaries[1])
+        assertTrue(summaries[2].contains("new_checkout"), summaries[2])
+    }
+
+    private fun JsonObject.queryIds(): List<String> =
+        this["queries"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
+
     // ---- mock write tools ------------------------------------------------------------------
 
     /** In-memory stand-in for MocksController, so the tool behavior is testable on its own. */
@@ -315,6 +510,7 @@ class McpToolsTest {
         assertEquals(
             listOf(
                 "list_events", "get_event", "get_trace", "find_failures", "session_summary",
+                "find_slow_queries", "worker_history", "config_changes",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
             ),
             names,

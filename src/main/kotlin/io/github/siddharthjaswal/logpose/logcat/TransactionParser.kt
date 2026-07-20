@@ -1,6 +1,8 @@
 package io.github.siddharthjaswal.logpose.logcat
 
 import io.github.siddharthjaswal.logpose.model.Chunk
+import io.github.siddharthjaswal.logpose.model.ConfigUpdate
+import io.github.siddharthjaswal.logpose.model.DbQuery
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.GenericEvent
@@ -8,6 +10,7 @@ import io.github.siddharthjaswal.logpose.model.Hello
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockAck
 import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -110,6 +113,15 @@ class TransactionParser {
                 ?: LogEvent.Generic(null, envelope)
         Envelope.KIND_FCM ->
             envelope.decode(FcmMessage.serializer())?.let { LogEvent.Fcm(it, envelope) }
+                ?: LogEvent.Generic(null, envelope)
+        Envelope.KIND_DB ->
+            envelope.decode(DbQuery.serializer())?.let { LogEvent.Db(it, envelope) }
+                ?: LogEvent.Generic(null, envelope)
+        Envelope.KIND_WORKER ->
+            envelope.decode(WorkerEvent.serializer())?.let { LogEvent.Worker(it, envelope) }
+                ?: LogEvent.Generic(null, envelope)
+        Envelope.KIND_CONFIG ->
+            envelope.decode(ConfigUpdate.serializer())?.let { LogEvent.Config(it, envelope) }
                 ?: LogEvent.Generic(null, envelope)
         // Unknown kinds still get a row: self-describing payloads render fully, anything else
         // falls back to the raw payload rather than being dropped.

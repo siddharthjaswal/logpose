@@ -37,6 +37,7 @@ import io.github.siddharthjaswal.logpose.ui.CurlBuilder
 import io.github.siddharthjaswal.logpose.ui.FcmDetailView
 import io.github.siddharthjaswal.logpose.ui.FilterBar
 import io.github.siddharthjaswal.logpose.ui.GenericDetailView
+import io.github.siddharthjaswal.logpose.ui.KindPresenter
 import io.github.siddharthjaswal.logpose.ui.isPending
 import io.github.siddharthjaswal.logpose.ui.MockRuleDialog
 import io.github.siddharthjaswal.logpose.ui.MocksBar
@@ -346,13 +347,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 fcmDetail.show(event.msg)
                 detailCards.show(detailPane, "fcm")
             }
-            is LogEvent.Generic -> {
-                genericDetail.show(event)
-                detailCards.show(detailPane, "generic")
-            }
             null -> {
                 detail.show(null)
                 detailCards.show(detailPane, "http")
+            }
+            // db / worker / config / app-defined all render through the presenter-driven view.
+            else -> {
+                genericDetail.show(event)
+                detailCards.show(detailPane, "generic")
             }
         }
     }
@@ -419,8 +421,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun timelineLabel(event: LogEvent): String = when (event) {
         is LogEvent.Http -> "${event.tx.request.method} ${event.tx.request.path.ifBlank { event.tx.request.url }}"
         is LogEvent.Fcm -> "FCM ${fcmTimelineLabel(event.msg)}"
-        is LogEvent.Generic ->
-            "${event.kind.uppercase()} ${event.event?.title ?: event.id}"
+        else -> "${KindPresenter.kindLabel(event)} ${KindPresenter.present(event)?.title ?: event.id}"
     }
 
     private fun fcmTimelineLabel(msg: FcmMessage): String {
@@ -482,7 +483,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             } else when (val ev = list.selectedValue ?: return) {
                 is LogEvent.Http -> httpGroup(ev.tx)
                 is LogEvent.Fcm -> fcmGroup(ev.msg)
-                is LogEvent.Generic -> genericGroup(ev)
+                else -> structuredGroup(ev)
             }
             showActionPopup(group, e)
         }
@@ -523,7 +524,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             }
         }
 
-        private fun genericGroup(ev: LogEvent.Generic): ActionGroup = DefaultActionGroup().apply {
+        private fun structuredGroup(ev: LogEvent): ActionGroup = DefaultActionGroup().apply {
             add(act("Copy as JSON", AllIcons.Actions.Copy) {
                 copyToClipboard(
                     prettyJson.encodeToString(Envelope.serializer(), ev.envelope),

@@ -7,6 +7,7 @@ import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.ui.KindPresenter
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.TagLabel
 import io.github.siddharthjaswal.logpose.ui.Theme
@@ -204,27 +205,30 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     ): Component = when (value) {
         is LogEvent.Http -> httpRow(value.tx, index, isSelected)
         is LogEvent.Fcm -> fcmRow(value.msg, index, isSelected)
-        is LogEvent.Generic -> genericRow(value, index, isSelected)
+        // Everything else — db, worker, config, and app-defined kinds — shares one row, driven
+        // by KindPresenter. Their differences are presentational, so they don't warrant
+        // separate layouts; the column geometry stays identical to HTTP and FCM.
+        else -> structuredRow(value, index, isSelected)
     }
 
     /**
-     * Row for a kind the plugin has no special support for. Everything shown comes from the
-     * device: the kind takes the method column, the first badge takes the status column, and
-     * the title/subtitle fill the centre — so app-defined events line up with HTTP and FCM
-     * instead of looking bolted on.
+     * Row for every structured / app-defined kind: the kind takes the method column, the first
+     * badge takes the status column, and title · subtitle fill the centre — so a database query
+     * or a worker lines up with HTTP instead of looking bolted on.
      */
-    private fun genericRow(value: LogEvent.Generic, index: Int, isSelected: Boolean): Component {
+    private fun structuredRow(value: LogEvent, index: Int, isSelected: Boolean): Component {
         genRow.selected = isSelected
         genRow.hovered = index == hoveredIndex && !isSelected
         genRow.rowHeight = 34
 
-        // The kind column is narrow, and app-defined kinds are often dotted and long
-        // ("acme.telemetry"), so abbreviating them there produces junk like "ACME.T". Show the
-        // family instead — matching the APP filter chip — and let the centre carry the real
-        // kind, which is already the title when the payload isn't self-describing.
-        genLabel.text = if (value.kind == Envelope.KIND_EVENT) "EVENT" else "APP"
+        val presentation = KindPresenter.present(value)
 
-        val badges = value.event?.badges.orEmpty()
+        // The kind column is narrow and app-defined kinds are often long and dotted
+        // ("acme.telemetry"), so abbreviating them there produces junk like "ACME.T". Show a
+        // short, fixed label and let the centre carry the specifics.
+        genLabel.text = KindPresenter.kindLabel(value)
+
+        val badges = presentation?.badges.orEmpty()
         val badge = badges.firstOrNull()
         if (badge != null) {
             val color = when (badge.tone) {
@@ -238,8 +242,8 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
             genTag.set("", Theme.text, null)
         }
 
-        val title = value.event?.title ?: value.kind
-        val subtitle = value.event?.subtitle?.takeIf { it.isNotBlank() }
+        val title = presentation?.title ?: value.kind
+        val subtitle = presentation?.subtitle?.takeIf { it.isNotBlank() }
         genText.text = if (subtitle != null) "$title  ·  $subtitle" else title
         genText.foreground = Theme.text
 
@@ -253,16 +257,25 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         genCount.foreground = Theme.textDim
 
         genTime.text = when {
-            value.durationMillis != null -> "${value.durationMillis}ms"
-            // Deliberately no spinner here, unlike HTTP. A foreign producer that never sets
-            // endedAt is far more likely than a genuinely long-running span, and a row that
-            // spins forever reads as a hang. If the close does arrive, the row updates in
-            // place and the duration replaces the timestamp.
+            // A worker that's still running is genuinely open and the state badge already says
+            // so, so a spinner would be redundant here too.
+            value.durationMillis != null -> formatDuration(value.durationMillis!!)
+            // Deliberately no spinner, unlike HTTP. A foreign producer that never sets endedAt
+            // is far more likely than a genuinely long-running span, and a row that spins
+            // forever reads as a hang. If the close does arrive, the row updates in place and
+            // the duration replaces the timestamp.
             value.timestampMillis > 0 -> timeFmt.format(Date(value.timestampMillis))
             else -> ""
         }
         genTime.foreground = Theme.textDim
         return genRow
+    }
+
+    /** Workers run for minutes; "94210ms" in a 56px column is unreadable. */
+    private fun formatDuration(millis: Long): String = when {
+        millis < 1_000 -> "${millis}ms"
+        millis < 60_000 -> String.format("%.1fs", millis / 1000.0)
+        else -> "${millis / 60_000}m ${(millis % 60_000) / 1000}s"
     }
 
     private fun httpRow(value: Transaction, index: Int, isSelected: Boolean): Component {

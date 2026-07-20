@@ -1,9 +1,12 @@
 package io.github.siddharthjaswal.logpose.mcp
 
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.SqlSummary
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.model.WorkerEvent
+import io.github.siddharthjaswal.logpose.ui.KindPresenter
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -104,6 +107,41 @@ object McpTools {
         )
         add(
             tool(
+                "find_slow_queries",
+                "Database queries that took longest, slowest first, with the SQL and the table. " +
+                    "Use it to answer 'what is making this screen slow?'. Only queries the app " +
+                    "measured have a duration; unmeasured ones are excluded rather than " +
+                    "reported as instant.",
+            ) {
+                put("min_ms", intProp("Only queries at or above this duration (default 0)."))
+                put("table", stringProp("Restrict to one table."))
+                put("limit", intProp("Max queries to return (default 20)."))
+            },
+        )
+        add(
+            tool(
+                "worker_history",
+                "Background work requests and how they ended, with attempt counts — the answer " +
+                    "to 'did SyncWorker run, and did it retry?'. Each request appears once, in " +
+                    "its latest known state.",
+            ) {
+                put("worker", stringProp("Filter by worker name, e.g. 'SyncWorker'."))
+                put("state", stringProp("Filter by state: enqueued, running, succeeded, failed, cancelled."))
+                put("limit", intProp("Max requests to return (default 20)."))
+            },
+        )
+        add(
+            tool(
+                "config_changes",
+                "Remote-config flag changes during this session, newest last, with old and new " +
+                    "values — the answer to 'what flag changed before this broke?'.",
+            ) {
+                put("key", stringProp("Filter to one flag key (substring match)."))
+                put("limit", intProp("Max changes to return (default 50)."))
+            },
+        )
+        add(
+            tool(
                 "list_mocks",
                 "The mock rules currently defined, with how many times each has been served and " +
                     "whether the device has them.",
@@ -185,6 +223,9 @@ object McpTools {
         "get_trace" -> getTrace(args, events)
         "find_failures" -> findFailures(args, events)
         "session_summary" -> summary(events)
+        "find_slow_queries" -> slowQueries(args, events)
+        "worker_history" -> workerHistory(args, events)
+        "config_changes" -> configChanges(args, events)
         "list_mocks" -> mocks.orError { listMocks(it) }
         "create_mock" -> mocks.orError { createMock(args, events, it) }
         "set_mock_enabled" -> mocks.orError { setMockEnabled(args, it) }
@@ -308,6 +349,133 @@ object McpTools {
             }
             put("traces", buildJsonArray {
                 events.mapNotNull { it.traceId }.distinct().take(25).forEach { add(it) }
+            })
+        }
+    }
+
+    // ---- app-runtime kinds ------------------------------------------------------------------
+
+    private fun slowQueries(args: JsonObject, events: List<LogEvent>): JsonElement {
+        val minMs = args.int("min_ms") ?: 0
+        val table = args.str("table")
+        val limit = args.int("limit") ?: 20
+
+        val queries = events.filterIsInstance<LogEvent.Db>()
+        // A query with no duration wasn't measured (Room's callback gives no timing). Reporting
+        // it as 0ms would put unmeasured queries at the *fast* end of a slowness ranking, which
+        // is exactly backwards, so they're excluded and counted separately instead.
+        val measured = queries.filter { it.durationMillis != null }
+        val matched = measured.filter { event ->
+            val summary = SqlSummary.of(event.query.sql)
+            val eventTable = event.query.table ?: summary.table
+            if (table != null && !eventTable.equals(table, ignoreCase = true)) return@filter false
+            (event.durationMillis ?: 0) >= minMs
+        }
+
+        return buildJsonObject {
+            put("total_queries", queries.size)
+            put("measured", measured.size)
+            if (measured.size < queries.size) {
+                put(
+                    "note",
+                    "${queries.size - measured.size} queries carried no duration and are " +
+                        "excluded — the app didn't measure them (Room's query callback has no timing).",
+                )
+            }
+            put("queries", buildJsonArray {
+                matched.sortedByDescending { it.durationMillis ?: 0 }.take(limit).forEach { event ->
+                    val summary = SqlSummary.of(event.query.sql)
+                    add(buildJsonObject {
+                        put("id", event.id)
+                        put("duration_ms", event.durationMillis ?: 0)
+                        put("operation", event.query.operation ?: summary.operation)
+                        (event.query.table ?: summary.table)?.let { put("table", it) }
+                        event.query.database?.let { put("database", it) }
+                        put("sql", event.query.sql)
+                        event.query.rows?.let { put("rows", it) }
+                    })
+                }
+            })
+        }
+    }
+
+    private fun workerHistory(args: JsonObject, events: List<LogEvent>): JsonElement {
+        val worker = args.str("worker")
+        val state = args.str("state")?.lowercase()
+        val limit = args.int("limit") ?: 20
+
+        // Each request already occupies one row (the device reuses workId as the envelope id),
+        // so the store has already collapsed the state transitions for us.
+        val matched = events.filterIsInstance<LogEvent.Worker>().filter { event ->
+            if (worker != null && !event.work.worker.contains(worker, ignoreCase = true)) return@filter false
+            if (state != null && event.work.state != state) return@filter false
+            true
+        }
+
+        return buildJsonObject {
+            put("count", matched.size)
+            put("retried", matched.count { it.work.runAttempt > 1 })
+            put("failed", matched.count { it.work.state == WorkerEvent.STATE_FAILED })
+            put("workers", buildJsonArray {
+                matched.takeLast(limit).forEach { event ->
+                    add(buildJsonObject {
+                        put("id", event.id)
+                        put("worker", event.work.worker)
+                        put("state", event.work.state)
+                        put("attempt", event.work.runAttempt)
+                        event.work.uniqueName?.let { put("unique_name", it) }
+                        event.durationMillis?.let {
+                            put("duration_ms", it)
+                            put("duration_note", "includes queue time; WorkInfo reports state, not execution")
+                        }
+                        event.work.error?.let { put("error", it) }
+                        if (event.work.outputData.isNotEmpty()) {
+                            put("output", buildJsonObject {
+                                event.work.outputData.forEach { (k, v) -> put(k, v) }
+                            })
+                        }
+                    })
+                }
+            })
+        }
+    }
+
+    private fun configChanges(args: JsonObject, events: List<LogEvent>): JsonElement {
+        val key = args.str("key")
+        val limit = args.int("limit") ?: 50
+
+        val updates = events.filterIsInstance<LogEvent.Config>()
+        // Flatten to individual changes: an agent asking "what changed" wants flags, not
+        // activations, and one activation can carry many.
+        val changes = updates.flatMap { event ->
+            event.update.changes
+                .filter { key == null || it.key.contains(key, ignoreCase = true) }
+                .map { event to it }
+        }
+
+        return buildJsonObject {
+            put("activations", updates.size)
+            put("count", changes.size)
+            if (updates.any { it.update.baseline }) {
+                put(
+                    "note",
+                    "A baseline snapshot was recorded at process start; flags already set then " +
+                        "aren't reported as changes.",
+                )
+            }
+            put("changes", buildJsonArray {
+                changes.takeLast(limit).forEach { (event, change) ->
+                    add(buildJsonObject {
+                        put("at", event.timestampMillis)
+                        put("key", change.key)
+                        put("value", change.value)
+                        change.previous?.let { put("previous", it) }
+                        // A producer may signal "new" either way; no previous value means the
+                        // key didn't exist, whether or not it bothered to set the flag.
+                        if (change.isNew || change.previous == null) put("new_key", true)
+                        event.update.source?.let { put("source", it) }
+                    })
+                }
             })
         }
     }
@@ -454,21 +622,30 @@ object McpTools {
                 ?: if (m.event == "token") "token refresh" else "data message"
             "FCM $what"
         }
-        is LogEvent.Generic -> listOfNotNull(
-            event.event?.title ?: event.kind,
-            event.event?.subtitle,
-        ).joinToString(" · ")
+        // db / worker / config / app-defined: the presenter already reduces each to the words
+        // that describe it, and reusing it keeps an agent's view identical to the developer's.
+        else -> KindPresenter.present(event)
+            ?.let { listOfNotNull(it.title, it.subtitle).joinToString(" · ") }
+            ?: event.kind
     }
 
     private fun LogEvent.isFailure(): Boolean = when (this) {
         is LogEvent.Http -> tx.error != null || (tx.response?.code ?: 0) >= 400
+        is LogEvent.Db -> query.error != null
+        is LogEvent.Worker -> work.state == WorkerEvent.STATE_FAILED
+        is LogEvent.Fcm, is LogEvent.Config -> false
         is LogEvent.Generic -> event?.badges?.any { it.tone == "error" } == true
-        is LogEvent.Fcm -> false
     }
 
     private fun LogEvent.haystack(): String = when (this) {
         is LogEvent.Http -> tx.request.url
         is LogEvent.Fcm -> listOfNotNull(msg.notification?.title, msg.notification?.body, msg.from).joinToString(" ")
+        // Searching the SQL itself matters here — "contains: orders" should find the query that
+        // touches that table even when the row shows only the table name.
+        is LogEvent.Db -> listOfNotNull(query.sql, query.database, query.table).joinToString(" ")
+        is LogEvent.Worker -> listOfNotNull(work.worker, work.uniqueName, work.state).joinToString(" ") +
+            " " + work.tags.joinToString(" ")
+        is LogEvent.Config -> update.changes.joinToString(" ") { it.key }
         is LogEvent.Generic -> listOfNotNull(event?.title, event?.subtitle, kind).joinToString(" ")
     }
 

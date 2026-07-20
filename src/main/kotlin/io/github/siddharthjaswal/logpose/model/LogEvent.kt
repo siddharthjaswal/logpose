@@ -3,11 +3,13 @@ package io.github.siddharthjaswal.logpose.model
 /**
  * A single row in the LogPose timeline.
  *
- * Events arrive wrapped in an [Envelope]; this is the decoded form the UI works with. Two
+ * Events arrive wrapped in an [Envelope]; this is the decoded form the UI works with. Some
  * kinds get first-class treatment because the plugin can do more with them than render —
- * [Http] (cURL, duplicate detection, mocking) and [Fcm] (push-specific detail). Everything
- * else lands as [Generic] and renders from the presentation the device supplied, which is
- * what lets an app put its own subsystems on the timeline without a plugin release.
+ * [Http] (cURL, duplicate detection, mocking), [Fcm] (push detail), and the app-runtime trio
+ * [Db] / [Worker] / [Config] (parsed SQL, worker spans, flag diffs, and MCP tools built on
+ * them). Everything else lands as [Generic] and renders from the presentation the device
+ * supplied, which is what lets an app put its own subsystems on the timeline without a plugin
+ * release.
  *
  * Downstream code should prefer switching on [envelope]`.kind` or handling [Generic] as the
  * fallback rather than assuming the set is closed — that assumption is exactly what this type
@@ -40,6 +42,12 @@ sealed interface LogEvent {
     data class Http(val tx: Transaction, override val envelope: Envelope) : LogEvent
 
     data class Fcm(val msg: FcmMessage, override val envelope: Envelope) : LogEvent
+
+    data class Db(val query: DbQuery, override val envelope: Envelope) : LogEvent
+
+    data class Worker(val work: WorkerEvent, override val envelope: Envelope) : LogEvent
+
+    data class Config(val update: ConfigUpdate, override val envelope: Envelope) : LogEvent
 
     /**
      * An event of a kind this plugin has no special support for. [event] is present when the

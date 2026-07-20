@@ -23,14 +23,18 @@ import javax.swing.JComponent
 import javax.swing.JPanel
 
 /**
- * Detail pane for an event of a kind this plugin has no special support for — the framework
- * case. Everything shown here comes from what the device sent: a title, a subtitle, semantic
- * badges, and typed sections.
+ * Detail pane for every kind without a bespoke view — database queries, background work,
+ * config changes, and app-defined events.
  *
- * The sibling of [TransactionDetailView] (HTTP) and [FcmDetailView] (push) for every other
- * kind. Sections render as read-only blocks rather than full editors: a single event can carry
- * many of them, and spinning up an IntelliJ editor per section on every selection change would
- * be wasteful. The complete payload is still available as a tree/raw [JsonTreePanel] below.
+ * All of them arrive here as a title, subtitle, semantic badges and typed sections: either
+ * supplied by the device (a self-describing app event) or derived by [KindPresenter] from a
+ * structured payload. One view serves all of them because their differences are presentational,
+ * and that is exactly what the presenter already expresses.
+ *
+ * The sibling of [TransactionDetailView] (HTTP) and [FcmDetailView] (push). Sections render as
+ * read-only blocks rather than full editors: a single event can carry many, and spinning up an
+ * IntelliJ editor per section on every selection change would be wasteful. The complete payload
+ * is still available as a tree/raw [JsonTreePanel] below.
  */
 class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
 
@@ -93,7 +97,7 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         add(outer, BorderLayout.CENTER)
     }
 
-    fun show(event: LogEvent.Generic?) {
+    fun show(event: LogEvent?) {
         if (event == null) {
             kindPill.set("—", Theme.textDim, Theme.bg2)
             titleLabel.text = ""
@@ -104,15 +108,15 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
             return
         }
 
-        val kind = event.kind.uppercase()
-        kindPill.set(kind, Theme.accent, Theme.tint(Theme.accent, 30))
+        val presentation = KindPresenter.present(event)
+        kindPill.set(KindPresenter.kindLabel(event), Theme.accent, Theme.tint(Theme.accent, 30))
         // A payload that isn't self-describing still gets a row and a readable payload tree —
         // it just has nothing but its kind to show up top.
-        titleLabel.text = event.event?.title ?: event.kind
-        subtitle.text = event.event?.subtitle.orEmpty()
+        titleLabel.text = presentation?.title ?: event.kind
+        subtitle.text = presentation?.subtitle.orEmpty()
 
         badges.removeAll()
-        event.event?.badges?.forEachIndexed { i, badge ->
+        presentation?.badges?.forEachIndexed { i, badge ->
             if (i > 0) badges.add(Box.createHorizontalStrut(JBUI.scale(6)))
             badges.add(badgeLabel(badge))
         }
@@ -132,7 +136,7 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         }
 
         sections.removeAll()
-        event.event?.sections?.forEach { section ->
+        presentation?.sections?.forEach { section ->
             sections.add(sectionBlock(section))
             sections.add(vGap(8))
         }

@@ -36,8 +36,80 @@ data class Envelope(
         const val KIND_HTTP = "http"
         const val KIND_FCM = "fcm"
         const val KIND_EVENT = "event"
+        const val KIND_DB = "db"
+        const val KIND_WORKER = "worker"
+        const val KIND_CONFIG = "config"
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// First-class app-runtime kinds. Unlike [GenericEvent] these carry **structure** rather than
+// presentation — the plugin derives title/badges/sections (see `ui/KindPresenter.kt`), which
+// keeps theme decisions out of the wire and lets the IDE filter and analyse them. Kept
+// structurally in sync with the library's wire/Wire.kt.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * One database access. [operation] and [table] are normally absent — they're derived from [sql]
+ * by `analysis/SqlSummary.kt`, so that parsing lives on one side of the wire only. They arrive
+ * populated only for stores that aren't SQL.
+ */
+@Serializable
+data class DbQuery(
+    val sql: String,
+    val args: List<String> = emptyList(),
+    val database: String? = null,
+    val rows: Int? = null,
+    val error: String? = null,
+    val operation: String? = null,
+    val table: String? = null,
+)
+
+/**
+ * A background work request at one point in its life. Emitted under the request's `workId`, so
+ * enqueued → running → succeeded update **one** row rather than adding three.
+ */
+@Serializable
+data class WorkerEvent(
+    val worker: String,
+    val state: String,
+    val workId: String? = null,
+    val uniqueName: String? = null,
+    val runAttempt: Int = 0,
+    val tags: List<String> = emptyList(),
+    val inputData: Map<String, String> = emptyMap(),
+    val outputData: Map<String, String> = emptyMap(),
+    val error: String? = null,
+) {
+    companion object {
+        const val STATE_ENQUEUED = "enqueued"
+        const val STATE_RUNNING = "running"
+        const val STATE_SUCCEEDED = "succeeded"
+        const val STATE_FAILED = "failed"
+        const val STATE_CANCELLED = "cancelled"
+        const val STATE_BLOCKED = "blocked"
+        val TERMINAL = setOf(STATE_SUCCEEDED, STATE_FAILED, STATE_CANCELLED)
+    }
+}
+
+/** A config activation, as one event listing what changed rather than one event per key. */
+@Serializable
+data class ConfigUpdate(
+    val source: String? = null,
+    val fetchStatus: String? = null,
+    /** First snapshot of a process: a count, not every key reported as new. */
+    val baseline: Boolean = false,
+    val totalKeys: Int = 0,
+    val changes: List<ConfigChange> = emptyList(),
+)
+
+@Serializable
+data class ConfigChange(
+    val key: String,
+    val value: String,
+    val previous: String? = null,
+    val isNew: Boolean = false,
+)
 
 /**
  * The payload of the built-in `"event"` kind: an event that describes its own presentation,

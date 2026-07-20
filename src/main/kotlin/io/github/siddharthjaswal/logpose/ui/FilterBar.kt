@@ -25,12 +25,12 @@ import javax.swing.event.DocumentEvent
 /**
  * Filterable event families in the unified stream.
  *
- * [APP] deliberately covers *every* app-defined kind rather than getting a chip per kind: the
- * set of kinds is open (that's the point of the framework), and rebuilding the segmented
- * control every time a new kind appears would make the bar jump around mid-capture. Narrowing
- * to one specific kind is what the search box is for.
+ * The kinds LogPose understands get their own chip; [APP] covers *every* app-defined kind
+ * rather than getting one each, because that set is open (the point of the framework) and
+ * rebuilding the segmented control whenever a new kind appears would make the bar jump around
+ * mid-capture. Narrowing to one specific app kind is what the search box is for.
  */
-enum class EventType { NET, FCM, APP }
+enum class EventType { NET, FCM, DB, WORK, CONF, APP }
 
 /** Structured filter state — replaces the free-text grammar with one-click toggles. */
 data class FilterState(
@@ -49,12 +49,16 @@ data class FilterState(
     fun matches(event: LogEvent): Boolean = when (event) {
         is LogEvent.Http -> types.allowsHttp() && matchesHttp(event)
         is LogEvent.Fcm -> types.allowsFcm() && matchesFcm(event)
-        is LogEvent.Generic -> types.allowsApp() && matchesGeneric(event)
+        is LogEvent.Db -> types.allows(EventType.DB) && matchesStructured(event)
+        is LogEvent.Worker -> types.allows(EventType.WORK) && matchesStructured(event)
+        is LogEvent.Config -> types.allows(EventType.CONF) && matchesStructured(event)
+        is LogEvent.Generic -> types.allowsApp() && matchesStructured(event)
     }
 
     private fun Set<EventType>.allowsHttp() = isEmpty() || EventType.NET in this
     private fun Set<EventType>.allowsFcm() = isEmpty() || EventType.FCM in this
-    private fun Set<EventType>.allowsApp() = isEmpty() || EventType.APP in this
+    private fun Set<EventType>.allowsApp() = allows(EventType.APP)
+    private fun Set<EventType>.allows(type: EventType) = isEmpty() || type in this
 
     private fun matchesHttp(event: LogEvent.Http): Boolean {
         val tx = event.tx
@@ -82,15 +86,20 @@ data class FilterState(
         return true
     }
 
-    private fun matchesGeneric(event: LogEvent.Generic): Boolean {
+    /**
+     * Search over whatever the row actually shows, for every non-HTTP/FCM kind. Going through
+     * [KindPresenter] means a query matches the SQL table, the worker name or the changed flag
+     * keys — the same words on screen — rather than raw payload JSON.
+     */
+    private fun matchesStructured(event: LogEvent): Boolean {
         // HTTP-only chips (method / status) narrow to HTTP, so an active selection hides these.
         if (methods.isNotEmpty() || statusClasses.isNotEmpty()) return false
         if (urlQuery.isNotBlank()) {
-            // Kind, trace and id are searchable too — that's how you isolate one subsystem or
-            // one flow when the chips only go as far as "APP".
+            val presentation = KindPresenter.present(event)
             val haystack = listOfNotNull(
-                event.event?.title, event.event?.subtitle, event.kind, event.traceId, event.id,
-            ) + event.event?.badges?.map { it.text }.orEmpty()
+                presentation?.title, presentation?.subtitle, event.kind, event.traceId, event.id,
+            ) + presentation?.badges?.map { it.text }.orEmpty() +
+                presentation?.sections?.map { it.label }.orEmpty()
             if (haystack.none { it.contains(urlQuery, ignoreCase = true) }) return false
         }
         return true
@@ -123,6 +132,9 @@ class FilterBar : JPanel() {
     private val typeChips = linkedMapOf(
         EventType.NET to chip("NET", Theme.accent, flat = true),
         EventType.FCM to chip("FCM", Theme.methodColor("PATCH"), flat = true),
+        EventType.DB to chip("DB", Theme.methodColor("PUT"), flat = true),
+        EventType.WORK to chip("WORK", Theme.methodColor("POST"), flat = true),
+        EventType.CONF to chip("CONF", Theme.warn, flat = true),
         EventType.APP to chip("APP", Theme.accent, flat = true),
     )
     private val count = JBLabel().apply { foreground = Theme.textMuted }
