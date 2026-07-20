@@ -30,9 +30,9 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v0.9.10")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.3.0")
     // Release builds: a zero-overhead no-op with the same API (no logcat, no extra deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v0.9.10")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.3.0")
 }
 ```
 
@@ -93,6 +93,39 @@ class MyMessagingService : FirebaseMessagingService() {
 }
 ```
 
+## Your own events (optional)
+
+HTTP and FCM are just two *kinds* on the timeline. Any subsystem can put a row there, and the
+plugin needs no knowledge of it — the event carries its own presentation:
+
+```kotlin
+LogPose.event("UserDao.insert", LogPoseConfig(enabled = BuildConfig.DEBUG)) {
+    subtitle = "users (3 rows)"
+    badge("DB", Tone.INFO)          // tones are semantic: INFO / WARN / ERROR / MUTED
+    took(14)                        // renders as a span; omit for a point in time
+    code("SQL", "INSERT INTO users (id, name) VALUES (?, ?)")
+    kv("Params", mapOf("id" to "7"))
+}
+```
+
+Sections are `text`, `code`, `json` or `kv`. Group related events into one flow with a trace:
+
+```kotlin
+val trace = LogPose.newTraceId()
+LogPose.event("Push received") { traceId = trace }
+LogPose.event("Feed refresh")  { traceId = trace }
+```
+
+`LogPose.log(kind = "acme.telemetry", payloadJson = "…")` is the raw escape hatch for a payload
+something else already understands; unrecognised kinds still get a row in the plugin.
+
+Every entry point takes only strings and maps — no serialization types — so the release
+`logpose-no-op` artifact mirrors this API exactly and your call sites compile unchanged. The
+builder lambda still *runs* in release (it's ordinary Kotlin), so keep expensive work out of it
+or guard it with `BuildConfig.DEBUG`.
+
+Requires plugin 1.5.0+ to render.
+
 ## Configuration
 
 ```kotlin
@@ -119,8 +152,8 @@ This lives **only in the real `logpose-android` artifact** — the release `no-o
 no receiver, provider, or `MockRegistry`. Set `mocksEnabled = false` to opt this build out
 entirely.
 
-Want a different transport (e.g. a socket via `adb reverse`)? Implement
-`TransactionEmitter` and pass it to the interceptor:
+Want a different transport (e.g. a socket via `adb reverse`)? Implement `EventEmitter` — one
+method, taking the `Envelope` every timeline event travels in — and pass it to the interceptor:
 
 ```kotlin
 LogPoseInterceptor(config, emitter = MySocketEmitter())

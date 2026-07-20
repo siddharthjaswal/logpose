@@ -6,6 +6,44 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-07-20
+
+The release where LogPose stops being an HTTP tool. Two changes: the timeline is now open to
+any kind of event, and the capture is readable by a coding agent.
+
+Needs `logpose-android` ≥ 1.3.0 for the new capabilities; the plugin still reads the older
+un-enveloped format, so existing apps keep working while you upgrade.
+
+### Added
+- **MCP server over the live capture.** An agent in your editor can read what the running app
+  actually did — `list_events`, `get_event`, `get_trace`, `find_failures`, `session_summary` —
+  and close the loop with `create_mock`, `set_mock_enabled`, `delete_mock`. Click **⚡ Connect
+  Coding Agent** in the tool window to copy the `claude mcp add …` command. Served on the IDE's
+  built-in web server (localhost); every call is authenticated with a per-project token that
+  also selects which project's capture to serve. `create_mock` prefers `from_event_id`, copying
+  a real captured response so only the difference has to be stated.
+- **Log your own events.** `LogPose.event("UserDao.insert") { badge("DB"); took(14); code(…) }`
+  puts any subsystem — database, jobs, analytics, feature flags, navigation — on the same
+  timeline. Events carry their own presentation (title, subtitle, semantic badges, typed
+  sections), so they render with no plugin release. `LogPose.log(kind, payloadJson)` is the raw
+  escape hatch.
+- `scripts/emit-demo-events.sh` emits synthetic events to a device, to exercise rendering
+  without an instrumented app.
+
+### Changed
+- **Wire format: every timeline event now travels in an envelope** (`kind`, `id`, `at`,
+  `endedAt`, `traceId`, `parentId`, opaque `payload`). Timing follows a span convention —
+  `endedAt` null means open, `== at` means a point in time, `> at` means a completed span.
+  `traceId`/`parentId` are carried but always set explicitly; there's no implicit propagation.
+- An event whose `kind` the plugin doesn't recognise now gets a row rendered from its payload
+  instead of being force-decoded as a transaction and silently dropped.
+- The TYPE filter gains an **APP** chip covering all app-defined kinds; search now also matches
+  event titles, subtitles, kinds and trace ids.
+- `TransactionStore` → `EventStore`, and `LogEvent` is now an interface (`Http` / `Fcm` /
+  `Generic`) exposing id, kind, timing and trace without knowing the kind.
+- `buildSearchableOptions` is disabled — LogPose has no Settings page, so it indexed nothing
+  while launching a second headless IDE on every build.
+
 ## [1.4.8] - 2026-07-20
 
 ### Fixed

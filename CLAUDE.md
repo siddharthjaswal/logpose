@@ -4,9 +4,15 @@ Guidance for Claude Code (and any agent) working in the **LogPose** repository.
 
 ## What this is
 
-LogPose is an open-source network inspector for Android. It reads an app's HTTP traffic out
+LogPose is an open-source runtime inspector for Android. It reads an app's HTTP traffic out
 of **logcat** as clean, structured, per-request transactions — fixing the interleaved lines,
 mismatched bodies, and 4 KB truncation you get from ad-hoc network logging.
+
+Since 1.5.0 it's a **framework**, not just an HTTP tool: every timeline event travels in an
+`Envelope` with an opaque payload, so an app can log its own kinds (`LogPose.event { }`) and
+they render without a plugin release. The same capture is exposed over **MCP**, so a coding
+agent can read what the running app actually did — and create mocks to change what it receives
+next.
 
 It has **two halves that ship through two different channels** — keep them straight:
 
@@ -26,7 +32,7 @@ goes through the JitPack library. They version independently.
 ./gradlew runIde         # launch a sandbox IDE with the plugin loaded
 ./gradlew buildPlugin    # → build/distributions/logpose-<version>.zip (Marketplace upload)
 ./gradlew test           # unit tests (e.g. DuplicateDetectorTest)
-./gradlew verifyPlugin   # JetBrains Plugin Verifier against pinned IDEs (2024.1, 2024.3)
+./gradlew verifyPlugin   # JetBrains Plugin Verifier against pinned IDEs (2024.1 → 2025.2)
 ```
 - Version is set in `build.gradle.kts` (`version = "..."`).
 - `untilBuild` is intentionally open (`provider { null }`) so the plugin loads on newer IDEs.
@@ -62,30 +68,40 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
   `LogPoseToolWindowFactory`.
 - `ui/` — `Ui.kt` (`Theme` tokens as `JBColor` light/dark pairs, `TagLabel`, helpers),
   `OverviewPanel`, `TransactionDetailView` (HTTP), `FcmDetailView` (FCM),
-  `JsonTreePanel` (Tree + Raw JSON editor), `FilterBar` (incl. the `NET`/`FCM` TYPE toggle),
-  `CurlBuilder`, `MutedEndpoints`.
+  `GenericDetailView` (every app-defined kind), `JsonTreePanel` (Tree + Raw JSON editor),
+  `FilterBar` (incl. the `NET`/`FCM`/`APP` TYPE toggle), `CurlBuilder`, `MutedEndpoints`.
 - `logcat/` — `LogcatReader` (tails `adb logcat`, all adb work **off the EDT**),
   `TransactionParser` (reassembles chunked JSON; returns a `LogEvent`, and routes reverse-channel
   `ControlMessage`s — hello / mock-ack — to `onControl`), `Adb` (shared adb resolve + cmd prefix).
 - `mock/` — `MocksController`: owns the rule set, persists it per project, and pushes rules to
   the device via `adb shell am broadcast` (**off the EDT**); consumes hello/ack control messages
   to track sync + hit counts. Clears device rules on Stop Capture.
-- `store/` — `TransactionStore` (capped, insertion-ordered, id-keyed; holds `LogEvent`s).
+- `mcp/` — the MCP server exposing the live capture to coding agents. `McpTools` (query +
+  mock-write logic; **free of HTTP and IntelliJ types, so it's unit-tested**), `McpSessions`
+  (per-project token → capture; the token both authenticates and selects the project),
+  `LogPoseMcpHandler` (hand-rolled JSON-RPC on the platform's `httpRequestHandler` EP —
+  **note that EP resolves under `com.intellij`, not `org.jetbrains`, or it silently never
+  loads**). Runs on a Netty IO thread: **never touch Swing there**.
+- `store/` — `EventStore` (capped, arrival-ordered, id-keyed; holds `LogEvent`s of every kind).
 - `analysis/` — `DuplicateDetector` (flags repeated requests; HTTP-only, pure + unit-tested).
-- `model/Transaction.kt` — the wire contract shared (by structure) with the library; carries
-  `FcmMessage` (FCM events) and the mock/reverse-channel types (`MockRule`, `MockRuleSet`,
-  `Hello`, `MockAck`; `Transaction.mocked`). `model/LogEvent.kt` is the sealed `Http`/`Fcm`
-  union the whole UI switches on for the **unified** timeline.
+- `model/Transaction.kt` — the wire contract shared (by structure) with the library: the
+  `Envelope` every timeline event travels in, `GenericEvent`/`Badge`/`Section` (self-describing
+  app events), `Transaction`, `FcmMessage`, and the mock/reverse-channel types (`MockRule`,
+  `MockRuleSet`, `Hello`, `MockAck`; `Transaction.mocked`). `model/LogEvent.kt` is the decoded
+  form the UI works with — `Http`/`Fcm`/`Generic` over an envelope, exposing id, kind, timing
+  and trace without knowing the kind.
 - `src/main/resources/META-INF/plugin.xml` — plugin descriptor + `<change-notes>`.
 
 ### Library (`logpose-android/src/main/kotlin/io/github/siddharthjaswal/logpose/`)
 - `LogPoseConfig`, `LogPoseInterceptor` — the HTTP public API.
-- `LogPoseFcm.kt` — the FCM public API: the `LogPose` object
-  (`logFcmMessage` / `logFcmToken`) plus the Firebase-free `FcmMessageInfo` holder the app
-  fills from a `RemoteMessage`. LogPose references no Firebase types, so the no-op stays
-  pure-JVM. Both are mirrored in `no-op/`.
-- `emit/` — `TransactionEmitter` + `LogcatEmitter` (chunked logcat output; `emit(Transaction)`,
-  `emit(FcmMessage)`, `emit(Hello)`, `emit(MockAck)` share one chunker).
+- `LogPose.kt` — the `LogPose` object: `event { }` / `log(kind, payloadJson)` (app events) and
+  `logFcmMessage` / `logFcmToken` (push). **Its public surface takes only strings and maps** —
+  the no-op has no kotlinx-serialization dependency and must mirror it exactly.
+- `LogPoseEvent.kt` — `EventBuilder` (badges, typed sections, `took`/`open` spans) + `Tone`.
+- `LogPoseFcm.kt` — the Firebase-free `FcmMessageInfo` holder the app fills from a
+  `RemoteMessage`. LogPose references no Firebase types, so the no-op stays pure-JVM.
+- `emit/` — `EventEmitter` (sink over `Envelope`, with `emit(Transaction)`/`emit(FcmMessage)`
+  wrapping extensions) + `LogcatEmitter` (chunked logcat output; control messages go out bare).
 - `mock/` — the device end of mock/replay: `MockRegistry` (process-wide active rules, pure +
   unit-tested), `MockCommandReceiver` (DUMP-gated broadcast receiver that ingests chunked
   rule pushes and acks), `LogPoseInitProvider`/`LogPoseRuntime` (zero-config auto-init that
@@ -93,9 +109,9 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
   — real artifact only; the no-op ships none of it. `LogPoseInterceptor` consults
   `MockRegistry` before `chain.proceed()` and serves matches with `mocked = true`.
 - `internal/BodyCapture` — body/header capture, gzip, multipart metadata, redaction.
-- `wire/Wire.kt` — the serialized transaction + `FcmMessage` + mock/reverse-channel model
-  (`MockRule`/`MockRuleSet`/`Hello`/`MockAck`; must stay in sync with the plugin's
-  `model/Transaction.kt`).
+- `wire/Wire.kt` — the `Envelope` + `GenericEvent`/`Badge`/`Section` + transaction +
+  `FcmMessage` + mock/reverse-channel model (`MockRule`/`MockRuleSet`/`Hello`/`MockAck`; must
+  stay in sync with the plugin's `model/Transaction.kt`).
 - `no-op/` — the release stub; mirrors `LogPoseConfig`/`LogPoseInterceptor` exactly so call
   sites compile unchanged when swapping `debugImplementation` → `releaseImplementation`.
 

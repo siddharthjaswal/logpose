@@ -42,6 +42,14 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
 
 ## Features
 
+- **Your coding agent can read the running app** — LogPose exposes the live capture over
+  **MCP**, so Claude Code (or any MCP client) can answer "what did the app actually request,
+  and why did it fail?" from real traffic instead of a pasted log line — and can create a mock
+  to reproduce or unblock a state. See [Connect a coding agent](#connect-a-coding-agent).
+- **Log anything, not just HTTP** — `LogPose.event("UserDao.insert") { … }` puts *your*
+  subsystems on the same timeline: database queries, background jobs, analytics, feature
+  flags, navigation. Events carry their own presentation, so they render with no plugin
+  changes. See [Log your own events](#log-your-own-events).
 - **Mock & replay** — right-click any captured request → **Mock this endpoint** and serve a
   response instead of hitting the network. **Replace** the whole body, or **merge** your JSON
   into the real response to override a single field and leave the rest backend-generated.
@@ -121,11 +129,28 @@ structured transaction per HTTP exchange** and rendering it in a real UI.
 
 ## The wire format
 
-The contract between the device and the plugin is a single JSON object per line:
+The contract between the device and the plugin is a single JSON object per line: an
+**envelope** carrying an opaque payload. The plugin only needs the envelope to place a row on
+the timeline, which is what lets an app emit a `kind` the plugin has never heard of.
 
 ```jsonc
 {
-  "id": "a1b2c3",                 // correlates request + response
+  "v": 1,
+  "kind": "http",                 // "http" | "fcm" | "event" | anything you define
+  "id": "a1b2c3",                 // correlates request + response; re-emit to update in place
+  "at": 1733500000000,            // span start (device epoch millis)
+  "endedAt": 1733500000142,       // null = still open · == at = point in time · > at = a span
+  "traceId": "f00d",              // optional, groups related events
+  "parentId": null,
+  "payload": { /* kind-specific, see below */ }
+}
+```
+
+An `http` payload — the same shape LogPose has always emitted, now nested under `payload`:
+
+```jsonc
+{
+  "id": "a1b2c3",
   "startedAtMillis": 1733500000000,
   "durationMillis": 142,
   "request": {
@@ -157,14 +182,33 @@ Multipart upload body example (no raw bytes):
 }
 ```
 
-Chunk envelope (for oversized payloads):
+An `event` payload — a self-describing app event, rendered without any plugin support:
+
+```jsonc
+{
+  "title": "UserDao.insert",
+  "subtitle": "users (3 rows)",
+  "badges":   [ { "text": "DB", "tone": "info" } ],       // tones, never colors
+  "sections": [ { "label": "SQL", "type": "code", "body": "INSERT INTO users …" } ]
+}
+```
+
+Chunk envelope (for oversized payloads — unchanged, and wraps any of the above):
 
 ```jsonc
 { "id": "a1b2c3", "seq": 0, "total": 3, "payload": "<json-fragment>" }
 ```
 
+Reverse-channel control messages (`hello`, `mock_ack`) are deliberately **not** enveloped:
+they're a separate IDE ↔ device protocol, not timeline rows.
+
+Bodies stay opaque to the transport, and presentation stays semantic — a badge carries a tone
+and a section carries a type, never a color or a layout, so a theme change can never become a
+wire break.
+
 See [`Transaction.kt`](src/main/kotlin/io/github/siddharthjaswal/logpose/model/Transaction.kt)
-for the canonical schema.
+for the canonical schema. Plugin 1.5.0 still reads the pre-1.3.0 un-enveloped format, so an old
+`logpose-android` keeps working while you upgrade.
 
 ## Filtering
 
@@ -213,10 +257,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.0.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.3.0")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.0.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.3.0")
 }
 ```
 
@@ -308,6 +352,81 @@ permission, which only the adb shell holds — third-party apps can't reach it).
 machinery ships **only in the real `logpose-android` artifact** (never the release no-op), and
 rules are cleared automatically when you stop capturing. Requires `logpose-android` ≥ 1.1.0.
 
+## Log your own events
+
+HTTP and FCM are just two *kinds* on the timeline. Any subsystem can put a row there, and the
+plugin needs no knowledge of it — the event describes its own presentation:
+
+```kotlin
+LogPose.event("UserDao.insert") {
+    subtitle = "users (3 rows)"
+    badge("DB", Tone.INFO)
+    took(14)
+    code("SQL", "INSERT INTO users (id, name) VALUES (?, ?)")
+    kv("Params", mapOf("id" to "7", "name" to "Vikram"))
+}
+```
+
+Sections are `text`, `code`, `json`, or `kv`; badge tones are semantic (`INFO` / `WARN` /
+`ERROR` / `MUTED`) and get mapped onto the active IDE theme. Pass `config` the same way as the
+interceptor so it no-ops in release:
+
+```kotlin
+LogPose.event("SyncWorker", LogPoseConfig(enabled = BuildConfig.DEBUG)) { … }
+```
+
+Group related events with a trace so a push, the calls it triggered, and the write that
+followed read as one flow:
+
+```kotlin
+val trace = LogPose.newTraceId()
+LogPose.event("Push received") { traceId = trace }
+LogPose.event("Feed refresh")  { traceId = trace }
+```
+
+For a payload something else already understands, there's a raw escape hatch —
+`LogPose.log(kind = "acme.telemetry", payloadJson = """{"metric":"frame_time_p99"}""")`. Any
+unrecognised kind still gets a row and an inspectable payload rather than being dropped.
+
+The public API takes only strings and maps, so the release `logpose-no-op` artifact mirrors it
+exactly and your call sites compile unchanged. Requires `logpose-android` ≥ 1.3.0.
+
+> Want to see it without wiring up an app? `./scripts/emit-demo-events.sh` writes a few
+> synthetic events straight to a connected device's logcat.
+
+## Connect a coding agent
+
+An agent working in your repo can read the code but has no idea what the *running* app is
+doing. LogPose fills that gap over MCP.
+
+In the LogPose tool window, click **⚡ Connect Coding Agent** — it copies a ready-to-run
+command:
+
+```bash
+claude mcp add --transport http logpose http://localhost:63342/api/logpose/mcp \
+  --header "X-LogPose-Token: <your project token>"
+```
+
+Then ask for things you'd otherwise dig for by hand:
+
+> *"Using logpose, what failed in the last minute?"*
+> *"Mock /app/v1/orders to return a 500 so I can check the error state."*
+
+**Tools:** `list_events`, `get_event`, `get_trace`, `find_failures`, `session_summary`,
+`list_mocks`, `create_mock`, `set_mock_enabled`, `delete_mock`.
+
+It serves on the IDE's own built-in web server (localhost, default port 63342 — check the
+copied command, since a second IDE gets the next free port). A few things worth knowing:
+
+- **Every call is authenticated** with a per-project token, which also selects *which* open
+  project's capture to serve. Captures contain auth tokens and user data, and that port is
+  reachable by any local process.
+- **`create_mock` changes what the running app receives.** Your MCP client asks before each
+  call, rules show up in the Mocks strip like any other, and everything clears from the device
+  when capture stops.
+- **Response bodies can be withheld** while still exposing request shape, statuses, and
+  timings — set `logpose.mcp.exposeBodies` to `false` in the project's properties.
+
 ## Repository layout
 
 ```
@@ -334,9 +453,9 @@ for the device-side setup.
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.0.0`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.3.0`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.0.0`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.3.0`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).
