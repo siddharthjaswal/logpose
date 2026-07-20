@@ -21,9 +21,12 @@ import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.Alarm
 import com.intellij.util.ui.JBUI
+import org.jetbrains.ide.BuiltInServerManager
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
+import io.github.siddharthjaswal.logpose.mcp.LogPoseMcpHandler
+import io.github.siddharthjaswal.logpose.mcp.McpSessions
 import io.github.siddharthjaswal.logpose.mock.MocksController
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
@@ -117,9 +120,23 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     // Drives the in-flight UI: ticking duration + spinner while any request is pending.
     private val liveTimer = javax.swing.Timer(250) { onLiveTick() }
 
+    // Lets a coding agent read this project's capture over MCP. The token both authenticates
+    // the caller and selects which open project's capture to serve.
+    private val mcpToken = McpSessions.tokenFor(project)
+
     init {
         isOpaque = true
         background = Theme.bg0
+
+        McpSessions.register(
+            mcpToken,
+            McpSessions.Session(
+                projectName = project.name,
+                store = store,
+                hostAgeMillis = { id -> store.elapsedMillis(id) },
+                exposeBodies = { McpSessions.exposeBodies(project) },
+            ),
+        )
 
         renderer.elapsedProvider = { tx ->
             if (tx.isPending()) store.elapsedMillis(tx.id) else null
@@ -209,7 +226,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     private fun buildHeader(): Component {
         val group = DefaultActionGroup().apply {
-            add(CaptureToggleAction()); add(ClearAction())
+            add(CaptureToggleAction()); add(ClearAction()); add(ConnectAgentAction())
         }
         val toolbar: ActionToolbar = ActionManager.getInstance().createActionToolbar("LogPose", group, true)
         toolbar.targetComponent = this
@@ -366,6 +383,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         reader.stop()
         mocksController.onCaptureStopped()
         statusDot.dispose()
+        // Drop the MCP session so a closed project's capture stops being readable.
+        McpSessions.unregister(mcpToken)
     }
 
     private fun copyToClipboard(text: String, toast: String) {
@@ -563,6 +582,25 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             reader.clearBuffer()
             showDetail(null)
             refreshList()
+        }
+    }
+
+    /**
+     * Copies the one-line command that points a coding agent at this project's capture, so the
+     * agent can read what the app actually did instead of being told about it second-hand.
+     */
+    private inner class ConnectAgentAction : AnAction(
+        "Connect Coding Agent",
+        "Copy the MCP command that lets Claude Code (or any MCP client) read this capture",
+        AllIcons.Actions.Lightning,
+    ) {
+        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun actionPerformed(e: AnActionEvent) {
+            val port = BuiltInServerManager.getInstance().port
+            val command = "claude mcp add --transport http logpose " +
+                "http://localhost:$port${LogPoseMcpHandler.PATH} " +
+                "--header \"${LogPoseMcpHandler.TOKEN_HEADER}: $mcpToken\""
+            copyToClipboard(command, "MCP connect command copied — paste it in your terminal")
         }
     }
 }

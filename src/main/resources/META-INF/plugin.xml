@@ -110,4 +110,13 @@
             icon="/icons/toolWindowLogPose.svg"
             factoryClass="io.github.siddharthjaswal.logpose.toolwindow.LogPoseToolWindowFactory" />
     </extensions>
+
+    <!-- MCP endpoint on the IDE's built-in web server, so a coding agent can read the live
+         capture. Every call is authenticated with a per-project LogPose token.
+         Note the namespace: httpRequestHandler is declared with a bare name in the platform's
+         builtInServer.xml, so it resolves under com.intellij — registering it under
+         org.jetbrains silently never loads. -->
+    <extensions defaultExtensionNs="com.intellij">
+        <httpRequestHandler implementation="io.github.siddharthjaswal.logpose.mcp.LogPoseMcpHandler" />
+    </extensions>
 </idea-plugin>
