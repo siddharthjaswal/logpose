@@ -4,32 +4,69 @@
     <vendor email="tosid23@gmail.com" url="https://github.com/siddharthjaswal">Siddharth Jaswal</vendor>
 
     <description><![CDATA[
-        <h2>LogPose — read your Android network traffic without the logcat pain</h2>
+        <h2>LogPose — inspect and mock your Android app's network, right in the IDE</h2>
         <p>
-            LogPose gives you a tool window that captures each HTTP request/response
-            as a single, structured transaction — no interleaved lines, no mismatched
-            bodies, no manual JSON pretty-printing.
+            LogPose turns your app's traffic into a clean, structured timeline inside a tool
+            window — and lets you <b>mock any response straight back to the device</b>.
+            No proxy, no certificates, no <code>adb logcat | grep</code>: a one-line OkHttp
+            interceptor emits each exchange and the plugin reassembles it.
         </p>
+
+        <h3>Capture</h3>
         <ul>
-            <li>Master/detail view with collapsible JSON trees and a real JSON editor (folding) in Raw mode</li>
-            <li>One-click filter bar: URL search, Method &amp; Status toggles, and a Hide-noise switch</li>
-            <li>Copy as cURL, copy section/transaction JSON, find within a body</li>
-            <li>First-class multipart upload (S3 / GCS) metadata instead of raw bytes</li>
-            <li>Adapts to your IDE theme (light &amp; dark)</li>
+            <li>One row per HTTP exchange — request and response together, never interleaved,
+                never cut off by logcat's ~4&nbsp;KB line limit</li>
+            <li><b>Firebase Cloud Messaging</b> pushes and token refreshes appear inline in the
+                same timeline, so you can read push → API call → UI as one story</li>
+            <li>Duplicate detection flags repeated calls and likely double-submits</li>
         </ul>
+
+        <h3>Inspect</h3>
+        <ul>
+            <li>Collapsible JSON trees plus a real IDE JSON editor (folding, line numbers) in Raw mode</li>
+            <li>One-click filters: URL search, NET/FCM type, Method &amp; Status toggles,
+                hide-noise, duplicates-only</li>
+            <li>Copy as cURL, copy JSON or a response body, find within a body</li>
+            <li>Multi-select rows and copy the call sequence as plain text — ideal for bug reports</li>
+            <li>First-class multipart upload (S3 / GCS) metadata instead of raw bytes</li>
+        </ul>
+
+        <h3>Mock &amp; replay</h3>
+        <ul>
+            <li>Right-click any captured request → <b>Mock this endpoint</b> and serve a response
+                without touching backend or app code</li>
+            <li><b>Replace</b> the whole body, or <b>merge</b> your JSON into the real response:
+                override one field, add keys, and let everything else stay backend-generated</li>
+            <li>Edit the response <b>field by field</b> — fold what you don't need, tick exactly
+                what to override, and see the original value beside your change</li>
+            <li>Inject latency, timeouts and connection failures, cap how many times a rule
+                serves, and match paths with <code>*</code> wildcards</li>
+            <li>Rules sync to the device over adb, report live hit counts, and clear themselves
+                when you stop capturing — mocked rows are badged, so the timeline never lies
+                about what the app actually received</li>
+        </ul>
+
         <p>
-            Requires a one-line OkHttp interceptor (<code>logpose-android</code>) in your app's
-            debug/staging build, which emits one structured line per transaction. Works in
-            IntelliJ IDEA and Android Studio.
+            Requires the <code>logpose-android</code> interceptor in your debug/staging build (a
+            zero-overhead no-op ships for release). Mocking needs <code>logpose-android</code>
+            1.2.1+. Works in IntelliJ IDEA and Android Studio, light and dark.
         </p>
     ]]></description>
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>New look</b> — a redesigned brand mark (a prompt that points north), native
+                IDE context menus, and a roomier, better-organised mock editor.</li>
+            <li><b>Field-by-field mock editing</b> — edit a captured response as a tree: fold what
+                you don't need, edit any value in place, and in merge mode tick exactly the fields
+                to override (a changed value shows the original beside it). Add new keys, drop to
+                raw text, or hit <b>Compare with original</b> for a side-by-side diff of what the
+                app will actually receive.</li>
             <li><b>Merge (patch) mocks</b> — keep the real backend response and deep-merge your
-                JSON on top: override one field, add keys, leave the rest untouched. Pick
-                "Merge into the real response" in the rule dialog. Needs
-                <code>logpose-android</code> &ge; 1.2.0.</li>
+                JSON on top: override one field, add keys, leave the rest untouched. Merging now
+                recurses into arrays by index, so you can change a field inside
+                <code>data[0]</code> without replacing the array. Needs
+                <code>logpose-android</code> &ge; 1.2.1.</li>
             <li><b>Mock &amp; replay</b> — right-click a captured request → <b>"Mock this
                 endpoint…"</b> to serve a response back to the app instead of hitting the
                 network: edit status/body/headers, add latency, or simulate a timeout /
@@ -58,7 +95,8 @@
             <li>Raw JSON mode is now a real editor with code folding</li>
             <li>One-click filter bar (method/status toggles, Hide-noise switch)</li>
             <li>Find in request/response, server trace-id in the overview</li>
-            <li>Compass icon, helpful empty state</li>
+            <li>Multi-select rows and copy the call sequence as a plain-text timeline</li>
+            <li>Helpful empty state</li>
         </ul>
     ]]></change-notes>
 

@@ -6,6 +6,16 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.4.6] - 2026-07-19
+
+### Changed
+- Revised brand mark — the chevron now points **north** ("a prompt that points north") with an
+  enclosing ring on the 13/16px glyphs, so the tool-window stripe icon reads distinctly from
+  the Terminal icon.
+- Rewrote the JetBrains Marketplace description to cover mock & replay, FCM capture, the
+  field-by-field editor, and the timeline copy — it previously only described HTTP capture.
+- README: new brand mark in the header, and the feature list now leads with mocking and FCM.
+
 ## [1.4.5] - 2026-07-18
 
 ### Changed

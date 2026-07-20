@@ -1,14 +1,24 @@
-# LogPose 🧭
+<p align="center">
+  <img src="docs/brand/logpose-mark-tile.svg" width="88" alt="LogPose">
+</p>
 
-> A lightweight Android Studio / IntelliJ plugin for reading your app's network traffic — without the logcat pain.
+<h1 align="center">LogPose</h1>
 
-[![CI](https://github.com/siddharthjaswal/logpose/actions/workflows/ci.yml/badge.svg)](https://github.com/siddharthjaswal/logpose/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/siddharthjaswal/logpose?include_prereleases&sort=semver)](https://github.com/siddharthjaswal/logpose/releases)
-[![License](https://img.shields.io/github/license/siddharthjaswal/logpose)](LICENSE)
+<p align="center">
+  <b>Inspect and mock your Android app's network traffic — right inside the IDE.</b><br/>
+  No proxy. No certificates. No <code>adb logcat | grep</code>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/siddharthjaswal/logpose/actions/workflows/ci.yml"><img src="https://github.com/siddharthjaswal/logpose/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/siddharthjaswal/logpose/releases"><img src="https://img.shields.io/github/v/release/siddharthjaswal/logpose?include_prereleases&sort=semver" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/siddharthjaswal/logpose" alt="License"></a>
+</p>
 
 LogPose is named after the navigational device from *One Piece* that reads an island's
-"log" to point you the right way. This one reads your **logcat** and points you straight
-at the HTTP request you care about.
+"log" to point you the right way. This one reads your **logcat** and points you straight at
+the request you care about — then lets you **serve a mock back to the device** without
+touching backend or app code. HTTP traffic and **FCM pushes** land in one unified timeline.
 
 ---
 
@@ -32,9 +42,22 @@ at the HTTP request you care about.
 
 ## Features
 
+- **Mock & replay** — right-click any captured request → **Mock this endpoint** and serve a
+  response instead of hitting the network. **Replace** the whole body, or **merge** your JSON
+  into the real response to override a single field and leave the rest backend-generated.
+  Edit the response **field by field** (fold, tick what to override, see the original beside
+  your change), inject latency / timeouts / connection failures, cap serves, match paths with
+  `*`. Rules sync over adb, show hit counts, and clear when capture stops.
+- **FCM in the same timeline** — Firebase pushes and token refreshes appear inline with HTTP
+  traffic, so you can read push → API call → UI as one story. Notification, metadata and data
+  payload are all inspectable.
 - **Modern "Studio" tool window** — a master/detail view with color-coded method/status
   pill badges, a hero **Overview** card (status, URL, duration/size/started/host/id stat
   chips), and side-by-side **Request** / **Response** cards.
+- **Duplicate detection** — repeated calls in a burst get a `DUP ×N` tag; overlapping
+  non-idempotent calls (likely double-submits) are flagged in red.
+- **Copy the timeline** — multi-select rows (`⇧↑/↓`) and copy the call sequence as plain
+  text, ideal for pasting into a bug report.
 - **Collapsible JSON trees** — request/response bodies are parsed back into navigable,
   syntax-colored trees; bodies that are JSON nest directly under `body`. Toggle **Tree /
   Raw** (raw is syntax-highlighted too).
