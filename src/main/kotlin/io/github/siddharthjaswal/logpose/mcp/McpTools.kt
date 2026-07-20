@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.mcp
 
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.model.LogEvent
+import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.Transaction
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -12,6 +13,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
+import java.util.UUID
 
 /**
  * The read side of LogPose's MCP server: turning a live capture into answers an agent can act
@@ -21,12 +23,32 @@ import kotlinx.serialization.json.put
  * events and returns JSON — so the query behavior is unit-testable and the transport in
  * [LogPoseMcpHandler] stays a thin shell.
  *
- * Everything here is read-only. Writes (creating mocks) are separate, so a client can be given
- * read access without the ability to change what the app receives.
+ * Reads answer "what did the app do"; the mock tools close the loop by changing what it
+ * receives next, which is what turns this from a viewer into a debugging loop: read the real
+ * 404, serve a 200, watch the screen recover. Writes go through [Mocks], which is absent when
+ * a project can't serve them.
  */
 object McpTools {
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
+
+    /**
+     * The write surface, kept as an interface so this file stays free of IntelliJ types and
+     * unit-testable. Implemented over `MocksController` by the tool window.
+     *
+     * Writes change what the **running app** receives, so the tool descriptions say so plainly:
+     * the MCP client's own per-call approval is the gate, and every rule created this way shows
+     * up in the Mocks strip like any other.
+     */
+    interface Mocks {
+        fun list(): List<MockRule>
+        fun hits(): Map<String, Int>
+        /** Human-readable device sync state, e.g. "synced" or "waiting for device". */
+        fun deviceHint(): String
+        fun create(rule: MockRule, baseBody: String?)
+        fun setEnabled(id: String, enabled: Boolean)
+        fun delete(id: String)
+    }
 
     /** The tool catalogue, in MCP's `tools/list` shape. */
     fun catalogue(): JsonArray = buildJsonArray {
@@ -80,6 +102,67 @@ object McpTools {
                     "count, duplicate calls, and the time span covered.",
             ) {}
         )
+        add(
+            tool(
+                "list_mocks",
+                "The mock rules currently defined, with how many times each has been served and " +
+                    "whether the device has them.",
+            ) {}
+        )
+        add(
+            tool(
+                "create_mock",
+                "Serve a canned response to the running app instead of letting a request reach " +
+                    "the network — to reproduce an error state, or to unblock on an endpoint " +
+                    "that isn't ready. THIS CHANGES WHAT THE RUNNING APP RECEIVES until the rule " +
+                    "is disabled or capture stops. Prefer from_event_id: it copies a real " +
+                    "captured response so you only state what should differ.",
+            ) {
+                put("from_event_id", stringProp(
+                    "Copy method, path and response body from this captured event, then apply " +
+                        "the overrides below. Get the id from list_events.",
+                ))
+                put("method", stringProp("HTTP method to match, or '*' for any. Required unless from_event_id is given."))
+                put("path_pattern", stringProp(
+                    "Request path to match; '*' matches any run of characters, e.g. " +
+                        "'/app/v1/orders/*'. Required unless from_event_id is given.",
+                ))
+                put("status", intProp("Response status to serve (default 200)."))
+                put("body", stringProp(
+                    "Response body. In mode 'patch' this is merged into the real response, so " +
+                        "send only the fields to override.",
+                ))
+                put("content_type", stringProp("Response Content-Type (default application/json)."))
+                put("mode", stringProp(
+                    "'replace' (default) serves body as the whole response; 'patch' lets the " +
+                        "real response come back and deep-merges body into it.",
+                ))
+                put("behavior", stringProp(
+                    "'normal' (default), 'timeout', or 'connection_failure' to simulate a " +
+                        "network fault instead of returning a response.",
+                ))
+                put("latency_ms", intProp("Delay before responding."))
+                put("serve_limit", intProp("Serve this many times then deactivate; 0 (default) = always."))
+            },
+        )
+        add(
+            tool(
+                "set_mock_enabled",
+                "Turn a mock rule on or off. Disabling restores the real network response — do " +
+                    "this when you're done reproducing a state.",
+            ) {
+                put("id", stringProp("Mock rule id, from list_mocks or create_mock.", required = true))
+                put("enabled", boolProp("True to serve the mock, false to let requests through."))
+            },
+        )
+        add(
+            tool(
+                "delete_mock",
+                "Remove a mock rule entirely. Use set_mock_enabled if you might want it back.",
+            ) {
+                put("id", stringProp("Mock rule id.", required = true))
+            },
+        )
     }
 
     /**
@@ -95,14 +178,24 @@ object McpTools {
         events: List<LogEvent>,
         hostAgeMillis: (String) -> Long,
         includeBodies: Boolean,
+        mocks: Mocks? = null,
     ): JsonElement = when (name) {
         "list_events" -> listEvents(args, events, hostAgeMillis)
         "get_event" -> getEvent(args, events, includeBodies)
         "get_trace" -> getTrace(args, events)
         "find_failures" -> findFailures(args, events)
         "session_summary" -> summary(events)
+        "list_mocks" -> mocks.orError { listMocks(it) }
+        "create_mock" -> mocks.orError { createMock(args, events, it) }
+        "set_mock_enabled" -> mocks.orError { setMockEnabled(args, it) }
+        "delete_mock" -> mocks.orError { deleteMock(args, it) }
         else -> buildJsonObject { put("error", "Unknown tool '$name'") }
     }
+
+    private inline fun Mocks?.orError(block: (Mocks) -> JsonElement): JsonElement =
+        this?.let(block) ?: buildJsonObject {
+            put("error", "Mocking isn't available — open the LogPose tool window for this project.")
+        }
 
     // ---- tools ---------------------------------------------------------------------------
 
@@ -217,6 +310,118 @@ object McpTools {
                 events.mapNotNull { it.traceId }.distinct().take(25).forEach { add(it) }
             })
         }
+    }
+
+    // ---- mocks (write) ---------------------------------------------------------------------
+
+    private fun listMocks(mocks: Mocks): JsonElement {
+        val hits = mocks.hits()
+        return buildJsonObject {
+            put("device", mocks.deviceHint())
+            put("count", mocks.list().size)
+            put("mocks", buildJsonArray { mocks.list().forEach { add(briefMock(it, hits[it.id] ?: 0)) } })
+        }
+    }
+
+    private fun createMock(args: JsonObject, events: List<LogEvent>, mocks: Mocks): JsonElement {
+        // Seeding from a captured event is the path worth encouraging: the agent copies a real
+        // response and states only the difference, instead of inventing a payload the app has
+        // never seen.
+        val seed = args.str("from_event_id")?.let { id ->
+            (events.firstOrNull { it.id == id } as? LogEvent.Http)?.tx
+                ?: return buildJsonObject {
+                    put("error", "No captured HTTP event with id '$id' to copy from.")
+                }
+        }
+
+        val method = args.str("method") ?: seed?.request?.method ?: "*"
+        val path = args.str("path_pattern")
+            ?: seed?.request?.path?.takeIf { it.isNotBlank() }
+            ?: return buildJsonObject {
+                put("error", "Provide path_pattern, or from_event_id to copy it from a captured call.")
+            }
+
+        val mode = args.str("mode") ?: MockRule.MODE_REPLACE
+        if (mode !in setOf(MockRule.MODE_REPLACE, MockRule.MODE_PATCH)) {
+            return buildJsonObject { put("error", "mode must be 'replace' or 'patch'.") }
+        }
+        val behavior = args.str("behavior") ?: MockRule.BEHAVIOR_NORMAL
+        if (behavior !in setOf(
+                MockRule.BEHAVIOR_NORMAL,
+                MockRule.BEHAVIOR_TIMEOUT,
+                MockRule.BEHAVIOR_CONNECTION_FAILURE,
+            )
+        ) {
+            return buildJsonObject {
+                put("error", "behavior must be 'normal', 'timeout' or 'connection_failure'.")
+            }
+        }
+
+        // In replace mode with no body given, fall back to the captured response so the rule is
+        // immediately meaningful (e.g. "same response, but status 500").
+        val body = args.str("body")
+            ?: if (mode == MockRule.MODE_REPLACE) seed?.response?.body?.text else null
+
+        val rule = MockRule(
+            id = "mcp-" + UUID.randomUUID().toString().take(8),
+            method = method.uppercase(),
+            pathPattern = path,
+            status = args.int("status") ?: seed?.response?.code ?: 200,
+            body = body,
+            contentType = args.str("content_type") ?: "application/json",
+            latencyMillis = (args.int("latency_ms") ?: 0).toLong(),
+            behavior = behavior,
+            serveLimit = args.int("serve_limit") ?: 0,
+            enabled = true,
+            mode = mode,
+        )
+        mocks.create(rule, seed?.response?.body?.text)
+
+        return buildJsonObject {
+            put("created", briefMock(rule, 0))
+            put("device", mocks.deviceHint())
+            put(
+                "note",
+                "The running app will now receive this instead of the real response for matching " +
+                    "requests. Disable it with set_mock_enabled when you're done; all rules also " +
+                    "clear from the device when capture stops.",
+            )
+        }
+    }
+
+    private fun setMockEnabled(args: JsonObject, mocks: Mocks): JsonElement {
+        val id = args.str("id") ?: return buildJsonObject { put("error", "Missing 'id'") }
+        if (mocks.list().none { it.id == id }) {
+            return buildJsonObject { put("error", "No mock rule with id '$id'") }
+        }
+        val enabled = args.bool("enabled") ?: true
+        mocks.setEnabled(id, enabled)
+        return buildJsonObject {
+            put("id", id)
+            put("enabled", enabled)
+            put("device", mocks.deviceHint())
+        }
+    }
+
+    private fun deleteMock(args: JsonObject, mocks: Mocks): JsonElement {
+        val id = args.str("id") ?: return buildJsonObject { put("error", "Missing 'id'") }
+        if (mocks.list().none { it.id == id }) {
+            return buildJsonObject { put("error", "No mock rule with id '$id'") }
+        }
+        mocks.delete(id)
+        return buildJsonObject { put("deleted", id); put("device", mocks.deviceHint()) }
+    }
+
+    private fun briefMock(rule: MockRule, hits: Int): JsonObject = buildJsonObject {
+        put("id", rule.id)
+        put("match", "${rule.method} ${rule.pathPattern}")
+        put("enabled", rule.enabled)
+        put("mode", rule.mode)
+        if (rule.behavior != MockRule.BEHAVIOR_NORMAL) put("behavior", rule.behavior)
+        else put("status", rule.status)
+        if (rule.latencyMillis > 0) put("latency_ms", rule.latencyMillis)
+        if (rule.serveLimit > 0) put("serve_limit", rule.serveLimit)
+        put("hits", hits)
     }
 
     // ---- shared shaping -------------------------------------------------------------------

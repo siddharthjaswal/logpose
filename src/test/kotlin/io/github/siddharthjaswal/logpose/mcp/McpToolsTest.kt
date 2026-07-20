@@ -4,6 +4,7 @@ import io.github.siddharthjaswal.logpose.model.Badge
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.GenericEvent
 import io.github.siddharthjaswal.logpose.model.LogEvent
+import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.Request
 import io.github.siddharthjaswal.logpose.model.Response
 import io.github.siddharthjaswal.logpose.model.Body
@@ -195,10 +196,127 @@ class McpToolsTest {
         assertEquals(2, top["calls"]!!.jsonPrimitive.int())
     }
 
+    // ---- mock write tools ------------------------------------------------------------------
+
+    /** In-memory stand-in for MocksController, so the tool behavior is testable on its own. */
+    private class FakeMocks : McpTools.Mocks {
+        val rules = mutableListOf<MockRule>()
+        var lastBaseBody: String? = null
+        override fun list() = rules.toList()
+        override fun hits() = mapOf<String, Int>()
+        override fun deviceHint() = "test-device · synced rev 1"
+        override fun create(rule: MockRule, baseBody: String?) { rules += rule; lastBaseBody = baseBody }
+        override fun setEnabled(id: String, enabled: Boolean) {
+            rules.replaceAll { if (it.id == id) it.copy(enabled = enabled) else it }
+        }
+        override fun delete(id: String) { rules.removeAll { it.id == id } }
+    }
+
+    private fun callWrite(name: String, args: JsonObject, mocks: McpTools.Mocks, events: List<LogEvent> = emptyList()) =
+        McpTools.call(name, args, events, { 0 }, true, mocks).jsonObject
+
+    @Test fun `create_mock copies method, path and body from a captured event`() {
+        val mocks = FakeMocks()
+        val event = http("e1", method = "POST", path = "/orders", code = 201, body = """{"ok":true}""")
+
+        val out = callWrite("create_mock", buildJsonObject { put("from_event_id", "e1") }, mocks, listOf(event))
+
+        val rule = mocks.rules.single()
+        assertEquals("POST", rule.method)
+        assertEquals("/orders", rule.pathPattern)
+        assertEquals(201, rule.status, "the captured status is the sensible default")
+        assertEquals("""{"ok":true}""", rule.body)
+        assertEquals("""{"ok":true}""", mocks.lastBaseBody, "the base body seeds the field editor")
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("running app"))
+    }
+
+    @Test fun `create_mock overrides only what the caller states`() {
+        val mocks = FakeMocks()
+        val event = http("e1", method = "GET", path = "/feed", code = 200, body = """{"items":[]}""")
+
+        callWrite(
+            "create_mock",
+            buildJsonObject { put("from_event_id", "e1"); put("status", 500) },
+            mocks, listOf(event),
+        )
+
+        val rule = mocks.rules.single()
+        assertEquals(500, rule.status)
+        assertEquals("/feed", rule.pathPattern, "everything unstated still comes from the capture")
+        assertEquals("""{"items":[]}""", rule.body)
+    }
+
+    @Test fun `create_mock without a seed requires a path`() {
+        val mocks = FakeMocks()
+        val out = callWrite("create_mock", buildJsonObject { put("status", 500) }, mocks)
+        assertTrue(out.containsKey("error"))
+        assertTrue(mocks.rules.isEmpty(), "a rejected call must not create a rule")
+    }
+
+    @Test fun `create_mock rejects unknown modes and behaviors instead of guessing`() {
+        val mocks = FakeMocks()
+        val bad = buildJsonObject { put("path_pattern", "/x"); put("mode", "merge") }
+        assertTrue(callWrite("create_mock", bad, mocks).containsKey("error"))
+
+        val badBehavior = buildJsonObject { put("path_pattern", "/x"); put("behavior", "explode") }
+        assertTrue(callWrite("create_mock", badBehavior, mocks).containsKey("error"))
+        assertTrue(mocks.rules.isEmpty())
+    }
+
+    @Test fun `create_mock with an unknown seed id fails rather than inventing a rule`() {
+        val mocks = FakeMocks()
+        val out = callWrite("create_mock", buildJsonObject { put("from_event_id", "nope") }, mocks)
+        assertTrue(out.containsKey("error"))
+        assertTrue(mocks.rules.isEmpty())
+    }
+
+    @Test fun `patch mode does not inherit the captured body`() {
+        // In patch mode the body is the override set, so copying the whole response would
+        // silently mean "replace everything with itself".
+        val mocks = FakeMocks()
+        val event = http("e1", path = "/feed", body = """{"a":1,"b":2}""")
+        callWrite(
+            "create_mock",
+            buildJsonObject { put("from_event_id", "e1"); put("mode", "patch") },
+            mocks, listOf(event),
+        )
+        assertEquals(null, mocks.rules.single().body)
+    }
+
+    @Test fun `set_mock_enabled and delete_mock act on real ids only`() {
+        val mocks = FakeMocks()
+        callWrite("create_mock", buildJsonObject { put("path_pattern", "/x") }, mocks)
+        val id = mocks.rules.single().id
+
+        callWrite("set_mock_enabled", buildJsonObject { put("id", id); put("enabled", false) }, mocks)
+        assertFalse(mocks.rules.single().enabled)
+
+        assertTrue(callWrite("set_mock_enabled", buildJsonObject { put("id", "ghost") }, mocks).containsKey("error"))
+        assertTrue(callWrite("delete_mock", buildJsonObject { put("id", "ghost") }, mocks).containsKey("error"))
+        assertEquals(1, mocks.rules.size)
+
+        callWrite("delete_mock", buildJsonObject { put("id", id) }, mocks)
+        assertTrue(mocks.rules.isEmpty())
+    }
+
+    @Test fun `mock tools report the device state so an agent knows if a rule is live`() {
+        val mocks = FakeMocks()
+        val out = callWrite("list_mocks", JsonObject(emptyMap()), mocks)
+        assertEquals("test-device · synced rev 1", out["device"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `write tools refuse cleanly when mocking is unavailable`() {
+        val out = call("create_mock", emptyList(), buildJsonObject { put("path_pattern", "/x") })
+        assertTrue(out.containsKey("error"))
+    }
+
     @Test fun `every catalogued tool declares a schema and is callable`() {
         val names = McpTools.catalogue().map { it.jsonObject["name"]!!.jsonPrimitive.content }
         assertEquals(
-            listOf("list_events", "get_event", "get_trace", "find_failures", "session_summary"),
+            listOf(
+                "list_events", "get_event", "get_trace", "find_failures", "session_summary",
+                "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
+            ),
             names,
         )
         McpTools.catalogue().forEach { tool ->

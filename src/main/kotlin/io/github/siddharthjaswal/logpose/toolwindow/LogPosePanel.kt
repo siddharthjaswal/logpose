@@ -135,6 +135,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 store = store,
                 hostAgeMillis = { id -> store.elapsedMillis(id) },
                 exposeBodies = { McpSessions.exposeBodies(project) },
+                mocks = McpMocks(),
             ),
         )
 
@@ -583,6 +584,32 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             showDetail(null)
             refreshList()
         }
+    }
+
+    /**
+     * Exposes this project's mock rules to the MCP server, so an agent can close the loop:
+     * read the real failure, then serve a response that reproduces or fixes the state.
+     *
+     * These calls arrive on a Netty IO thread, never the EDT. That's safe because
+     * [MocksController] is synchronized and already takes calls from the reader thread, and the
+     * panel's listener marshals its UI refresh through a Swing [Alarm].
+     */
+    private inner class McpMocks : io.github.siddharthjaswal.logpose.mcp.McpTools.Mocks {
+        override fun list() = mocksController.rules()
+        override fun hits() = mocksController.deviceState().hits
+        override fun deviceHint(): String {
+            val device = mocksController.deviceState()
+            return if (device.helloSeen) {
+                "${device.pkg ?: "device"} · synced rev ${device.syncedRevision}"
+            } else {
+                "waiting for device — needs logpose-android ≥ 1.1.0 and capture running, so " +
+                    "the rule won't take effect yet"
+            }
+        }
+        override fun create(rule: io.github.siddharthjaswal.logpose.model.MockRule, baseBody: String?) =
+            mocksController.addOrUpdate(rule, baseBody)
+        override fun setEnabled(id: String, enabled: Boolean) = mocksController.setEnabled(id, enabled)
+        override fun delete(id: String) = mocksController.remove(id)
     }
 
     /**

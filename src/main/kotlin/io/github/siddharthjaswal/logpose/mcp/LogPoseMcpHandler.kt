@@ -126,6 +126,7 @@ class LogPoseMcpHandler : HttpRequestHandler() {
                 events = session.store.snapshot(),
                 hostAgeMillis = session.hostAgeMillis,
                 includeBodies = session.exposeBodies(),
+                mocks = session.mocks,
             )
         }.getOrElse { e ->
             // Surface the failure as tool output: an agent can read and route around it, where a

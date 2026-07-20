@@ -30,6 +30,8 @@ object McpSessions {
         /** Host-clock age of an event, since device timestamps can't be diffed against ours. */
         val hostAgeMillis: (String) -> Long,
         val exposeBodies: () -> Boolean,
+        /** Write surface for mock rules; null when this project can't serve mocks. */
+        val mocks: McpTools.Mocks? = null,
     )
 
     private const val TOKEN_KEY = "logpose.mcp.token"
