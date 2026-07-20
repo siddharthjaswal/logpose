@@ -34,6 +34,13 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// LogPose contributes no Settings page, so there is nothing for searchable-options indexing to
+// index. The task launches a second headless IDE, which costs a minute per build and fails
+// outright when a sandbox IDE (./gradlew runIde) is already holding the sandbox.
+tasks.buildSearchableOptions {
+    enabled = false
+}
+
 intellijPlatform {
     pluginConfiguration {
         ideaVersion {
