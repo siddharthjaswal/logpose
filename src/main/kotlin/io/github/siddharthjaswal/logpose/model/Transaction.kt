@@ -338,6 +338,12 @@ data class Hello(
     val pkg: String,
     val libVersion: String,
     val mockRevision: Int = 0,
+    /**
+     * Random per app run (library 1.5.0+; empty from older libraries). Same id across two hellos
+     * = same process re-announcing itself; a different id = the app restarted, which is the
+     * boundary [io.github.siddharthjaswal.logpose.store.EventStore] splits sessions on.
+     */
+    val processId: String = "",
 )
 
 /** Emitted after a rule set applies; confirms sync and carries per-rule serve counts. */

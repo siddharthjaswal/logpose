@@ -23,6 +23,7 @@ import com.intellij.util.Alarm
 import com.intellij.util.ui.JBUI
 import org.jetbrains.ide.BuiltInServerManager
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.mcp.LogPoseMcpHandler
@@ -219,7 +220,15 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
         // Reverse channel: device hello / mock acks arrive on the reader thread → route to the
         // controller, then repaint the mocks bar on the EDT.
-        parser.onControl = { msg -> mocksController.onControl(msg) }
+        parser.onControl = { msg ->
+            // A hello is both a mock-sync signal and the only reliable marker of an app restart,
+            // so the store sees it too — that's what keeps two launches from being reported as
+            // one timeline.
+            if (msg is ControlMessage.DeviceHello) {
+                store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion)
+            }
+            mocksController.onControl(msg)
+        }
         mocksController.addListener {
             refreshAlarm.addRequest({ mocksBar.refresh(mocksController.rules(), mocksController.deviceState()) }, 0)
         }

@@ -49,7 +49,7 @@ data class FilterState(
     fun matches(event: LogEvent): Boolean = when (event) {
         is LogEvent.Http -> types.allowsHttp() && matchesHttp(event)
         is LogEvent.Fcm -> types.allowsFcm() && matchesFcm(event)
-        is LogEvent.Db -> types.allows(EventType.DB) && matchesStructured(event)
+        is LogEvent.Db -> types.allowsDb() && matchesStructured(event)
         is LogEvent.Worker -> types.allows(EventType.WORK) && matchesStructured(event)
         is LogEvent.Config -> types.allows(EventType.CONF) && matchesStructured(event)
         is LogEvent.Generic -> types.allowsApp() && matchesStructured(event)
@@ -59,6 +59,14 @@ data class FilterState(
     private fun Set<EventType>.allowsFcm() = isEmpty() || EventType.FCM in this
     private fun Set<EventType>.allowsApp() = allows(EventType.APP)
     private fun Set<EventType>.allows(type: EventType) = isEmpty() || type in this
+
+    /**
+     * DB is the one kind that must be asked for. A Room query callback outproduces every other
+     * source by an order of magnitude — a real capture ran 75 queries against 12 requests — so
+     * defaulting it visible buries the traffic people opened LogPose to see. Capture is
+     * unaffected: the events are stored and stay available to the DB chip and to MCP.
+     */
+    private fun Set<EventType>.allowsDb() = EventType.DB in this
 
     private fun matchesHttp(event: LogEvent.Http): Boolean {
         val tx = event.tx
@@ -132,7 +140,10 @@ class FilterBar : JPanel() {
     private val typeChips = linkedMapOf(
         EventType.NET to chip("NET", Theme.accent, flat = true),
         EventType.FCM to chip("FCM", Theme.methodColor("PATCH"), flat = true),
-        EventType.DB to chip("DB", Theme.methodColor("PUT"), flat = true),
+        EventType.DB to chip("DB", Theme.methodColor("PUT"), flat = true).apply {
+            toolTipText = "Database queries — hidden until you ask for them, since a busy screen " +
+                "can run hundreds a minute. They are still captured and readable by a coding agent."
+        },
         EventType.WORK to chip("WORK", Theme.methodColor("POST"), flat = true),
         EventType.CONF to chip("CONF", Theme.warn, flat = true),
         EventType.APP to chip("APP", Theme.accent, flat = true),

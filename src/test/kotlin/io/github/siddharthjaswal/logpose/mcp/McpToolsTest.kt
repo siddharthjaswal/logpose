@@ -13,6 +13,7 @@ import io.github.siddharthjaswal.logpose.model.Response
 import io.github.siddharthjaswal.logpose.model.Body
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
+import io.github.siddharthjaswal.logpose.store.EventStore
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -81,7 +82,10 @@ class McpToolsTest {
         args: JsonObject = JsonObject(emptyMap()),
         ages: (String) -> Long = { 0 },
         bodies: Boolean = true,
-    ): JsonObject = McpTools.call(name, args, events, ages, bodies).jsonObject
+        sessions: List<EventStore.Session> = emptyList(),
+        sessionOf: (String) -> Int = { 0 },
+    ): JsonObject =
+        McpTools.call(name, args, events, ages, bodies, null, sessions, sessionOf).jsonObject
 
     @Test fun `list_events summarises each kind in one line`() {
         val out = call("list_events", listOf(http("a", code = 200), app("b", "SyncWorker")))
@@ -130,7 +134,7 @@ class McpToolsTest {
         )
         val out = call("find_failures", events)
         assertEquals(3, out["count"]!!.jsonPrimitive.int())
-        assertEquals(listOf("server", "boom", "job"), out.ids())
+        assertEquals(listOf("server", "boom", "job"), out.failureIds())
 
         // failed_only on list_events agrees with find_failures.
         assertEquals(
@@ -256,51 +260,54 @@ class McpToolsTest {
         )
     }
 
-    @Test fun `find_slow_queries ranks by duration and reports the SQL`() {
-        val events = listOf(
-            db("fast", "SELECT * FROM users", durationMillis = 3),
-            db("slow", "SELECT * FROM orders JOIN items", durationMillis = 240),
-            db("mid", "UPDATE riders SET x = 1", durationMillis = 40),
-        )
-        val out = call("find_slow_queries", events)
-        val ids = out["queries"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
-        assertEquals(listOf("slow", "mid", "fast"), ids)
+    @Test fun `query_hotspots ranks the N+1, not the one-off`() {
+        // The shape this exists to catch: a list adapter re-running one statement per row. No
+        // timing is involved, which is the point — Room's callback never supplies any.
+        val events = List(12) { db("n$it", "SELECT * FROM items WHERE order_id = ?") } +
+            listOf(db("once", "SELECT * FROM users"), db("twice-a", "UPDATE riders SET x = 1"),
+                   db("twice-b", "UPDATE riders SET x = 1"))
+        val out = call("query_hotspots", events)
 
-        val slowest = out["queries"]!!.jsonArray.first().jsonObject
-        assertEquals("orders", slowest["table"]!!.jsonPrimitive.content, "table is parsed from the SQL")
-        assertEquals(240, slowest["duration_ms"]!!.jsonPrimitive.int())
+        val hotspots = out["hotspots"]!!.jsonArray
+        assertEquals(2, hotspots.size, "a statement run once is not a hotspot")
+        val worst = hotspots.first().jsonObject
+        assertEquals(12, worst["count"]!!.jsonPrimitive.int())
+        assertEquals("items", worst["table"]!!.jsonPrimitive.content)
+        assertEquals("select", worst["operation"]!!.jsonPrimitive.content)
     }
 
-    @Test fun `find_slow_queries excludes unmeasured queries instead of calling them instant`() {
-        // Room's query callback gives no timing. Treating those as 0ms would sort them to the
-        // fast end of a slowness ranking — exactly backwards — so they're excluded and counted.
-        val events = listOf(db("measured", durationMillis = 50), db("unmeasured", durationMillis = null))
-        val out = call("find_slow_queries", events)
-
-        assertEquals(2, out["total_queries"]!!.jsonPrimitive.int())
-        assertEquals(1, out["measured"]!!.jsonPrimitive.int())
-        assertTrue(out.containsKey("note"), "the exclusion must be stated, not silent")
-        assertEquals(
-            listOf("measured"),
-            out["queries"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content },
-        )
+    @Test fun `query_hotspots says so plainly when nothing repeats`() {
+        // The tool it replaced returned an empty list on every real capture and taught callers
+        // to stop asking; an empty answer here has to explain itself.
+        val out = call("query_hotspots", listOf(db("a", "SELECT * FROM users")))
+        assertTrue(out["hotspots"]!!.jsonArray.isEmpty())
+        assertTrue(out.containsKey("note"))
+        assertEquals(1, out["total_queries"]!!.jsonPrimitive.int())
     }
 
-    @Test fun `find_slow_queries filters by threshold and table`() {
+    @Test fun `query_hotspots filters by table and threshold`() {
+        val events = List(3) { db("u$it", "SELECT * FROM users") } +
+            List(5) { db("o$it", "SELECT * FROM orders") }
+
+        val users = call("query_hotspots", events, buildJsonObject { put("table", "users") })
+        assertEquals(1, users["hotspots"]!!.jsonArray.size)
+        assertEquals(3, users["hotspots"]!!.jsonArray.first().jsonObject["count"]!!.jsonPrimitive.int())
+
+        val strict = call("query_hotspots", events, buildJsonObject { put("min_count", 4) })
+        assertEquals(1, strict["hotspots"]!!.jsonArray.size, "only orders clears a threshold of 4")
+    }
+
+    @Test fun `query_hotspots reports timings only when the app measured them`() {
         val events = listOf(
-            db("a", "SELECT * FROM users", durationMillis = 5),
-            db("b", "SELECT * FROM orders", durationMillis = 300),
-            db("c", "SELECT * FROM users", durationMillis = 100),
+            db("a", "SELECT * FROM users", durationMillis = 30),
+            db("b", "SELECT * FROM users", durationMillis = 50),
         )
-        assertEquals(
-            listOf("b", "c"),
-            call("find_slow_queries", events, buildJsonObject { put("min_ms", 50) })
-                .queryIds(),
-        )
-        assertEquals(
-            listOf("c", "a"),
-            call("find_slow_queries", events, buildJsonObject { put("table", "users") }).queryIds(),
-        )
+        val hotspot = call("query_hotspots", events)["hotspots"]!!.jsonArray.first().jsonObject
+        assertEquals(80, hotspot["total_ms"]!!.jsonPrimitive.int())
+
+        val unmeasured = listOf(db("c", durationMillis = null), db("d", durationMillis = null))
+        val bare = call("query_hotspots", unmeasured)["hotspots"]!!.jsonArray.first().jsonObject
+        assertFalse(bare.containsKey("total_ms"), "no invented durations when nothing was measured")
     }
 
     @Test fun `worker_history reports attempts, failures and filters`() {
@@ -370,7 +377,7 @@ class McpToolsTest {
             worker("w-ok", state = WorkerEvent.STATE_SUCCEEDED),
             config("c1", "flag" to ("a" to "b")),
         )
-        assertEquals(listOf("bad-sql", "w-failed"), call("find_failures", events).ids())
+        assertEquals(listOf("bad-sql", "w-failed"), call("find_failures", events).failureIds())
     }
 
     @Test fun `summaries for the new kinds read like the rows do`() {
@@ -387,9 +394,6 @@ class McpToolsTest {
         assertTrue(summaries[1].startsWith("SyncWorker"), summaries[1])
         assertTrue(summaries[2].contains("new_checkout"), summaries[2])
     }
-
-    private fun JsonObject.queryIds(): List<String> =
-        this["queries"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
 
     // ---- mock write tools ------------------------------------------------------------------
 
@@ -510,7 +514,7 @@ class McpToolsTest {
         assertEquals(
             listOf(
                 "list_events", "get_event", "get_trace", "find_failures", "session_summary",
-                "find_slow_queries", "worker_history", "config_changes",
+                "query_hotspots", "worker_history", "config_changes",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
             ),
             names,
@@ -527,5 +531,88 @@ class McpToolsTest {
     private fun JsonObject.ids(): List<String> =
         this["events"]!!.jsonArray.map { it.jsonObject["id"]!!.jsonPrimitive.content }
 
+    /** find_failures groups identical failures, so ids come out of the groups. */
+    private fun JsonObject.failureIds(): List<String> =
+        this["failures"]!!.jsonArray.flatMap { group ->
+            group.jsonObject["event_ids"]!!.jsonArray.map { it.jsonPrimitive.content }
+        }
+
     private fun kotlinx.serialization.json.JsonPrimitive.int(): Int = content.toInt()
+
+    // ---- sessions and the jump table --------------------------------------------------------
+
+    private fun session(index: Int, pid: String = "p$index") =
+        EventStore.Session(index, startedAt = index * 1000L, processId = pid, pkg = "com.acme", libVersion = "1.5.0")
+
+    @Test fun `session_summary breaks a capture apart at app restarts`() {
+        // Two bursts either side of a restart: reported as one span they look like six hours of
+        // steady traffic, which is what made every aggregate over them misleading.
+        val events = listOf(
+            http("a", at = 1_000), http("b", at = 2_000),
+            http("c", at = 21_000_000), http("d", at = 21_001_000),
+        )
+        val owner = mapOf("a" to 1, "b" to 1, "c" to 2, "d" to 2)
+        val out = call(
+            "session_summary", events,
+            sessions = listOf(session(1), session(2)),
+            sessionOf = { owner[it] ?: 0 },
+        )
+
+        val sessions = out["sessions"]!!.jsonArray
+        assertEquals(2, sessions.size)
+        assertEquals(2, sessions[0].jsonObject["events"]!!.jsonPrimitive.int())
+        assertEquals(1_000, sessions[0].jsonObject["duration_ms"]!!.jsonPrimitive.int())
+        assertEquals(2, sessions[1].jsonObject["events"]!!.jsonPrimitive.int())
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("2 app runs"))
+    }
+
+    @Test fun `events with no handshake are reported as unattributed, not dropped`() {
+        val out = call("session_summary", listOf(http("a")), sessions = emptyList(), sessionOf = { 0 })
+        val orphan = out["sessions"]!!.jsonArray.single().jsonObject
+        assertEquals(0, orphan["session"]!!.jsonPrimitive.int())
+        assertEquals(1, orphan["events"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `list_events scopes to one run`() {
+        val owner = mapOf("a" to 1, "b" to 2)
+        val out = call(
+            "list_events", listOf(http("a"), http("b")),
+            args = buildJsonObject { put("session", 2) },
+            sessionOf = { owner[it] ?: 0 },
+        )
+        assertEquals(listOf("b"), out.ids())
+    }
+
+    @Test fun `by_kind reports every known kind so zero is distinguishable from absent`() {
+        val out = call("session_summary", listOf(http("a")))
+        val byKind = out["by_kind"]!!.jsonObject
+        assertEquals(1, byKind["http"]!!.jsonPrimitive.int())
+        // The capture that prompted this had worker and config instrumented but silent; an
+        // absent key left no way to tell "never fired" from "not counted".
+        assertEquals(0, byKind["worker"]!!.jsonPrimitive.int())
+        assertEquals(0, byKind["config"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `session_summary hands back failure ids instead of only a count`() {
+        val out = call("session_summary", listOf(http("a", code = 404), http("b", code = 200)))
+        assertEquals(1, out["failures"]!!.jsonPrimitive.int())
+        val group = out["failure_groups"]!!.jsonArray.single().jsonObject
+        assertEquals(listOf("a"), group["event_ids"]!!.jsonArray.map { it.jsonPrimitive.content })
+    }
+
+    @Test fun `find_failures collapses the same failure repeated`() {
+        val out = call("find_failures", listOf(http("a", code = 404), http("b", code = 404)))
+        assertEquals(2, out["count"]!!.jsonPrimitive.int())
+        assertEquals(1, out["distinct"]!!.jsonPrimitive.int())
+        val group = out["failures"]!!.jsonArray.single().jsonObject
+        assertEquals(2, group["count"]!!.jsonPrimitive.int())
+        assertEquals(listOf("a", "b"), group["event_ids"]!!.jsonArray.map { it.jsonPrimitive.content })
+    }
+
+    @Test fun `an empty traces array explains itself`() {
+        val out = call("session_summary", listOf(http("a")))
+        assertTrue(out["traces"]!!.jsonArray.isEmpty())
+        // A bare [] reads as "no problems" when it really means the app never set a trace id.
+        assertTrue(out["traces_note"]!!.jsonPrimitive.content.contains("explicitly"))
+    }
 }

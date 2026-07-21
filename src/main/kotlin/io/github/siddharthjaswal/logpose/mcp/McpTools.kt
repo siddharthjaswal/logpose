@@ -2,8 +2,10 @@ package io.github.siddharthjaswal.logpose.mcp
 
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
+import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockRule
+import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import io.github.siddharthjaswal.logpose.ui.KindPresenter
@@ -36,6 +38,19 @@ object McpTools {
     private val json = Json { encodeDefaults = true; explicitNulls = false }
 
     /**
+     * Every kind LogPose ships support for, reported by `session_summary` even at zero. App-defined
+     * kinds are appended after these when present.
+     */
+    private val KNOWN_KINDS = listOf(
+        Envelope.KIND_HTTP,
+        Envelope.KIND_FCM,
+        Envelope.KIND_DB,
+        Envelope.KIND_WORKER,
+        Envelope.KIND_CONFIG,
+        Envelope.KIND_EVENT,
+    )
+
+    /**
      * The write surface, kept as an interface so this file stays free of IntelliJ types and
      * unit-testable. Implemented over `MocksController` by the tool window.
      *
@@ -63,7 +78,14 @@ object McpTools {
                     "full request/response bodies.",
             ) {
                 put("limit", intProp("Max events to return (default 50)."))
-                put("kind", stringProp("Filter by kind: 'http', 'fcm', or an app-defined kind."))
+                put("kind", stringProp(
+                    "Filter by kind: 'http', 'fcm', 'db', 'worker', 'config', 'event', or an " +
+                        "app-defined kind. session_summary's by_kind lists what this capture holds.",
+                ))
+                put("session", intProp(
+                    "Restrict to one app run (see session_summary). Omit for all runs — which " +
+                        "mixes them when the app restarted mid-capture.",
+                ))
                 put("method", stringProp("HTTP method filter, e.g. 'POST'."))
                 put("status_class", intProp("HTTP status class: 2, 3, 4 or 5."))
                 put("contains", stringProp("Substring match on URL, title, or subtitle."))
@@ -101,21 +123,22 @@ object McpTools {
         add(
             tool(
                 "session_summary",
-                "Overview of the current capture: how many events, which endpoints, failure " +
-                    "count, duplicate calls, and the time span covered.",
+                "Overview of the current capture: the app runs it spans, how many events of each " +
+                    "kind, which endpoints, and the ids of every failure and duplicate burst so " +
+                    "you can jump straight to them with get_event.",
             ) {}
         )
         add(
             tool(
-                "find_slow_queries",
-                "Database queries that took longest, slowest first, with the SQL and the table. " +
-                    "Use it to answer 'what is making this screen slow?'. Only queries the app " +
-                    "measured have a duration; unmeasured ones are excluded rather than " +
-                    "reported as instant.",
+                "query_hotspots",
+                "Database statements that ran repeatedly, most-repeated first — the answer to " +
+                    "'what is making this screen slow?'. Repetition (an N+1 from a list adapter, " +
+                    "a query re-run per row) is the failure mode that shows up without " +
+                    "instrumenting execution time, which Room's callback does not provide.",
             ) {
-                put("min_ms", intProp("Only queries at or above this duration (default 0)."))
+                put("min_count", intProp("Only statements run at least this many times (default 2)."))
                 put("table", stringProp("Restrict to one table."))
-                put("limit", intProp("Max queries to return (default 20)."))
+                put("limit", intProp("Max statements to return (default 20)."))
             },
         )
         add(
@@ -217,13 +240,15 @@ object McpTools {
         hostAgeMillis: (String) -> Long,
         includeBodies: Boolean,
         mocks: Mocks? = null,
+        sessions: List<EventStore.Session> = emptyList(),
+        sessionOf: (String) -> Int = { 0 },
     ): JsonElement = when (name) {
-        "list_events" -> listEvents(args, events, hostAgeMillis)
+        "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf)
         "get_event" -> getEvent(args, events, includeBodies)
         "get_trace" -> getTrace(args, events)
         "find_failures" -> findFailures(args, events)
-        "session_summary" -> summary(events)
-        "find_slow_queries" -> slowQueries(args, events)
+        "session_summary" -> summary(events, sessions, sessionOf)
+        "query_hotspots" -> queryHotspots(args, events)
         "worker_history" -> workerHistory(args, events)
         "config_changes" -> configChanges(args, events)
         "list_mocks" -> mocks.orError { listMocks(it) }
@@ -244,6 +269,7 @@ object McpTools {
         args: JsonObject,
         events: List<LogEvent>,
         hostAgeMillis: (String) -> Long,
+        sessionOf: (String) -> Int,
     ): JsonElement {
         val limit = args.int("limit") ?: 50
         val kind = args.str("kind")
@@ -252,8 +278,10 @@ object McpTools {
         val contains = args.str("contains")
         val failedOnly = args.bool("failed_only") ?: false
         val sinceSeconds = args.int("since_seconds")
+        val session = args.int("session")
 
         val matched = events.filter { event ->
+            if (session != null && sessionOf(event.id) != session) return@filter false
             if (kind != null && !event.kind.equals(kind, ignoreCase = true)) return@filter false
             if (sinceSeconds != null && hostAgeMillis(event.id) > sinceSeconds * 1000L) return@filter false
             if (failedOnly && !event.isFailure()) return@filter false
@@ -316,23 +344,125 @@ object McpTools {
     private fun findFailures(args: JsonObject, events: List<LogEvent>): JsonElement {
         val limit = args.int("limit") ?: 20
         val failures = events.filter { it.isFailure() }
+        // The same request failing four times is one problem, not four. Collapsing keeps the
+        // distinct failures visible instead of burying them under repeats of the loudest one.
+        val groups = failures.groupBy { summarize(it) }
         return buildJsonObject {
             put("count", failures.size)
-            put("events", buildJsonArray { failures.takeLast(limit).forEach { add(brief(it)) } })
+            put("distinct", groups.size)
+            put("failures", buildJsonArray {
+                groups.entries.toList().takeLast(limit).forEach { entry ->
+                    val group: List<LogEvent> = entry.value
+                    add(buildJsonObject {
+                        put("summary", entry.key)
+                        put("count", group.size)
+                        put("kind", group.first().kind)
+                        put("first_at", group.minOf { e -> e.timestampMillis })
+                        put("last_at", group.maxOf { e -> e.timestampMillis })
+                        put("event_ids", buildJsonArray { group.forEach { e -> add(e.id) } })
+                    })
+                }
+            })
         }
     }
 
-    private fun summary(events: List<LogEvent>): JsonElement {
+    private fun summary(
+        events: List<LogEvent>,
+        sessions: List<EventStore.Session>,
+        sessionOf: (String) -> Int,
+    ): JsonElement {
         val http = events.filterIsInstance<LogEvent.Http>()
         val dupes = DuplicateDetector.analyze(http.map { it.tx })
         return buildJsonObject {
             put("total_events", events.size)
-            put("by_kind", buildJsonObject {
-                events.groupingBy { it.kind }.eachCount().forEach { (k, v) -> put(k, v) }
+
+            // A capture that spans an app restart holds several runs. Reporting one span over all
+            // of them turns two short bursts into "6 hours of activity" and makes every aggregate
+            // below misleading, so the runs are broken out explicitly.
+            if (sessions.size > 1) {
+                put("note", "This capture spans ${sessions.size} app runs. Totals below cover all " +
+                    "of them — pass session=<index> to list_events to scope to one.")
+            }
+            put("sessions", buildJsonArray {
+                sessions.forEach { s ->
+                    val own = events.filter { sessionOf(it.id) == s.index }
+                    val stamps = own.map { it.timestampMillis }.filter { it > 0 }
+                    add(buildJsonObject {
+                        put("session", s.index)
+                        put("events", own.size)
+                        if (s.pkg.isNotBlank()) put("package", s.pkg)
+                        if (s.libVersion.isNotBlank()) put("lib_version", s.libVersion)
+                        if (stamps.isNotEmpty()) {
+                            put("first_at", stamps.min())
+                            put("last_at", stamps.max())
+                            put("duration_ms", stamps.max() - stamps.min())
+                        }
+                    })
+                }
+                // Events that arrived before any handshake can't be attributed to a run — most
+                // often because capture started mid-session and the hello was already gone.
+                val orphans = events.count { sessionOf(it.id) == 0 }
+                if (orphans > 0) {
+                    add(buildJsonObject {
+                        put("session", 0)
+                        put("events", orphans)
+                        put("note", "Captured before the app announced itself — the launch " +
+                            "handshake predates this capture, so these can't be tied to a run.")
+                    })
+                }
             })
-            put("failures", events.count { it.isFailure() })
-            put("in_flight", events.count { it.isOpen })
+            val counts = events.groupingBy { it.kind }.eachCount()
+            put("by_kind", buildJsonObject {
+                // Enumerate every kind LogPose knows, including zeros: an absent key reads as
+                // "not counted" and leaves a caller unable to tell that apart from "never fired".
+                KNOWN_KINDS.forEach { put(it, counts[it] ?: 0) }
+                counts.filterKeys { it !in KNOWN_KINDS }.forEach { (k, v) -> put(k, v) }
+            })
+
+            val failures = events.filter { it.isFailure() }
+            put("failures", failures.size)
+            if (failures.isNotEmpty()) {
+                // Ids, not just a tally — otherwise finding the failure means paging list_events
+                // by hand. Grouped so repeats of one problem don't crowd out the others.
+                put("failure_groups", buildJsonArray {
+                    failures.groupBy { summarize(it) }.entries.take(25).forEach { entry ->
+                        val group: List<LogEvent> = entry.value
+                        add(buildJsonObject {
+                            put("summary", entry.key)
+                            put("count", group.size)
+                            put("event_ids", buildJsonArray { group.forEach { e -> add(e.id) } })
+                        })
+                    }
+                })
+            }
+
+            val open = events.filter { it.isOpen }
+            put("in_flight", open.size)
+            if (open.isNotEmpty()) {
+                put("in_flight_ids", buildJsonArray { open.take(25).forEach { add(it.id) } })
+            }
+
             put("duplicate_calls", dupes.size)
+            if (dupes.isNotEmpty()) {
+                put("duplicate_groups", buildJsonArray {
+                    dupes.entries.groupBy { it.value.originalId }.entries.take(25)
+                        .forEach { entry ->
+                            val originalId: String = entry.key
+                            val marks = entry.value
+                            val original = events.firstOrNull { it.id == originalId }
+                            add(buildJsonObject {
+                                put("endpoint", original?.let { summarize(it) } ?: "unknown")
+                                put("severity", marks.maxOf { m -> m.value.severity }.name.lowercase())
+                                // The original plus each repeat, so the whole burst is one hop away.
+                                put("count", marks.size + 1)
+                                put("event_ids", buildJsonArray {
+                                    add(originalId)
+                                    marks.forEach { m -> add(m.key) }
+                                })
+                            })
+                        }
+                })
+            }
             put("endpoints", buildJsonArray {
                 http.map { "${it.tx.request.method} ${it.tx.request.path.ifBlank { it.tx.request.url }}" }
                     .groupingBy { it }.eachCount()
@@ -347,52 +477,80 @@ object McpTools {
                 put("first_at", stamps.min())
                 put("last_at", stamps.max())
             }
-            put("traces", buildJsonArray {
-                events.mapNotNull { it.traceId }.distinct().take(25).forEach { add(it) }
-            })
+            val traces = events.mapNotNull { it.traceId }.distinct()
+            put("traces", buildJsonArray { traces.take(25).forEach { add(it) } })
+            if (traces.isEmpty()) {
+                // A bare [] reads like "nothing to worry about" when it actually means the app
+                // never set a trace id — LogPose does no implicit propagation.
+                put("traces_note", "No event carries a trace id. LogPose never infers causality: " +
+                    "trace ids are set explicitly by the app (LogPose.newTraceId()), so get_trace " +
+                    "has nothing to group until the app opts in.")
+            }
         }
     }
 
     // ---- app-runtime kinds ------------------------------------------------------------------
 
-    private fun slowQueries(args: JsonObject, events: List<LogEvent>): JsonElement {
-        val minMs = args.int("min_ms") ?: 0
+    /**
+     * Repeated queries, most-repeated first.
+     *
+     * This replaced a slow-query tool that could never work: Room's `setQueryCallback` fires
+     * *before* execution and carries no duration, so on every real capture it reported nothing
+     * and taught callers to stop asking. Repetition needs no timing, and is the failure mode that
+     * actually hurts here — forty identical selects from a list adapter cost far more than one
+     * 30ms query, and only the former is visible without instrumenting execution.
+     *
+     * Queries are grouped by shape, not by text: bound arguments are already out of the SQL, so
+     * the same statement with different parameters lands in one group, which is precisely the
+     * N+1 signature.
+     */
+    private fun queryHotspots(args: JsonObject, events: List<LogEvent>): JsonElement {
         val table = args.str("table")
+        val minCount = args.int("min_count") ?: 2
         val limit = args.int("limit") ?: 20
 
         val queries = events.filterIsInstance<LogEvent.Db>()
-        // A query with no duration wasn't measured (Room's callback gives no timing). Reporting
-        // it as 0ms would put unmeasured queries at the *fast* end of a slowness ranking, which
-        // is exactly backwards, so they're excluded and counted separately instead.
-        val measured = queries.filter { it.durationMillis != null }
-        val matched = measured.filter { event ->
-            val summary = SqlSummary.of(event.query.sql)
-            val eventTable = event.query.table ?: summary.table
-            if (table != null && !eventTable.equals(table, ignoreCase = true)) return@filter false
-            (event.durationMillis ?: 0) >= minMs
+        val matched = queries.filter { event ->
+            if (table == null) return@filter true
+            val eventTable = event.query.table ?: SqlSummary.of(event.query.sql).table
+            eventTable.equals(table, ignoreCase = true)
         }
+
+        val groups = matched.groupBy { it.query.sql }
+            .filterValues { it.size >= minCount }
+            .entries.sortedByDescending { it.value.size }
 
         return buildJsonObject {
             put("total_queries", queries.size)
-            put("measured", measured.size)
-            if (measured.size < queries.size) {
-                put(
-                    "note",
-                    "${queries.size - measured.size} queries carried no duration and are " +
-                        "excluded — the app didn't measure them (Room's query callback has no timing).",
-                )
+            put("distinct_statements", matched.groupBy { it.query.sql }.size)
+            put("repeated_statements", groups.size)
+            if (groups.isEmpty()) {
+                put("note", "No statement ran ${minCount}+ times" +
+                    (table?.let { " against '$it'" } ?: "") +
+                    ". Repetition is what this reports — LogPose has no query timings unless the " +
+                    "app passes durationMillis itself, since Room's callback carries none.")
             }
-            put("queries", buildJsonArray {
-                matched.sortedByDescending { it.durationMillis ?: 0 }.take(limit).forEach { event ->
-                    val summary = SqlSummary.of(event.query.sql)
+            put("hotspots", buildJsonArray {
+                groups.take(limit).forEach { entry ->
+                    val group: List<LogEvent.Db> = entry.value
+                    val first = group.first()
+                    val summary = SqlSummary.of(first.query.sql)
                     add(buildJsonObject {
-                        put("id", event.id)
-                        put("duration_ms", event.durationMillis ?: 0)
-                        put("operation", event.query.operation ?: summary.operation)
-                        (event.query.table ?: summary.table)?.let { put("table", it) }
-                        event.query.database?.let { put("database", it) }
-                        put("sql", event.query.sql)
-                        event.query.rows?.let { put("rows", it) }
+                        put("count", group.size)
+                        put("operation", first.query.operation ?: summary.operation)
+                        (first.query.table ?: summary.table)?.let { put("table", it) }
+                        first.query.database?.let { put("database", it) }
+                        put("sql", first.query.sql)
+                        put("first_at", group.minOf { e -> e.timestampMillis })
+                        put("last_at", group.maxOf { e -> e.timestampMillis })
+                        // Enough ids to inspect the burst without pasting back hundreds.
+                        put("event_ids", buildJsonArray { group.take(10).forEach { e -> add(e.id) } })
+                        val measured = group.mapNotNull { e -> e.durationMillis }
+                        if (measured.isNotEmpty()) {
+                            put("measured", measured.size)
+                            put("total_ms", measured.sum())
+                            put("max_ms", measured.max())
+                        }
                     })
                 }
             })
