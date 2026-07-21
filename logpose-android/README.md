@@ -21,6 +21,12 @@ it exceeds logcat's limit). It also:
 
 > Not yet published to Maven Central. For now, pull it from [JitPack](https://jitpack.io).
 
+> **Update the IDE plugin too.** `v1.4.0` sends every event wrapped in an envelope, which
+> plugin **1.5.0+** is the first version able to read — on an older plugin the timeline simply
+> stays empty, with no error to tell you why. Plugin **1.6.0+** additionally renders db, worker
+> and config as first-class rows. On plugin 1.6.0 an older library still works: legacy payloads
+> are recognised and wrapped.
+
 ```kotlin
 // settings.gradle.kts
 dependencyResolutionManagement {
@@ -30,9 +36,9 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.3.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.4.0")
     // Release builds: a zero-overhead no-op with the same API (no logcat, no extra deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.3.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.4.0")
 }
 ```
 
@@ -132,9 +138,14 @@ firebaseRemoteConfig.fetchAndActivate().addOnCompleteListener {
 Notes worth knowing:
 
 - Operation and table are parsed from the SQL **by the plugin**, so you don't pass them (set
-  `operation` / `table` yourself only for non-SQL stores). Pass `durationMillis` if you measure
-  it — Room's callback has no timing, and unmeasured queries are excluded from slow-query
-  reports rather than counted as instant.
+  `operation` / `table` yourself only for non-SQL stores).
+- **Room's callback carries no duration** — it fires before the query executes. LogPose therefore
+  reports *repetition* rather than pretending to time anything: `query_hotspots` ranks the
+  statements that ran most often, which is what catches an N+1. Pass `durationMillis` yourself
+  if you measure execution and it will be reported alongside.
+- **DB rows are hidden in the timeline by default** (one click on the **DB** chip shows them) —
+  a busy screen can outproduce every other kind combined. They're always captured and always
+  visible to a coding agent over MCP.
 - A worker event is keyed by `workId`, so a request's states collapse into one updating row.
   Durations derive from `WorkInfo` state changes and therefore include queue time.
 - The first config snapshot in a process is a baseline; only later activations report changes.
@@ -184,10 +195,31 @@ LogPoseConfig(
     enabled = BuildConfig.DEBUG,
     maxBodyBytes = 250_000,     // textual bodies larger than this are truncated
     maxLineChars = 3500,        // payloads larger than this are chunked
-    redactHeaders = setOf("Authorization", "Cookie", "Set-Cookie", "Proxy-Authorization"),
     mocksEnabled = true,        // let the IDE plugin serve mock responses (see below)
 )
 ```
+
+### Redaction
+
+Credential-bearing headers are masked as `██` before anything leaves the device. Two lists do
+it, and both default to something broad:
+
+- **`redactHeaders`** — exact names: `Authorization`, `Proxy-Authorization`, `Cookie`,
+  `Set-Cookie`, `API-Key`, `X-API-Key`, `X-Auth-Token`, `X-Access-Token`, `X-Amz-Security-Token`,
+  `Private-Token`, … (see `LogPoseConfig.DEFAULT_REDACT_HEADERS`).
+- **`redactHeaderPatterns`** — name substrings (`token`, `secret`, `password`, `credential`,
+  `apikey`, `api-key`, `auth`) that catch the vendor headers no exact list can enumerate, like
+  `X-Shopify-Access-Token`.
+
+**Extend, don't replace** — passing your own set discards the defaults:
+
+```kotlin
+LogPoseConfig(redactHeaders = LogPoseConfig.DEFAULT_REDACT_HEADERS + "X-Tenant-Key")
+```
+
+Redaction covers **headers only**. A token or PII in a request/response *body* is captured as-is
+— treat a capture as sensitive, and use `logpose.mcp.exposeBodies = false` to keep bodies away
+from a coding agent while still exposing shape, status and timing.
 
 ## Mock & replay
 

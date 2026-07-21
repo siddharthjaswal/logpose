@@ -6,6 +6,82 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-07-21
+
+Acting on a coding agent's report from a real gandalf capture. Three of its findings were
+things LogPose got quietly wrong rather than features it lacked.
+
+Needs `logpose-android` ≥ 1.5.0 for session boundaries and the wider redaction defaults.
+
+### Security
+- **Redaction defaulted to four header names**, so `API-KEY` came through in full beside a
+  correctly-masked `Authorization`. The default list now covers the credential headers in wide
+  use, and a second list matches on **name substrings** (`token`, `secret`, `apikey`, `auth`, …)
+  to catch the vendor headers no fixed list can enumerate. Exposed as
+  `LogPoseConfig.DEFAULT_REDACT_HEADERS` / `DEFAULT_REDACT_PATTERNS` so custom names *extend*
+  the defaults instead of silently replacing them — the shape of the original bug.
+  Redaction still covers headers only; a secret in a body is captured as-is.
+
+### Added
+- **Sessions.** A capture that spans an app restart is no longer reported as one timeline — two
+  50-second bursts either side of a relaunch used to read as six hours of steady traffic, and
+  every aggregate over it inherited the error. The library now stamps each run with a process id
+  on its `Hello`, the store splits on it, `session_summary` reports per-run spans and counts, and
+  `list_events` takes a `session` filter. Events captured before the app announced itself are
+  reported as unattributed rather than folded into a run.
+
+### Changed
+- **`session_summary` is a jump table, not a scoreboard.** `failures` and `duplicate_calls` were
+  bare counts, so finding what they referred to meant paging `list_events` by hand. Both now
+  carry event ids, grouped so repeats of one problem don't crowd out the rest.
+- **`find_failures` collapses identical failures** with a count and the ids, instead of returning
+  the same request four times.
+- **`by_kind` enumerates every known kind, including zeros.** An absent key read as "not
+  counted" and gave no way to tell that from "never fired".
+- **An empty `traces` array now explains itself** — it means the app never set a trace id, since
+  LogPose never infers causality, and a bare `[]` read as "nothing wrong".
+
+### Removed
+- **`find_slow_queries` is gone**, replaced by **`query_hotspots`**. It promised a ranking it
+  could never produce: Room's `setQueryCallback` fires *before* execution and carries no
+  duration, so on every real capture the tool reported nothing and taught callers to stop asking.
+  `query_hotspots` reports statements that ran repeatedly, most-repeated first — which needs no
+  timing and catches the failure mode that actually hurts, an N+1 running one query per row.
+  Durations are still reported per group when the app passes `durationMillis` itself.
+
+### Changed
+- **DB events no longer appear in the timeline by default.** A Room callback outproduces every
+  other source by an order of magnitude — a real capture held 75 queries against 12 requests —
+  and burying the traffic people opened LogPose to see is the wrong default. Nothing is
+  discarded: the events are captured, one click on the **DB** chip shows them, and they remain
+  fully readable over MCP.
+
+### Notes
+- Worker and config events showing zero in a capture is usually not a broken integration:
+  **Start Capture clears the log buffer**, and both are emitted once at launch. Start the
+  capture before launching the app, or relaunch it after starting. `Hello` already works around
+  this by re-announcing on first intercept; the same treatment for config/worker is not yet done.
+- LogPose still has no true query timings. `query_hotspots` deliberately answers a question the
+  data supports rather than approximating one it doesn't; a delegating
+  `SupportSQLiteOpenHelper.Factory` is the only way to measure real execution and is not shipped.
+
+## [1.6.1] - 2026-07-21
+
+No functional change — a Marketplace listing that had fallen two releases behind the plugin.
+
+### Changed
+- The Marketplace description now covers the **MCP server** (all 12 tools, grouped by read /
+  diagnose / mock), the **db, worker and config** kinds, and **app-defined events**. It
+  previously described only capture, inspect and mock, and still listed the type filter as
+  "NET/FCM". The description is embedded in the plugin descriptor, so correcting it needs a
+  release.
+- README: install now points at the Marketplace rather than a sideloaded zip; the plugin ↔
+  library version pairing is stated up front in Getting started; the filter table documents the
+  TYPE toggle; the MCP tool list includes `find_slow_queries`, `worker_history` and
+  `config_changes`.
+- Documented coordinates were `v1.3.0`, a version that was never tagged and 404s on JitPack —
+  now `v1.4.0`.
+
 ## [1.6.0] - 2026-07-21
 
 Database access, background work, and remote-config flags become first-class kinds — the three
@@ -49,7 +125,7 @@ Needs `logpose-android` ≥ 1.4.0 to emit them.
 The release where LogPose stops being an HTTP tool. Two changes: the timeline is now open to
 any kind of event, and the capture is readable by a coding agent.
 
-Needs `logpose-android` ≥ 1.3.0 for the new capabilities; the plugin still reads the older
+Needs `logpose-android` ≥ 1.4.0 for the new capabilities; the plugin still reads the older
 un-enveloped format, so existing apps keep working while you upgrade.
 
 ### Added
@@ -81,6 +157,15 @@ un-enveloped format, so existing apps keep working while you upgrade.
   `Generic`) exposing id, kind, timing and trace without knowing the kind.
 - `buildSearchableOptions` is disabled — LogPose has no Settings page, so it indexed nothing
   while launching a second headless IDE on every build.
+
+### Breaking (library `v1.4.0`)
+- `TransactionEmitter` → **`EventEmitter`**, now taking the `Envelope` rather than a
+  `Transaction`. Only affects apps using the custom-transport escape hatch
+  (`LogPoseInterceptor(config, emitter = …)`); the ordinary interceptor and FCM call sites
+  compile unchanged.
+- An app on library `v1.4.0` **must** run plugin ≥ 1.5.0. An older plugin can't parse an
+  envelope: HTTP rows are dropped silently and FCM rows decode into near-empty junk. The
+  reverse direction is safe — plugin 1.6.0 still reads pre-envelope libraries.
 
 ## [1.4.8] - 2026-07-20
 

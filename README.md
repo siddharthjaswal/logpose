@@ -210,8 +210,9 @@ and a section carries a type, never a color or a layout, so a theme change can n
 wire break.
 
 See [`Transaction.kt`](src/main/kotlin/io/github/siddharthjaswal/logpose/model/Transaction.kt)
-for the canonical schema. Plugin 1.5.0 still reads the pre-1.3.0 un-enveloped format, so an old
-`logpose-android` keeps working while you upgrade.
+for the canonical schema. Plugin 1.6.0 still reads the pre-envelope format emitted by
+`logpose-android` ≤ 1.2.1, so an old library keeps working while you upgrade. The reverse is
+**not** true: library 1.4.0 needs plugin 1.5.0+.
 
 ## Filtering
 
@@ -219,24 +220,37 @@ Filtering is a one-line, zero-typing bar (all conditions AND-ed):
 
 | Control | Effect |
 |---|---|
-| **Search box** | URL/path contains the text (case-insensitive) |
+| **Search box** | URL/path contains the text (case-insensitive); also matches event titles, kinds and trace ids |
+| **TYPE** NET / FCM / DB / WORK / CONF / APP | multi-select; show only the picked kinds of event |
 | **METHOD** GET / POST / PUT / DELETE | multi-select; show only the picked methods |
 | **STATUS** 2xx / 3xx / 4xx / 5xx | multi-select; show only the picked status classes |
 | **Hide noise** switch | hide muted/noise endpoints entirely (right-click a row → mute to mark it noise) |
 
 ## Getting started
 
-LogPose has two halves and you need both: the **IDE plugin** (reads logcat) and a
-one-line **OkHttp interceptor** in your app (emits the structured transactions the
-plugin reads).
+LogPose has two halves **and you need both** — they ship through different channels and
+version independently:
+
+| Half | What it does | Where it comes from | Version |
+|---|---|---|---|
+| **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.6.0 |
+| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.4.0` |
+
+Install the plugin but not the library and the timeline stays empty — there's nothing being
+emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.4.0` needs
+plugin 1.5.0+, and on an older plugin rows are dropped silently, with no error saying why.
 
 ### 1. Install the plugin
 
-**From a release zip** (until it's on the JetBrains Marketplace):
+**From the JetBrains Marketplace** — Android Studio / IntelliJ → **Settings → Plugins →
+Marketplace**, search **LogPose**, **Install**, restart. A **LogPose** tool window appears at
+the bottom. ([Plugin page](https://plugins.jetbrains.com/plugin/32148-logpose))
+
+**Or from a release zip:**
 
 1. Download `logpose-<version>.zip` from [Releases](https://github.com/siddharthjaswal/logpose/releases).
-2. Android Studio / IntelliJ → **Settings → Plugins → ⚙️ → Install Plugin from Disk…**
-3. Pick the zip and **restart**. A **LogPose** tool window appears at the bottom.
+2. **Settings → Plugins → ⚙️ → Install Plugin from Disk…**
+3. Pick the zip and **restart**.
 
 **Or build it yourself:**
 
@@ -249,7 +263,9 @@ cd logpose
 
 ### 2. Add the interceptor to your app
 
-The interceptor is distributed via [JitPack](https://jitpack.io/#siddharthjaswal/logpose):
+The interceptor is distributed via [JitPack](https://jitpack.io/#siddharthjaswal/logpose).
+**Library `v1.4.0` needs plugin 1.5.0+** (1.6.0+ for db/worker/config rows) — on an older
+plugin the timeline stays empty with no error explaining why:
 
 ```kotlin
 // settings.gradle.kts
@@ -260,10 +276,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.3.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.4.0")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.3.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.4.0")
 }
 ```
 
@@ -318,7 +334,7 @@ class MyMessagingService : FirebaseMessagingService() {
 
 FCM rows show up with an `FCM` tag and a `NOTIF` / `DATA` / `TOKEN` badge; selecting one
 opens the notification, metadata (from, priority, ttl, collapse key), and the data payload
-as a JSON tree. Use the **TYPE** filter (`NET` / `FCM`) to narrow the stream.
+as a JSON tree. Use the **TYPE** filter to narrow the stream to `FCM` alone.
 
 ### 3. Capture
 
@@ -479,8 +495,10 @@ Then ask for things you'd otherwise dig for by hand:
 > *"Using logpose, what failed in the last minute?"*
 > *"Mock /app/v1/orders to return a 500 so I can check the error state."*
 
-**Tools:** `list_events`, `get_event`, `get_trace`, `find_failures`, `session_summary`,
-`list_mocks`, `create_mock`, `set_mock_enabled`, `delete_mock`.
+**Tools (12).** Read the capture: `list_events`, `get_event`, `get_trace`, `find_failures`,
+`session_summary`. Diagnose the other kinds: `query_hotspots`, `worker_history`,
+`config_changes`. Change what the app receives: `list_mocks`, `create_mock`,
+`set_mock_enabled`, `delete_mock`.
 
 It serves on the IDE's own built-in web server (localhost, default port 63342 — check the
 copied command, since a second IDE gets the next free port). A few things worth knowing:
@@ -520,9 +538,9 @@ for the device-side setup.
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.3.0`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.4.0`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.3.0`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.4.0`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).

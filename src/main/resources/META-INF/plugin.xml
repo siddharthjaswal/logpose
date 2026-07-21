@@ -4,13 +4,37 @@
     <vendor email="tosid23@gmail.com" url="https://github.com/siddharthjaswal">Siddharth Jaswal</vendor>
 
     <description><![CDATA[
-        <h2>LogPose — inspect and mock your Android app's network, right in the IDE</h2>
+        <h2>LogPose — see what your Android app is actually doing, right in the IDE</h2>
         <p>
-            LogPose turns your app's traffic into a clean, structured timeline inside a tool
-            window — and lets you <b>mock any response straight back to the device</b>.
-            No proxy, no certificates, no <code>adb logcat | grep</code>: a one-line OkHttp
-            interceptor emits each exchange and the plugin reassembles it.
+            LogPose turns your app's runtime behaviour into a clean, structured timeline inside a
+            tool window — network, pushes, database, background work and feature flags — and lets
+            you <b>mock any response straight back to the device</b>. No proxy, no certificates,
+            no <code>adb logcat | grep</code>: a one-line OkHttp interceptor emits each exchange
+            and the plugin reassembles it.
         </p>
+
+        <h3>Your coding agent can read the running app</h3>
+        <p>
+            LogPose exposes the live capture over <b>MCP</b>, so Claude Code — or any MCP client —
+            answers "what did the app actually request, and why did it fail?" from real traffic
+            instead of a log line you pasted. Click <b>⚡ Connect Coding Agent</b> to copy the
+            command; it serves on the IDE's built-in web server, localhost only, authenticated
+            with a per-project token that also selects which project's capture to read.
+        </p>
+        <ul>
+            <li><b>Read</b> — <code>list_events</code>, <code>get_event</code>,
+                <code>get_trace</code>, <code>find_failures</code>,
+                <code>session_summary</code></li>
+            <li><b>Diagnose</b> — <code>query_hotspots</code>, <code>worker_history</code>,
+                <code>config_changes</code>: "what's making this screen slow?", "did SyncWorker
+                retry?", "what flag changed before this broke?"</li>
+            <li><b>Change what the app receives</b> — <code>create_mock</code>,
+                <code>set_mock_enabled</code>, <code>delete_mock</code>,
+                <code>list_mocks</code>, so an agent can reproduce a state and verify its own
+                fix without you driving the UI</li>
+            <li>Response bodies can be withheld while still exposing request shape, statuses and
+                timings</li>
+        </ul>
 
         <h3>Capture</h3>
         <ul>
@@ -18,14 +42,22 @@
                 never cut off by logcat's ~4&nbsp;KB line limit</li>
             <li><b>Firebase Cloud Messaging</b> pushes and token refreshes appear inline in the
                 same timeline, so you can read push → API call → UI as one story</li>
+            <li><b>Database, background work and remote config</b> — Room queries show their
+                operation and table, a WorkManager request occupies one row that updates as it
+                runs and badges its retries, and a remote-config activation reports exactly which
+                flags changed with before → after values</li>
+            <li><b>Your own events</b> — <code>LogPose.event("UserDao.insert") { … }</code> puts
+                any subsystem on the same timeline; events carry their own presentation, so they
+                render with no plugin update</li>
             <li>Duplicate detection flags repeated calls and likely double-submits</li>
         </ul>
 
         <h3>Inspect</h3>
         <ul>
             <li>Collapsible JSON trees plus a real IDE JSON editor (folding, line numbers) in Raw mode</li>
-            <li>One-click filters: URL search, NET/FCM type, Method &amp; Status toggles,
-                hide-noise, duplicates-only</li>
+            <li>One-click filters: URL search, type toggles
+                (NET / FCM / DB / WORK / CONF / APP), Method &amp; Status toggles, hide-noise,
+                duplicates-only</li>
             <li>Copy as cURL, copy JSON or a response body, find within a body</li>
             <li>Multi-select rows and copy the call sequence as plain text — ideal for bug reports</li>
             <li>First-class multipart upload (S3 / GCS) metadata instead of raw bytes</li>
@@ -49,12 +81,25 @@
         <p>
             Requires the <code>logpose-android</code> interceptor in your debug/staging build (a
             zero-overhead no-op ships for release). Mocking needs <code>logpose-android</code>
-            1.2.1+. Works in IntelliJ IDEA and Android Studio, light and dark.
+            1.2.1+; database, worker, config and app events need 1.4.0+. Works in IntelliJ IDEA
+            and Android Studio, light and dark.
         </p>
     ]]></description>
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Sessions</b> — a capture that spans an app restart is no longer reported as one
+                timeline. Each run is reported separately, with its own span and counts, and
+                <code>list_events</code> can be scoped to one run. Needs
+                <code>logpose-android</code> &ge; 1.5.0.</li>
+            <li><b>Wider redaction by default</b> — credential headers beyond
+                <code>Authorization</code> (<code>API-KEY</code>, <code>X-Auth-Token</code>,
+                vendor tokens matched by name) are masked before anything leaves the device.
+                Update <code>logpose-android</code> to pick this up.</li>
+            <li><b>Summaries you can act on</b> — <code>session_summary</code> now returns the ids
+                behind every failure and duplicate burst instead of bare counts, identical
+                failures collapse into one entry with a count, and kinds that never fired report
+                zero rather than going missing.</li>
             <li><b>Database, background work and remote config on the timeline</b> — the three
                 things every Android app has, now first-class alongside HTTP and FCM. Room
                 queries show their operation and table (<code>users · SELECT id FROM users</code>),
@@ -74,7 +119,7 @@
                 <code>LogPose.event("UserDao.insert") { … }</code> puts your own subsystems on the
                 same timeline: database queries, background jobs, analytics, feature flags,
                 navigation. Events carry their own presentation, so they render with no plugin
-                update. Needs <code>logpose-android</code> &ge; 1.3.0; older versions keep working
+                update. Needs <code>logpose-android</code> &ge; 1.4.0; older versions keep working
                 unchanged.</li>
             <li><b>New look</b> — a redesigned brand mark (a prompt that points north), native
                 IDE context menus, and a roomier, better-organised mock editor.</li>
