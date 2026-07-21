@@ -11,8 +11,12 @@ package io.github.siddharthjaswal.logpose
  *                       truncated (and flagged `truncated = true`).
  * @property maxLineChars max characters per logcat line before the payload is split
  *                       into chunks (~3500 stays safely under logcat's limit).
- * @property redactHeaders header names whose values are replaced with "██" before
- *                       emission (case-insensitive).
+ * @property redactHeaders exact header names whose values are replaced with "██" before
+ *                       emission (case-insensitive). Extend rather than replace:
+ *                       `redactHeaders = LogPoseConfig.DEFAULT_REDACT_HEADERS + "X-Tenant-Key"`.
+ * @property redactHeaderPatterns substrings that redact any header whose *name* contains one.
+ *                       Catches the vendor-specific names an exact list can't enumerate
+ *                       (`X-Shopify-Access-Token`, `X-Goog-Api-Key`).
  */
 data class LogPoseConfig(
     val tag: String = "LogPose",
@@ -21,12 +25,8 @@ data class LogPoseConfig(
     val maxLineChars: Int = 3500,
     /** Emit a "pending" event when a request starts (lets the IDE show it live). */
     val emitPending: Boolean = true,
-    val redactHeaders: Set<String> = setOf(
-        "Authorization",
-        "Cookie",
-        "Set-Cookie",
-        "Proxy-Authorization",
-    ),
+    val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
+    val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
     /**
      * Allow the LogPose IDE plugin to serve mock responses for matching requests
      * (see `mock/MockRegistry`). Rules only ever arrive via adb from the developer's
@@ -41,4 +41,54 @@ data class LogPoseConfig(
     val dbEnabled: Boolean = true,
     /** Emit background-work events (see `LogPose.logWorker`). */
     val workersEnabled: Boolean = true,
-)
+) {
+    companion object {
+        /**
+         * Credential-bearing headers in wide use. Deliberately broad: a capture gets pasted into
+         * tickets and handed to coding agents, so a header wrongly redacted costs a re-run while
+         * a header wrongly emitted costs a rotated secret.
+         */
+        val DEFAULT_REDACT_HEADERS: Set<String> = setOf(
+            "Authorization",
+            "Proxy-Authorization",
+            "Authentication",
+            "Cookie",
+            "Cookie2",
+            "Set-Cookie",
+            "Set-Cookie2",
+            "API-Key",
+            "X-API-Key",
+            "X-API-Token",
+            "X-Auth-Token",
+            "X-Auth",
+            "X-Access-Token",
+            "X-Refresh-Token",
+            "X-CSRF-Token",
+            "X-XSRF-Token",
+            "X-Amz-Security-Token",
+            "X-Goog-Api-Key",
+            "Private-Token",
+            "Token",
+            "Access-Token",
+            "Refresh-Token",
+            "Id-Token",
+        )
+
+        /**
+         * Name substrings that redact whatever header carries them. Every vendor invents its own
+         * credential header, so an exact list will always trail reality; these patterns cover the
+         * shapes those names actually take.
+         */
+        val DEFAULT_REDACT_PATTERNS: Set<String> = setOf(
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "credential",
+            "apikey",
+            "api-key",
+            "api_key",
+            "auth",
+        )
+    }
+}

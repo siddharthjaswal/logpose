@@ -74,10 +74,13 @@ internal object BodyCapture {
 
     fun headersToMap(headers: Headers, config: LogPoseConfig): Map<String, String> {
         val redact = config.redactHeaders.map { it.lowercase() }.toHashSet()
+        val patterns = config.redactHeaderPatterns.map { it.lowercase() }
         val out = LinkedHashMap<String, String>(headers.size)
         for (i in 0 until headers.size) {
             val name = headers.name(i)
-            out[name] = if (name.lowercase() in redact) "██" else headers.value(i)
+            val lower = name.lowercase()
+            val secret = lower in redact || patterns.any { it in lower }
+            out[name] = if (secret) "██" else headers.value(i)
         }
         return out
     }

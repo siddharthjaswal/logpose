@@ -19,16 +19,28 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal object LogPoseRuntime {
     /** Kept in sync with the published library version (used by the IDE's handshake). */
-    const val VERSION = "1.3.0"
+    const val VERSION = "1.5.0"
 
     @Volatile var packageName: String? = null
+
+    /**
+     * Identifies this app run. Generated once per process, so every hello from the same launch
+     * carries the same value and the IDE can tell "the interceptor re-announced itself" from
+     * "the app restarted" — the boundary it draws sessions on.
+     */
+    private val processId: String = java.util.UUID.randomUUID().toString().take(8)
 
     private val helloFromIntercept = AtomicBoolean(false)
 
     fun emitHello(config: LogPoseConfig) {
         val pkg = packageName ?: return
         LogcatEmitter(config).emit(
-            Hello(pkg = pkg, libVersion = VERSION, mockRevision = MockRegistry.revision)
+            Hello(
+                pkg = pkg,
+                libVersion = VERSION,
+                mockRevision = MockRegistry.revision,
+                processId = processId,
+            )
         )
     }
 

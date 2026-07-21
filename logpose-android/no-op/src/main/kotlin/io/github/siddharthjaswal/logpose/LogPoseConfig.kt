@@ -13,6 +13,7 @@ package io.github.siddharthjaswal.logpose
  * @property maxLineChars unused.
  * @property emitPending  unused.
  * @property redactHeaders unused.
+ * @property redactHeaderPatterns unused.
  * @property mocksEnabled unused — the no-op never serves mocks regardless.
  */
 data class LogPoseConfig(
@@ -21,13 +22,54 @@ data class LogPoseConfig(
     val maxBodyBytes: Long = 250_000L,
     val maxLineChars: Int = 3500,
     val emitPending: Boolean = true,
-    val redactHeaders: Set<String> = setOf(
-        "Authorization",
-        "Cookie",
-        "Set-Cookie",
-        "Proxy-Authorization",
-    ),
+    val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
+    val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
     val mocksEnabled: Boolean = true,
     val dbEnabled: Boolean = true,
     val workersEnabled: Boolean = true,
-)
+) {
+    /**
+     * Mirrors the real config's constants so that
+     * `redactHeaders = LogPoseConfig.DEFAULT_REDACT_HEADERS + "X-Tenant-Key"` compiles in release
+     * builds too. Nothing here is ever consulted — the no-op captures nothing to redact.
+     */
+    companion object {
+        val DEFAULT_REDACT_HEADERS: Set<String> = setOf(
+            "Authorization",
+            "Proxy-Authorization",
+            "Authentication",
+            "Cookie",
+            "Cookie2",
+            "Set-Cookie",
+            "Set-Cookie2",
+            "API-Key",
+            "X-API-Key",
+            "X-API-Token",
+            "X-Auth-Token",
+            "X-Auth",
+            "X-Access-Token",
+            "X-Refresh-Token",
+            "X-CSRF-Token",
+            "X-XSRF-Token",
+            "X-Amz-Security-Token",
+            "X-Goog-Api-Key",
+            "Private-Token",
+            "Token",
+            "Access-Token",
+            "Refresh-Token",
+            "Id-Token",
+        )
+
+        val DEFAULT_REDACT_PATTERNS: Set<String> = setOf(
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "credential",
+            "apikey",
+            "api-key",
+            "api_key",
+            "auth",
+        )
+    }
+}

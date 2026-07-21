@@ -346,6 +346,13 @@ data class Hello(
     val pkg: String,
     val libVersion: String,
     val mockRevision: Int = 0,
+    /**
+     * Random per process. Two hellos carrying the same id are the same app run (the provider
+     * emits one at startup and the interceptor re-emits on its first call); a different id means
+     * the process restarted, which is what lets the IDE draw a session boundary instead of
+     * running two app launches together into one timeline.
+     */
+    val processId: String = "",
 )
 
 /** Emitted after a rule set applies; confirms sync and carries per-rule serve counts. */
