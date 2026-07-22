@@ -6,12 +6,17 @@ format may still change.
 
 ## [Unreleased]
 
+### Library
+- **`logpose-android` 1.5.1** — a clean republish of 1.5.0 under a fresh tag. 1.5.0's JitPack
+  build got wedged by a tag that was force-recreated during release; the code is identical.
+  Use `v1.5.1`.
+
 ## [1.7.0] - 2026-07-21
 
 Acting on a coding agent's report from a real gandalf capture. Three of its findings were
 things LogPose got quietly wrong rather than features it lacked.
 
-Needs `logpose-android` ≥ 1.5.0 for session boundaries and the wider redaction defaults.
+Needs `logpose-android` ≥ 1.5.1 for session boundaries and the wider redaction defaults.
 
 ### Security
 - **Redaction defaulted to four header names**, so `API-KEY` came through in full beside a

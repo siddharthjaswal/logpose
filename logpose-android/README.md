@@ -21,11 +21,12 @@ it exceeds logcat's limit). It also:
 
 > Not yet published to Maven Central. For now, pull it from [JitPack](https://jitpack.io).
 
-> **Update the IDE plugin too.** `v1.4.0` sends every event wrapped in an envelope, which
+> **Update the IDE plugin too.** `v1.5.x` sends every event wrapped in an envelope, which
 > plugin **1.5.0+** is the first version able to read — on an older plugin the timeline simply
 > stays empty, with no error to tell you why. Plugin **1.6.0+** additionally renders db, worker
-> and config as first-class rows. On plugin 1.6.0 an older library still works: legacy payloads
-> are recognised and wrapped.
+> and config as first-class rows, and **1.7.0+** splits a capture that spans an app restart into
+> separate sessions. On a newer plugin an older library still works: legacy payloads are
+> recognised and wrapped.
 
 ```kotlin
 // settings.gradle.kts
@@ -36,9 +37,9 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.4.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.5.1")
     // Release builds: a zero-overhead no-op with the same API (no logcat, no extra deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.4.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.5.1")
 }
 ```
 

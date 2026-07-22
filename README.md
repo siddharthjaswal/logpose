@@ -276,10 +276,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.4.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.5.1")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.4.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.5.1")
 }
 ```
 
@@ -538,9 +538,9 @@ for the device-side setup.
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.4.0`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.5.1`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.4.0`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.5.1`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).
