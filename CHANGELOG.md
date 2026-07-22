@@ -6,6 +6,15 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-07-22
+
+Docs only — no behaviour change.
+
+### Changed
+- The Marketplace description and READMEs now **lead with example prompts** for the coding
+  agent ("what failed in the last 2 minutes?", "mock `/v1/orders` to return a 500…") instead of
+  opening with the tool list. Showing what you can ask lands faster than describing the transport.
+
 ### Library
 - **`logpose-android` 1.5.1** — a clean republish of 1.5.0 under a fresh tag. 1.5.0's JitPack
   build got wedged by a tag that was force-recreated during release; the code is identical.

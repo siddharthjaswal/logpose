@@ -480,7 +480,28 @@ exactly and your call sites compile unchanged. Requires `logpose-android` ≥ 1.
 ## Connect a coding agent
 
 An agent working in your repo can read the code but has no idea what the *running* app is
-doing. LogPose fills that gap over MCP.
+doing. LogPose closes that gap over MCP: it hands the live capture to Claude Code (or any MCP
+client), so you can just *ask*.
+
+**Understand what the app did:**
+
+> *"Using logpose, summarize app startup — which workers ran, and how many times each?"*
+> *"Using logpose, what failed in the last 2 minutes? Group identical failures."*
+> *"Using logpose, what DB queries run most on this screen — anything that looks like an N+1?"*
+> *"Using logpose, I just tapped Checkout — show the push, API calls and DB writes that followed."*
+
+**Change what it receives next** — reproduce a state without touching the backend or rebuilding:
+
+> *"Using logpose, mock `/v1/orders` to return a 500 so I can see the error UI."*
+> *"Using logpose, make `/v1/orders` return an empty list so I can check the empty screen."*
+> *"Using logpose, take the real `/v1/profile` response but flip `is_premium` to true."*
+> *"Using logpose, add a 5s delay to `/v1/feed`, then remove it."*
+> *"Using logpose, make `/v1/orders` time out so I can test the retry flow."*
+
+That last group is the real trick: read the actual 404, serve a 200, watch the screen recover —
+all from the chat, while the app keeps running.
+
+### Setup
 
 In the LogPose tool window, click **⚡ Connect Coding Agent** — it copies a ready-to-run
 command:
@@ -489,11 +510,6 @@ command:
 claude mcp add --transport http logpose http://localhost:63342/api/logpose/mcp \
   --header "X-LogPose-Token: <your project token>"
 ```
-
-Then ask for things you'd otherwise dig for by hand:
-
-> *"Using logpose, what failed in the last minute?"*
-> *"Mock /app/v1/orders to return a 500 so I can check the error state."*
 
 **Tools (12).** Read the capture: `list_events`, `get_event`, `get_trace`, `find_failures`,
 `session_summary`. Diagnose the other kinds: `query_hotspots`, `worker_history`,

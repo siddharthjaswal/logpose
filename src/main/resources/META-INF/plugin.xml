@@ -16,10 +16,12 @@
         <h3>Your coding agent can read the running app</h3>
         <p>
             LogPose exposes the live capture over <b>MCP</b>, so Claude Code — or any MCP client —
-            answers "what did the app actually request, and why did it fail?" from real traffic
-            instead of a log line you pasted. Click <b>⚡ Connect Coding Agent</b> to copy the
-            command; it serves on the IDE's built-in web server, localhost only, authenticated
-            with a per-project token that also selects which project's capture to read.
+            reads the running app and you just ask: <i>"what failed in the last 2 minutes?"</i>,
+            <i>"which worker ran 20 times on startup?"</i>, or <i>"mock /v1/orders to return a 500
+            so I can see the error UI."</i> Real traffic, not a log line you pasted. Click
+            <b>⚡ Connect Coding Agent</b> to copy the command; it serves on the IDE's built-in web
+            server, localhost only, authenticated with a per-project token that also selects which
+            project's capture to read.
         </p>
         <ul>
             <li><b>Read</b> — <code>list_events</code>, <code>get_event</code>,
@@ -88,6 +90,9 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>1.7.1</b> — the coding-agent docs now lead with example prompts (<i>"what failed
+                in the last 2 minutes?"</i>, <i>"mock /v1/orders to return a 500"</i>) so it's
+                obvious what to ask. No behaviour change.</li>
             <li><b>Sessions</b> — a capture that spans an app restart is no longer reported as one
                 timeline. Each run is reported separately, with its own span and counts, and
                 <code>list_events</code> can be scoped to one run. Needs
