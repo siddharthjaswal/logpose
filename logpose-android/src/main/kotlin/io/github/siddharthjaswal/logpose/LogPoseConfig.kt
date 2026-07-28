@@ -28,6 +28,12 @@ data class LogPoseConfig(
     val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
     val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
     /**
+     * Decoders that turn otherwise-unreadable bodies (encrypted, custom binary) into text for the
+     * inspector. Consulted in order; the first non-null result wins, and an empty list keeps the
+     * current raw-body behaviour. See [BodyDecoder].
+     */
+    val bodyDecoders: List<BodyDecoder> = emptyList(),
+    /**
      * Allow the LogPose IDE plugin to serve mock responses for matching requests
      * (see `mock/MockRegistry`). Rules only ever arrive via adb from the developer's
      * machine; set to false to make this build ignore them entirely.

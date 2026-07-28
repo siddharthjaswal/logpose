@@ -24,6 +24,7 @@ data class LogPoseConfig(
     val emitPending: Boolean = true,
     val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
     val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
+    val bodyDecoders: List<BodyDecoder> = emptyList(),
     val mocksEnabled: Boolean = true,
     val dbEnabled: Boolean = true,
     val workersEnabled: Boolean = true,

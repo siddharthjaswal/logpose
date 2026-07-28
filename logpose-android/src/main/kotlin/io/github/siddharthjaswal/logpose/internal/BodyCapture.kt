@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose.internal
 
+import io.github.siddharthjaswal.logpose.BodyDecoder
 import io.github.siddharthjaswal.logpose.LogPoseConfig
 import io.github.siddharthjaswal.logpose.wire.Body
 import io.github.siddharthjaswal.logpose.wire.MultipartPart
@@ -42,6 +43,10 @@ internal object BodyCapture {
 
         val buffer = Buffer().also { body.writeTo(it) }
         val size = buffer.size
+        // Decoders get first crack at the raw bytes — including bodies that look binary, since
+        // ciphertext usually does. A hit short-circuits the text/binary heuristics below.
+        decodeFirst(config.bodyDecoders, buffer) { d, bytes -> d.decodeRequest(request, bytes) }
+            ?.let { return decodedBody(contentType, size, config, it) }
         if (!isProbablyText(contentType, buffer)) {
             return Body(contentType, size, text = "(binary body, $size bytes)")
         }
@@ -65,6 +70,8 @@ internal object BodyCapture {
 
         val bufferedBytes = peek.size
         val reportedSize = if (declaredLength >= 0) declaredLength else bufferedBytes
+        decodeFirst(config.bodyDecoders, peek) { d, bytes -> d.decodeResponse(response, bytes) }
+            ?.let { return decodedBody(contentType, reportedSize, config, it, bufferedBytes > config.maxBodyBytes) }
         if (!isProbablyText(contentType, peek)) {
             return Body(contentType, reportedSize, text = "(binary body, $reportedSize bytes)")
         }
@@ -97,6 +104,38 @@ internal object BodyCapture {
         val text = readString(take, charset)
         val truncated = alreadyTruncated || available > config.maxBodyBytes || reportedSize > config.maxBodyBytes
         return Body(contentType, reportedSize, text, truncated = truncated)
+    }
+
+    /**
+     * Runs [decoders] against a clone of [raw] (leaving the original readable) and returns the
+     * first non-null result. A decoder that throws is treated as "not mine" — one bad decoder must
+     * not take down capture.
+     */
+    private inline fun decodeFirst(
+        decoders: List<BodyDecoder>,
+        raw: Buffer,
+        pick: (BodyDecoder, ByteArray) -> String?,
+    ): String? {
+        if (decoders.isEmpty()) return null
+        val bytes = raw.clone().readByteArray()
+        for (decoder in decoders) {
+            val decoded = runCatching { pick(decoder, bytes) }.getOrNull()
+            if (decoded != null) return decoded
+        }
+        return null
+    }
+
+    private fun decodedBody(
+        contentType: String?,
+        reportedSize: Long,
+        config: LogPoseConfig,
+        decoded: String,
+        alreadyTruncated: Boolean = false,
+    ): Body {
+        val max = config.maxBodyBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val overflow = decoded.length > max
+        val text = if (overflow) decoded.substring(0, max) else decoded
+        return Body(contentType, reportedSize, text, truncated = alreadyTruncated || overflow, decoded = true)
     }
 
     private fun describePart(part: MultipartBody.Part): MultipartPart {

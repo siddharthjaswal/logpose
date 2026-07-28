@@ -6,6 +6,15 @@ format may still change.
 
 ## [Unreleased]
 
+### Library
+- **Custom body decoding** ([#4](https://github.com/siddharthjaswal/logpose/issues/4)) — register
+  a `BodyDecoder` on `LogPoseConfig.bodyDecoders` to turn encrypted or custom-binary payloads into
+  readable text for the inspector. Decoders are tried in order (first non-null wins), fall back to
+  the raw body, and a throwing decoder is skipped rather than fatal. Decoded bodies are flagged
+  `decoded` on the wire. Mirrored in the no-op; ships as `logpose-android` 1.5.2.
+  - *Wire:* `Body` gains a `decoded` flag (plugin + library, in lockstep). A future plugin release
+    will show a "decoded" marker; older plugins ignore the field.
+
 ## [1.7.1] - 2026-07-22
 
 Docs only — no behaviour change.

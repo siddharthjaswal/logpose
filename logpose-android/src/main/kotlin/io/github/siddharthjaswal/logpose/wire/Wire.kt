@@ -221,6 +221,9 @@ data class Body(
     val sizeBytes: Long = 0,
     val text: String? = null,
     val truncated: Boolean = false,
+    /** True when [text] was produced by a [io.github.siddharthjaswal.logpose.BodyDecoder]
+     *  (e.g. a decrypted payload) rather than read straight off the wire. */
+    val decoded: Boolean = false,
     val parts: List<MultipartPart>? = null,
 )
 
