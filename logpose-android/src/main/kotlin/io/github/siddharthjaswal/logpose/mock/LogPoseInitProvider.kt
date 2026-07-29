@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal object LogPoseRuntime {
     /** Kept in sync with the published library version (used by the IDE's handshake). */
-    const val VERSION = "1.5.1"
+    const val VERSION = "1.5.2"
 
     @Volatile var packageName: String? = null
 
