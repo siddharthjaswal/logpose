@@ -222,6 +222,42 @@ Redaction covers **headers only**. A token or PII in a request/response *body* i
 — treat a capture as sensitive, and use `logpose.mcp.exposeBodies = false` to keep bodies away
 from a coding agent while still exposing shape, status and timing.
 
+### Custom body decoding
+
+If your backend sends **encrypted or custom-binary bodies**, LogPose shows ciphertext by default.
+Register a `BodyDecoder` to turn it into readable text for the inspector — the same idea as
+Chucker's decoder hook:
+
+```kotlin
+class EncryptedJsonDecoder(
+    private val decrypt: (ByteArray) -> ByteArray,
+) : BodyDecoder {
+    override fun decodeResponse(response: Response, body: ByteArray): String? {
+        // Scope it: only touch the endpoints that are actually encrypted.
+        if (!response.request.url.encodedPath.startsWith("/secure/")) return null
+        return runCatching { decrypt(body).toString(Charsets.UTF_8) }.getOrNull()
+    }
+}
+
+LogPoseInterceptor(
+    LogPoseConfig(
+        enabled = BuildConfig.DEBUG,
+        bodyDecoders = listOf(EncryptedJsonDecoder(::decryptAes)),
+    )
+)
+```
+
+- Both `decodeRequest` / `decodeResponse` default to `null` — override only the side you need.
+- Decoders are tried in order; the **first non-null** result wins. `null` means "not mine", so
+  LogPose falls back to the next decoder and finally the raw body — a decoder can't break the
+  calls it doesn't handle, and a decoder that throws is skipped rather than fatal.
+- Decoded bodies are flagged `decoded` on the wire, so the inspector can mark them as transformed.
+- `body` is the raw bytes as captured (already gunzipped for responses).
+
+Same security note as above, doubly: a decoded body is **plaintext leaving the device**. Keep the
+decoder and its keys on the debug path — the release `no-op` ships no decoder, so production is
+untouched by construction.
+
 ## Mock & replay
 
 The plugin can serve mock responses for matching requests — reproduce a bug state without

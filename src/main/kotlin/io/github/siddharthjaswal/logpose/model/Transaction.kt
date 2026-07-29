@@ -214,6 +214,9 @@ data class Body(
     val sizeBytes: Long = 0,
     val text: String? = null,
     val truncated: Boolean = false,
+    /** True when [text] was decoded on-device (e.g. a decrypted payload) rather than read
+     *  straight off the wire — the UI can mark it so it isn't mistaken for cleartext. */
+    val decoded: Boolean = false,
     val parts: List<MultipartPart>? = null,
 )
 
