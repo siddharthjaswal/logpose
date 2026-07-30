@@ -6,6 +6,8 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-07-30
+
 ### Worker events: tell replays from live runs
 - WorkManager replays its persisted store to a freshly-attached observer, so terminal work from
   previous runs used to land on the timeline stamped "now" — indistinguishable from work that ran
@@ -13,8 +15,12 @@ format may still change.
   most were history. Such events are now flagged `replayedAtAttach`: a workId first seen already
   terminal ran before capture was watching. The row shows a muted **replayed** badge, and
   `worker_history` splits `ran_this_session` from `replayed_at_attach`.
-- *Requires* `logpose-android` with the flag (next library release) to populate it; the muted
-  badge is a plugin change. Wire: `WorkerEvent.replayedAtAttach` (plugin + library, in lockstep).
+- Needs `logpose-android` ≥ 1.5.3 to populate the flag; the muted badge and the `worker_history`
+  split are the plugin side. Wire: `WorkerEvent.replayedAtAttach` (plugin + library, in lockstep).
+
+### Library — logpose-android 1.5.3 - 2026-07-30
+- Emits `replayedAtAttach` on worker events (see above). No other change; a straight companion to
+  the plugin's 1.7.2 badge.
 
 ### Library — logpose-android 1.5.2 - 2026-07-22
 - **Custom body decoding** ([#4](https://github.com/siddharthjaswal/logpose/issues/4)) — register

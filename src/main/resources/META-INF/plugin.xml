@@ -90,6 +90,11 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Replayed workers</b> — WorkManager replays finished work from earlier runs to a
+                fresh observer, which used to look like it ran again this session (why a worker
+                could read as "20 runs on startup"). Those are now marked with a muted
+                <b>replayed</b> badge, and <code>worker_history</code> splits "ran this session"
+                from replays. Needs <code>logpose-android</code> &ge; 1.5.3.</li>
             <li><b>1.7.1</b> — the coding-agent docs now lead with example prompts (<i>"what failed
                 in the last 2 minutes?"</i>, <i>"mock /v1/orders to return a 500"</i>) so it's
                 obvious what to ask. No behaviour change.</li>
