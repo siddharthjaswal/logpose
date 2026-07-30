@@ -99,6 +99,9 @@ object KindPresenter {
             add(Badge(work.state.uppercase(), workerTone(work.state)))
             // Attempt 1 is just "it ran"; anything above is a retry and worth flagging.
             if (work.runAttempt > 1) add(Badge("attempt ${work.runAttempt}", Badge.TONE_WARN))
+            // Replayed history from WorkManager's store on attach — not a run this session. Muted
+            // so it reads as "prior", and it's the answer to "why did this worker 'run' 20 times?".
+            if (work.replayedAtAttach) add(Badge("replayed", Badge.TONE_MUTED))
         },
         sections = buildList {
             if (work.inputData.isNotEmpty()) {

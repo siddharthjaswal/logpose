@@ -231,8 +231,9 @@ class McpToolsTest {
         attempt: Int = 1,
         at: Long = 1_000,
         durationMillis: Long? = 500,
+        replayedAtAttach: Boolean = false,
     ): LogEvent.Worker {
-        val work = WorkerEvent(worker = name, state = state, workId = id, runAttempt = attempt)
+        val work = WorkerEvent(worker = name, state = state, workId = id, runAttempt = attempt, replayedAtAttach = replayedAtAttach)
         return LogEvent.Worker(
             work,
             Envelope(
@@ -326,6 +327,22 @@ class McpToolsTest {
 
         val failed = call("worker_history", events, buildJsonObject { put("state", "failed") })
         assertEquals(1, failed["count"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `worker_history splits replayed-at-attach from work that ran this session`() {
+        // The FetchDeliveryRecipientsWorker case: WorkManager replays terminal history on attach,
+        // so "ran 20 times" is really 1 run + 19 replays. The tool has to keep them apart.
+        val events = listOf(
+            worker("live", state = WorkerEvent.STATE_SUCCEEDED),
+            worker("old1", state = WorkerEvent.STATE_SUCCEEDED, replayedAtAttach = true),
+            worker("old2", state = WorkerEvent.STATE_SUCCEEDED, replayedAtAttach = true),
+        )
+        val out = call("worker_history", events)
+        assertEquals(3, out["count"]!!.jsonPrimitive.int())
+        assertEquals(1, out["ran_this_session"]!!.jsonPrimitive.int())
+        assertEquals(2, out["replayed_at_attach"]!!.jsonPrimitive.int())
+        val flagged = out["workers"]!!.jsonArray.count { it.jsonObject["replayed_at_attach"] != null }
+        assertEquals(2, flagged)
     }
 
     @Test fun `worker durations say what they include`() {

@@ -91,6 +91,12 @@ data class WorkerEvent(
     val inputData: Map<String, String> = emptyMap(),
     val outputData: Map<String, String> = emptyMap(),
     val error: String? = null,
+    /**
+     * True when this event was replayed from WorkManager's persisted store as the observer
+     * attached — i.e. the work ran before capture was watching — rather than observed live this
+     * session. Lets the UI mark it and keeps it out of "ran this session" counts.
+     */
+    val replayedAtAttach: Boolean = false,
 ) {
     companion object {
         const val STATE_ENQUEUED = "enqueued"
