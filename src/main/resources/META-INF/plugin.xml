@@ -90,6 +90,8 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Quick mock diff</b> — a diff button on each mock row opens the original captured
+                response beside what the rule serves, without opening the editor first.</li>
             <li><b>Replayed workers</b> — WorkManager replays finished work from earlier runs to a
                 fresh observer, which used to look like it ran again this session (why a worker
                 could read as "20 runs on startup"). Those are now marked with a muted

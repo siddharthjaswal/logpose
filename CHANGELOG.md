@@ -6,6 +6,12 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-07-30
+
+### Added
+- **Quick-diff button on each mock row** — original captured response vs what the rule serves,
+  in the native side-by-side diff, without opening the editor. Shown only when the rule has a body.
+
 ## [1.7.2] - 2026-07-30
 
 ### Worker events: tell replays from live runs

@@ -33,6 +33,7 @@ class MocksBar(
     private val onDelete: (String) -> Unit,
     private val onToggle: (String, Boolean) -> Unit,
     private val onDisableAll: () -> Unit,
+    private val onDiff: (MockRule) -> Unit,
 ) : JPanel(BorderLayout()) {
 
     private val rowsHost = JPanel().apply {
@@ -125,6 +126,12 @@ class MocksBar(
                 horizontalAlignment = SwingConstants.RIGHT
             })
             add(Box.createHorizontalStrut(JBUI.scale(10)))
+            // Quick diff: original captured response vs what this rule serves, without opening the
+            // editor. Only meaningful when the rule actually has a body to compare.
+            if (!rule.body.isNullOrBlank()) {
+                add(iconLabel(AllIcons.Actions.Diff, "Diff vs original") { onDiff(rule) })
+                add(Box.createHorizontalStrut(JBUI.scale(6)))
+            }
             add(iconLabel(AllIcons.Actions.Edit, "Edit") { onEdit(rule) })
             add(Box.createHorizontalStrut(JBUI.scale(6)))
             add(iconLabel(AllIcons.General.Remove, "Delete") { onDelete(rule.id) })

@@ -40,6 +40,7 @@ import io.github.siddharthjaswal.logpose.ui.FilterBar
 import io.github.siddharthjaswal.logpose.ui.GenericDetailView
 import io.github.siddharthjaswal.logpose.ui.KindPresenter
 import io.github.siddharthjaswal.logpose.ui.isPending
+import io.github.siddharthjaswal.logpose.ui.MockDiff
 import io.github.siddharthjaswal.logpose.ui.MockRuleDialog
 import io.github.siddharthjaswal.logpose.ui.MocksBar
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
@@ -111,6 +112,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         onDelete = { mocksController.remove(it) },
         onToggle = { id, on -> mocksController.setEnabled(id, on) },
         onDisableAll = { mocksController.disableAll() },
+        onDiff = { rule -> MockDiff.show(project, rule, mocksController.baseBodyFor(rule.id)) },
     )
 
     private val prettyJson = Json { prettyPrint = true; encodeDefaults = true }
