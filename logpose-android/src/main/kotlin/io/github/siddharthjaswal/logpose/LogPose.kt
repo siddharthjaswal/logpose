@@ -158,9 +158,16 @@ object LogPose {
 
         // First sighting starts the span; a terminal state closes it and forgets the request so
         // a long session can't leak entries.
+        var replayedAtAttach = false
         val startedAt = synchronized(workerStarts) {
+            val firstSighting = id !in workerStarts
             val started = workerStarts.getOrPut(id) { now }
             if (terminal) workerStarts.remove(id)
+            // A workId we've never seen that's already terminal ran before we attached: WorkManager
+            // replays its persisted store to a fresh observer. Live work passes through
+            // enqueued/running first, so we'd have seen it. (A worker that finishes between two
+            // emissions is the rare false positive — acceptable versus counting replays as runs.)
+            replayedAtAttach = firstSighting && terminal
             started
         }
 
@@ -181,6 +188,7 @@ object LogPose {
                         inputData = info.inputData,
                         outputData = info.outputData,
                         error = info.error,
+                        replayedAtAttach = replayedAtAttach,
                     )
                 ),
             ),

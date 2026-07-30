@@ -570,8 +570,13 @@ object McpTools {
             true
         }
 
+        val replayed = matched.count { it.work.replayedAtAttach }
         return buildJsonObject {
             put("count", matched.size)
+            put("ran_this_session", matched.size - replayed)
+            // Work WorkManager replayed from its store when the observer attached — it ran before
+            // capture was watching. Split out so "SyncWorker ran 20 times" isn't really 19 replays.
+            put("replayed_at_attach", replayed)
             put("retried", matched.count { it.work.runAttempt > 1 })
             put("failed", matched.count { it.work.state == WorkerEvent.STATE_FAILED })
             put("workers", buildJsonArray {
@@ -581,6 +586,7 @@ object McpTools {
                         put("worker", event.work.worker)
                         put("state", event.work.state)
                         put("attempt", event.work.runAttempt)
+                        if (event.work.replayedAtAttach) put("replayed_at_attach", true)
                         event.work.uniqueName?.let { put("unique_name", it) }
                         event.durationMillis?.let {
                             put("duration_ms", it)
