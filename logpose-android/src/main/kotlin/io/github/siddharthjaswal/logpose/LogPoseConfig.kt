@@ -51,13 +51,13 @@ data class LogPoseConfig(
      *  (screen views, impressions), so this is the per-kind off switch. */
     val analyticsEnabled: Boolean = true,
     /**
-     * Analytics param **keys** whose values are masked before emission — the same idea as
-     * [redactHeaderPatterns], matched as case-insensitive substrings. Analytics params routinely
-     * carry PII (emails, phones, user ids), and a capture is pasted into tickets and read by
-     * agents. Kept conservative by default so labels like `screen_name` survive; extend it:
-     * `redactAnalyticsParams = LogPoseConfig.DEFAULT_REDACT_PARAMS + "user_id"`.
+     * Analytics param **keys** whose values are masked before emission — case-insensitive
+     * substrings, same idea as [redactHeaderPatterns]. **Empty by default**: analytics is a
+     * debug/staging tool and its params are usually test data, so nothing is masked unless you ask.
+     * If a build does carry real PII in params, opt in with the ready-made set:
+     * `redactAnalyticsParams = LogPoseConfig.DEFAULT_REDACT_PARAMS` (or `+ "user_id"`).
      */
-    val redactAnalyticsParams: Set<String> = DEFAULT_REDACT_PARAMS,
+    val redactAnalyticsParams: Set<String> = emptySet(),
 ) {
     companion object {
         /**

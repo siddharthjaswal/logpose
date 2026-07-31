@@ -29,7 +29,7 @@ data class LogPoseConfig(
     val dbEnabled: Boolean = true,
     val workersEnabled: Boolean = true,
     val analyticsEnabled: Boolean = true,
-    val redactAnalyticsParams: Set<String> = DEFAULT_REDACT_PARAMS,
+    val redactAnalyticsParams: Set<String> = emptySet(),
 ) {
     /**
      * Mirrors the real config's constants so that

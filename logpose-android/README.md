@@ -155,6 +155,35 @@ Notes worth knowing:
 
 Requires plugin 1.6.0+ to render as first-class rows (older plugins show them as generic rows).
 
+## Analytics events (optional)
+
+See every analytics event on the timeline, next to the API call and screen that triggered it —
+the fast answer to "did `purchase_complete` fire with the right params?". One line in your
+analytics facade (the one `Analytics.log(name, params)` chokepoint most apps already have):
+
+```kotlin
+LogPose.logAnalytics(
+    AnalyticsEventInfo(
+        name = "purchase_complete",
+        params = mapOf("value" to "499", "currency" to "INR"),
+        screen = "cart",           // shown as the subtitle; also the flow-graph node key
+        provider = "firebase",     // optional, to tell sinks apart
+        traceId = trace,           // optional, to correlate with the API/DB around it
+    ),
+    LogPoseConfig(enabled = BuildConfig.DEBUG),
+)
+```
+
+- **`analyticsEnabled`** switches it off (analytics can be chatty — screen views, impressions).
+- **Param masking is off by default** — analytics params are usually staging/test data and reading
+  them is the point. If a build carries real PII, opt in:
+  `redactAnalyticsParams = LogPoseConfig.DEFAULT_REDACT_PARAMS` masks `email`/`phone`/`token`/… by
+  key substring.
+- A connected coding agent can query these over MCP (`analytics_events`) to verify contracts and
+  read the observed **screen-to-screen flow**.
+
+Renders in any plugin; a dedicated `ANLY` filter chip needs plugin 1.7.4+.
+
 ## Your own events (optional)
 
 HTTP and FCM are just two *kinds* on the timeline. Any subsystem can put a row there, and the

@@ -29,7 +29,11 @@ object KindPresenter {
         is LogEvent.Db -> "DB"
         is LogEvent.Worker -> "WORK"
         is LogEvent.Config -> "CONF"
-        is LogEvent.Generic -> if (event.kind == Envelope.KIND_EVENT) "EVENT" else "APP"
+        is LogEvent.Generic -> when (event.kind) {
+            Envelope.KIND_ANALYTICS -> "ANLY"
+            Envelope.KIND_EVENT -> "EVENT"
+            else -> "APP"
+        }
         else -> event.kind.uppercase()
     }
 
