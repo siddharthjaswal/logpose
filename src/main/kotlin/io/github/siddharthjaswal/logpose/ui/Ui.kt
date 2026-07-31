@@ -4,6 +4,7 @@ import com.intellij.openapi.ui.MessageType
 import com.intellij.openapi.ui.popup.Balloon
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.ui.JBColor
+import io.github.siddharthjaswal.logpose.model.Envelope
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -93,6 +94,28 @@ object Theme {
         "DELETE" -> mDelete
         "PATCH" -> mPatch
         else -> mPatch
+    }
+
+    // event-type palette — one hue per kind, distinct from the method palette. Lives only in the
+    // row gutter icon, the TYPE filter chip, and the detail header chip. Dark values are the
+    // brand hues; light values are darkened for ≥4.5:1 on a white surface.
+    private val tNet = c(0x2E6AE0, 0x5B9DFF)
+    private val tFcm = c(0x8B3FD9, 0xC084FC)
+    private val tDb = c(0xA86A12, 0xE0A740)
+    private val tWork = c(0x0E9488, 0x2DD4BF)
+    private val tConf = c(0x5B6472, 0x94A3B8)
+    private val tAnly = c(0xC42E7A, 0xF472B6)
+    private val tApp = c(0x1F9E4A, 0x4ADE80)
+
+    /** The hue for an event kind's gutter icon, filter chip, and detail header chip. */
+    fun typeColor(kind: String): JBColor = when (kind) {
+        Envelope.KIND_HTTP -> tNet
+        Envelope.KIND_FCM -> tFcm
+        Envelope.KIND_DB -> tDb
+        Envelope.KIND_WORKER -> tWork
+        Envelope.KIND_CONFIG -> tConf
+        Envelope.KIND_ANALYTICS -> tAnly
+        else -> tApp   // event / app-defined
     }
 
     fun statusColor(code: Int?, error: String?): JBColor = when {
