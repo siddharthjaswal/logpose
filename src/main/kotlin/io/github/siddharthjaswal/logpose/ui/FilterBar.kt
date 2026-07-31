@@ -141,17 +141,19 @@ class FilterBar : JPanel() {
     )
     private val hideNoise = ToggleSwitch { onChange() }
     private val dupChip = chip("⚠ Dupes", Theme.warn, flat = false)
+    // Each chip is lit in its own type hue — the same colour as that kind's row gutter icon, so
+    // filter state is legible from the rows alone. (Analytics no longer borrows GET's blue.)
     private val typeChips = linkedMapOf(
-        EventType.NET to chip("NET", Theme.accent, flat = true),
-        EventType.FCM to chip("FCM", Theme.methodColor("PATCH"), flat = true),
-        EventType.DB to chip("DB", Theme.methodColor("PUT"), flat = true).apply {
+        EventType.NET to chip("NET", Theme.typeColor(Envelope.KIND_HTTP), flat = true),
+        EventType.FCM to chip("FCM", Theme.typeColor(Envelope.KIND_FCM), flat = true),
+        EventType.DB to chip("DB", Theme.typeColor(Envelope.KIND_DB), flat = true).apply {
             toolTipText = "Database queries — hidden until you ask for them, since a busy screen " +
                 "can run hundreds a minute. They are still captured and readable by a coding agent."
         },
-        EventType.WORK to chip("WORK", Theme.methodColor("POST"), flat = true),
-        EventType.CONF to chip("CONF", Theme.warn, flat = true),
-        EventType.ANALYTICS to chip("ANLY", Theme.methodColor("GET"), flat = true),
-        EventType.APP to chip("APP", Theme.accent, flat = true),
+        EventType.WORK to chip("WORK", Theme.typeColor(Envelope.KIND_WORKER), flat = true),
+        EventType.CONF to chip("CONF", Theme.typeColor(Envelope.KIND_CONFIG), flat = true),
+        EventType.ANALYTICS to chip("ANLY", Theme.typeColor(Envelope.KIND_ANALYTICS), flat = true),
+        EventType.APP to chip("APP", Theme.typeColor(Envelope.KIND_EVENT), flat = true),
     )
     private val count = JBLabel().apply { foreground = Theme.textMuted }
 

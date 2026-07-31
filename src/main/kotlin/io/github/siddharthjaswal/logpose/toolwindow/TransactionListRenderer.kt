@@ -10,6 +10,7 @@ import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.ui.KindPresenter
 import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.TagLabel
+import io.github.siddharthjaswal.logpose.ui.TypeIcons
 import io.github.siddharthjaswal.logpose.ui.Theme
 import io.github.siddharthjaswal.logpose.ui.isPending
 import io.github.siddharthjaswal.logpose.ui.spinnerChar
@@ -60,6 +61,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     private val timeFmt = SimpleDateFormat("HH:mm:ss")
 
     // ---- HTTP row -------------------------------------------------------------------------
+    private val httpIcon = JLabel(TypeIcons.forKind(Envelope.KIND_HTTP)).fixed(JBUI.scale(18), JBUI.scale(20))
     private val methodLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
     private val statusTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
     private val path = JLabel()
@@ -77,6 +79,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         val badges = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(httpIcon)
             add(methodLabel)
             add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(statusTag)
@@ -119,7 +122,8 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     }
 
     // ---- FCM row --------------------------------------------------------------------------
-    private val fcmLabel = JLabel("FCM", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
+    private val fcmIcon = JLabel(TypeIcons.forKind(Envelope.KIND_FCM)).fixed(JBUI.scale(18), JBUI.scale(20))
+    private val fcmLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20)) // empty method slot
     private val fcmTag = TagLabel().fixed(JBUI.scale(52), JBUI.scale(20))
     private val fcmText = JLabel()
     private val fcmCount = JLabel("", SwingConstants.RIGHT)
@@ -128,13 +132,12 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     private val fcmRow = RowPanel().apply {
         border = JBUI.Borders.empty(0, 14)
 
-        fcmLabel.font = JBUI.Fonts.label(11f).asBold()
-        fcmLabel.foreground = Theme.methodColor("PATCH")
         fcmTag.font = JBUI.Fonts.label(10f).asBold()
 
         val badges = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(fcmIcon)
             add(fcmLabel)
             add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(fcmTag)
@@ -157,9 +160,13 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         add(meta, BorderLayout.EAST)
     }
 
-    // ---- Generic row (any app-defined kind) ------------------------------------------------
-    private val genLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20))
-    private val genTag = TagLabel().fixed(JBUI.scale(52), JBUI.scale(20))
+    // ---- Generic row (db / worker / config / analytics / app-defined) ----------------------
+    // Icon gutter + empty method/status columns + primary · secondary in the centre, so the type
+    // is stated exactly once (the coloured glyph) and the state is a full word in the centre,
+    // never a truncated pill. The blank method/status labels keep the centre aligned with HTTP.
+    private val genIcon = JLabel().fixed(JBUI.scale(18), JBUI.scale(20))
+    private val genMethodPad = JLabel().fixed(JBUI.scale(46), JBUI.scale(20)) // empty, for alignment
+    private val genStatusPad = JLabel().fixed(JBUI.scale(46), JBUI.scale(20)) // empty, for alignment
     private val genText = JLabel()
     private val genCount = JLabel("", SwingConstants.RIGHT)
     private val genTime = JLabel("", SwingConstants.RIGHT)
@@ -167,16 +174,13 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     private val genRow = RowPanel().apply {
         border = JBUI.Borders.empty(0, 14)
 
-        genLabel.font = JBUI.Fonts.label(11f).asBold()
-        genLabel.foreground = Theme.accent
-        genTag.font = JBUI.Fonts.label(10f).asBold()
-
         val badges = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
-            add(genLabel)
+            add(genIcon)
+            add(genMethodPad)
             add(Box.createHorizontalStrut(JBUI.scale(10)))
-            add(genTag)
+            add(genStatusPad)
         }
         genText.border = JBUI.Borders.emptyLeft(12)
         genText.font = JBUI.Fonts.label(12.5f)
@@ -223,37 +227,22 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
 
         val presentation = KindPresenter.present(value)
 
-        // The kind column is narrow and app-defined kinds are often long and dotted
-        // ("acme.telemetry"), so abbreviating them there produces junk like "ACME.T". Show a
-        // short, fixed label and let the centre carry the specifics.
-        genLabel.text = KindPresenter.kindLabel(value)
+        // The type is the coloured gutter glyph — stated once, never as text and never as a
+        // truncated pill.
+        genIcon.icon = TypeIcons.forEvent(value)
 
+        // Primary · secondary: the row's own identifier, then the state / one telling fact — the
+        // state as a full word (`succeeded`, `running`), the bug this replaces was `SUCC…`.
         val badges = presentation?.badges.orEmpty()
-        val badge = badges.firstOrNull()
-        if (badge != null) {
-            val color = when (badge.tone) {
-                Badge.TONE_INFO -> Theme.accent
-                Badge.TONE_WARN -> Theme.warn
-                Badge.TONE_ERROR -> Theme.danger
-                else -> Theme.textDim
-            }
-            genTag.set(badge.text.take(8), color, Theme.tint(color, 30))
-        } else {
-            genTag.set("", Theme.text, null)
-        }
-
         val title = presentation?.title ?: value.kind
-        val subtitle = presentation?.subtitle?.takeIf { it.isNotBlank() }
-        genText.text = if (subtitle != null) "$title  ·  $subtitle" else title
+        val secondary = presentation?.subtitle?.takeIf { it.isNotBlank() }
+            ?: badges.firstOrNull()?.text
+        genText.text = if (secondary != null) "$title  ·  $secondary" else title
         genText.foreground = Theme.text
 
-        // Only one badge fits the status column, so the second one goes where HTTP shows body
-        // size — its text, not a "+1", since "retry 2" tells you something and a count doesn't.
-        genCount.text = when {
-            badges.size == 2 -> badges[1].text.take(9)
-            badges.size > 2 -> "+${badges.size - 1}"
-            else -> ""
-        }
+        // Where HTTP shows body size: a second telling fact (a retry attempt, a row count), full
+        // text — not a "+1" count, which tells you nothing.
+        genCount.text = badges.getOrNull(1)?.text.orEmpty()
         genCount.foreground = Theme.textDim
 
         genTime.text = when {
