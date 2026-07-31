@@ -90,6 +90,13 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Reliability &amp; test-orchestration</b> — capture now reports whether it's running
+                (and auto-reattaches after an adb drop, so it no longer dies silently on a
+                reinstall); <code>create_mock</code> warns loudly when no device is synced; a new
+                <code>clear_capture</code> tool and a <code>scripts/push-mocks.sh</code> make the
+                mocked tier runnable in CI; chatty analytics/DB feeds are capped so they can't evict
+                the events you care about; and stale mocks are pruned on a new app run. Ambient trace
+                scope <code>LogPose.withTrace { }</code> needs <code>logpose-android</code> &ge; 1.5.5.</li>
             <li><b>Typed rows &amp; detail</b> — every row leads with a colour-coded type glyph
                 (one hue per kind); non-network rows keep the method/status columns clear so the
                 centre lines up, and the type is stated once instead of as a doubled, truncated

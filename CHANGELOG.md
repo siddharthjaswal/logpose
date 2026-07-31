@@ -6,6 +6,34 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.6] - 2026-07-31
+
+Acting on a second coding-agent report, ordered by the pain each caused. The theme: making
+LogPose usable as test infrastructure, not just an interactive debugger.
+
+### Added
+- **`clear_capture` MCP tool** — reset the buffer for "start clean, run, read only my events".
+- **`exclude` on `list_events`** — drop a chatty feed (`exclude: "SFX_GEOFENCE"`) server-side.
+- **Headless mock push** — `scripts/push-mocks.sh` pushes a rules file over adb with no IDE or
+  agent, so the mocked tier is CI-runnable (Maestro can't call MCP).
+
+### Changed
+- **`create_mock` leads with `active: true/false`** and a loud warning when no device is synced —
+  it used to report `created` as success even when the mock never served.
+- **Capture health** in `session_summary` / `list_events` (running, last-event age) so an empty
+  result is never mistaken for "nothing happened".
+- **Capture auto-reattaches** (up to 5×, 2s apart) after an adb stream drop — it used to die
+  silently on an app reinstall.
+- **Per-kind buffer quotas** — the chatty kinds (analytics, DB, capped at 400 each) can no longer
+  evict the HTTP calls and the one accept/reject worth seeing.
+- **Stale disabled mocks are pruned on a new app run**, so a leftover from a previous session
+  can't poison the next.
+
+### Library — logpose-android 1.5.5 - 2026-07-31
+- **`LogPose.withTrace { }`** — an ambient thread-local trace id that every event emitted inside
+  auto-inherits, so a flow (mint one at the FCM/screen entry) collapses into a single `get_trace`
+  call. Mirrored in the no-op.
+
 ## [1.7.5] - 2026-07-31
 
 UI upgrade — no behaviour change, no library dependency.
