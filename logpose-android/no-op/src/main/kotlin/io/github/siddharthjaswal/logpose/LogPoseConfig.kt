@@ -28,6 +28,8 @@ data class LogPoseConfig(
     val mocksEnabled: Boolean = true,
     val dbEnabled: Boolean = true,
     val workersEnabled: Boolean = true,
+    val analyticsEnabled: Boolean = true,
+    val redactAnalyticsParams: Set<String> = DEFAULT_REDACT_PARAMS,
 ) {
     /**
      * Mirrors the real config's constants so that
@@ -71,6 +73,18 @@ data class LogPoseConfig(
             "api-key",
             "api_key",
             "auth",
+        )
+
+        val DEFAULT_REDACT_PARAMS: Set<String> = setOf(
+            "email",
+            "phone",
+            "password",
+            "passwd",
+            "token",
+            "secret",
+            "ssn",
+            "card_number",
+            "cvv",
         )
     }
 }

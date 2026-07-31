@@ -47,6 +47,17 @@ data class LogPoseConfig(
     val dbEnabled: Boolean = true,
     /** Emit background-work events (see `LogPose.logWorker`). */
     val workersEnabled: Boolean = true,
+    /** Emit analytics events (see `LogPose.logAnalytics`). Analytics can be chatty
+     *  (screen views, impressions), so this is the per-kind off switch. */
+    val analyticsEnabled: Boolean = true,
+    /**
+     * Analytics param **keys** whose values are masked before emission — the same idea as
+     * [redactHeaderPatterns], matched as case-insensitive substrings. Analytics params routinely
+     * carry PII (emails, phones, user ids), and a capture is pasted into tickets and read by
+     * agents. Kept conservative by default so labels like `screen_name` survive; extend it:
+     * `redactAnalyticsParams = LogPoseConfig.DEFAULT_REDACT_PARAMS + "user_id"`.
+     */
+    val redactAnalyticsParams: Set<String> = DEFAULT_REDACT_PARAMS,
 ) {
     companion object {
         /**
@@ -95,6 +106,23 @@ data class LogPoseConfig(
             "api-key",
             "api_key",
             "auth",
+        )
+
+        /**
+         * Analytics param-key substrings redacted by default. Conservative on purpose — clear PII
+         * and secrets only — so common non-sensitive keys (`screen_name`, `product_name`) come
+         * through. Add your own (e.g. `"user_id"`) when your schema needs it.
+         */
+        val DEFAULT_REDACT_PARAMS: Set<String> = setOf(
+            "email",
+            "phone",
+            "password",
+            "passwd",
+            "token",
+            "secret",
+            "ssn",
+            "card_number",
+            "cvv",
         )
     }
 }

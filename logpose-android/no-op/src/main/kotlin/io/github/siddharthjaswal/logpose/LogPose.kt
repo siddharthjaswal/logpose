@@ -36,6 +36,8 @@ object LogPose {
 
     fun newTraceId(): String = ""
 
+    fun logAnalytics(info: AnalyticsEventInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
+
     fun logDbQuery(info: DbQueryInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
 
     fun logWorker(info: WorkerEventInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
