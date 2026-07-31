@@ -50,6 +50,7 @@ class MocksController(private val project: Project) {
     private var pkg: String? = props.getValue(KEY_PKG)
     private var libVersion: String? = null
     private var helloSeen = false
+    private var lastProcessId: String? = null
     private var syncedRevision = -1
     private var hits: Map<String, Int> = emptyMap()
 
@@ -125,16 +126,33 @@ class MocksController(private val project: Project) {
     }
 
     private fun onHello(hello: Hello) {
-        synchronized(this) {
+        val freshRun = synchronized(this) {
             pkg = hello.pkg
             libVersion = hello.libVersion
             helloSeen = true
+            // A different process id means a new app run (library 1.5.0+). Blank = old library:
+            // treat as the same run so we don't prune on every re-announce.
+            val fresh = hello.processId.isNotBlank() && hello.processId != lastProcessId
+            if (hello.processId.isNotBlank()) lastProcessId = hello.processId
+            fresh
         }
         props.setValue(KEY_PKG, hello.pkg)
+        // On a new app run, drop leftover *disabled* rules so a stale mock from a previous session
+        // (or someone else's) can't poison this one. Enabled, in-use rules are kept and re-pushed.
+        if (freshRun) pruneDisabledRules()
         // A restarted app reports mockRevision 0 (its registry was wiped) — re-push if we hold
         // rules the device is missing.
         if (live.get() && hello.mockRevision < revision && rules().any { it.enabled }) pushNow()
         notifyChanged()
+    }
+
+    private fun pruneDisabledRules() {
+        val removed = synchronized(this) {
+            val before = rules.size
+            rules.removeAll { !it.enabled }
+            before != rules.size
+        }
+        if (removed) { persistRules(); notifyChanged() }
     }
 
     private fun onAck(ack: MockAck) {
