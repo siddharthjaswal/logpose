@@ -105,6 +105,35 @@ object LogPose {
     /** A fresh trace id, to correlate a group of related events. */
     fun newTraceId(): String = newId()
 
+    private val currentTrace = ThreadLocal<String?>()
+
+    /** The trace id currently in scope on this thread (see [withTrace]), or null. */
+    fun currentTraceId(): String? = currentTrace.get()
+
+    /**
+     * Run [block] with an ambient trace id: **every event emitted on this thread inside it** —
+     * analytics, db, config, app events — is auto-stamped with [traceId] unless it already carries
+     * one, so `get_trace` collapses a whole flow into one call without threading the id by hand.
+     *
+     * Mint one at the entry point (an FCM push, a screen open) and wrap the work:
+     * ```kotlin
+     * LogPose.withTrace { // fresh id
+     *     handlePush(message)   // its analytics/db events all share the trace
+     * }
+     * ```
+     * Thread-local, so it does **not** cross a coroutine dispatch or a thread hop — pass the id
+     * explicitly (or re-enter `withTrace`) on the other side of an async boundary.
+     */
+    fun <T> withTrace(traceId: String = newTraceId(), block: () -> T): T {
+        val previous = currentTrace.get()
+        currentTrace.set(traceId)
+        try {
+            return block()
+        } finally {
+            currentTrace.set(previous)
+        }
+    }
+
     // ---- Analytics ----------------------------------------------------------------------
 
     /**
@@ -398,8 +427,11 @@ object LogPose {
     private fun newId(): String = UUID.randomUUID().toString().substring(0, 8)
 
     private fun emit(envelope: Envelope, config: LogPoseConfig) {
+        // Auto-attach the ambient trace (see withTrace) when the event didn't set one itself, so a
+        // whole flow shares a trace without every call site passing it.
+        val traced = if (envelope.traceId == null) envelope.copy(traceId = currentTrace.get()) else envelope
         // A logging call must never take down the app: a serialization or logcat failure is
         // swallowed rather than propagated into the caller's control flow.
-        runCatching { LogcatEmitter(config).emit(envelope) }
+        runCatching { LogcatEmitter(config).emit(traced) }
     }
 }
