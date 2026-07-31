@@ -4,6 +4,7 @@ import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import java.awt.Color
 import java.awt.Component
@@ -30,7 +31,7 @@ import javax.swing.event.DocumentEvent
  * rebuilding the segmented control whenever a new kind appears would make the bar jump around
  * mid-capture. Narrowing to one specific app kind is what the search box is for.
  */
-enum class EventType { NET, FCM, DB, WORK, CONF, APP }
+enum class EventType { NET, FCM, DB, WORK, CONF, ANALYTICS, APP }
 
 /** Structured filter state — replaces the free-text grammar with one-click toggles. */
 data class FilterState(
@@ -52,7 +53,10 @@ data class FilterState(
         is LogEvent.Db -> types.allowsDb() && matchesStructured(event)
         is LogEvent.Worker -> types.allows(EventType.WORK) && matchesStructured(event)
         is LogEvent.Config -> types.allows(EventType.CONF) && matchesStructured(event)
-        is LogEvent.Generic -> types.allowsApp() && matchesStructured(event)
+        is LogEvent.Generic ->
+            // Analytics gets its own chip; every other app-defined kind falls under APP.
+            if (event.kind == Envelope.KIND_ANALYTICS) types.allows(EventType.ANALYTICS) && matchesStructured(event)
+            else types.allowsApp() && matchesStructured(event)
     }
 
     private fun Set<EventType>.allowsHttp() = isEmpty() || EventType.NET in this
@@ -146,6 +150,7 @@ class FilterBar : JPanel() {
         },
         EventType.WORK to chip("WORK", Theme.methodColor("POST"), flat = true),
         EventType.CONF to chip("CONF", Theme.warn, flat = true),
+        EventType.ANALYTICS to chip("ANLY", Theme.methodColor("GET"), flat = true),
         EventType.APP to chip("APP", Theme.accent, flat = true),
     )
     private val count = JBLabel().apply { foreground = Theme.textMuted }

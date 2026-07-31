@@ -36,6 +36,7 @@ data class Envelope(
         const val KIND_HTTP = "http"
         const val KIND_FCM = "fcm"
         const val KIND_EVENT = "event"
+        const val KIND_ANALYTICS = "analytics"
         const val KIND_DB = "db"
         const val KIND_WORKER = "worker"
         const val KIND_CONFIG = "config"

@@ -105,6 +105,50 @@ object LogPose {
     /** A fresh trace id, to correlate a group of related events. */
     fun newTraceId(): String = newId()
 
+    // ---- Analytics ----------------------------------------------------------------------
+
+    /**
+     * Record an analytics event (see [AnalyticsEventInfo]) — one line in your analytics facade
+     * puts every event on the timeline, PII in the params masked per
+     * [LogPoseConfig.redactAnalyticsParams].
+     *
+     * Emitted under its own `analytics` kind carrying a self-describing payload, so it renders in
+     * any plugin build with no update; [LogPoseConfig.analyticsEnabled] switches it off.
+     */
+    fun logAnalytics(info: AnalyticsEventInfo, config: LogPoseConfig = LogPoseConfig()) {
+        if (!config.enabled || !config.analyticsEnabled) return
+        val redacted = maskParams(info.params, config)
+        val builder = EventBuilder(info.name).apply {
+            info.screen?.let { subtitle = it }
+            badge("ANALYTICS", Tone.INFO)
+            info.provider?.let { badge(it.uppercase(), Tone.MUTED) }
+            if (redacted.isNotEmpty()) kv("Params", redacted)
+            info.traceId?.let { traceId = it }
+        }
+        emit(
+            Envelope(
+                kind = Envelope.KIND_ANALYTICS,
+                id = builder.id,
+                at = builder.at,
+                endedAt = builder.at,
+                traceId = builder.traceId,
+                payload = json.encodeToJsonElement(builder.build()),
+            ),
+            config,
+        )
+    }
+
+    /** Masks analytics param values whose key matches [LogPoseConfig.redactAnalyticsParams]
+     *  (case-insensitive substring), leaving everything else intact. Pure, for tests. */
+    internal fun maskParams(params: Map<String, String>, config: LogPoseConfig): Map<String, String> {
+        if (params.isEmpty()) return params
+        val patterns = config.redactAnalyticsParams.map { it.lowercase() }
+        if (patterns.isEmpty()) return params
+        return params.mapValues { (key, value) ->
+            if (patterns.any { it in key.lowercase() }) "██" else value
+        }
+    }
+
     // ---- Database -----------------------------------------------------------------------
 
     /**

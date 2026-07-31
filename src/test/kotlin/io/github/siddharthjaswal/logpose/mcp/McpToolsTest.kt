@@ -9,6 +9,7 @@ import io.github.siddharthjaswal.logpose.model.GenericEvent
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.Request
+import io.github.siddharthjaswal.logpose.model.Section
 import io.github.siddharthjaswal.logpose.model.Response
 import io.github.siddharthjaswal.logpose.model.Body
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -73,6 +74,18 @@ class McpToolsTest {
                 kind = Envelope.KIND_EVENT, id = id, at = at, endedAt = at,
                 payload = json.encodeToJsonElement(event),
             ),
+        )
+    }
+
+    // How the library emits an analytics event: a self-describing Generic under the analytics kind.
+    private fun analytics(id: String, name: String, screen: String? = null, params: Map<String, String> = emptyMap(), at: Long = 1_000): LogEvent.Generic {
+        val sections = if (params.isEmpty()) emptyList() else listOf(
+            Section("Params", Section.TYPE_KV, buildJsonObject { params.forEach { (k, v) -> put(k, v) } }),
+        )
+        val event = GenericEvent(title = name, subtitle = screen, badges = listOf(Badge("ANALYTICS", Badge.TONE_INFO)), sections = sections)
+        return LogEvent.Generic(
+            event,
+            Envelope(kind = Envelope.KIND_ANALYTICS, id = id, at = at, endedAt = at, payload = json.encodeToJsonElement(event)),
         )
     }
 
@@ -531,7 +544,7 @@ class McpToolsTest {
         assertEquals(
             listOf(
                 "list_events", "get_event", "get_trace", "find_failures", "session_summary",
-                "query_hotspots", "worker_history", "config_changes",
+                "query_hotspots", "worker_history", "config_changes", "analytics_events",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
             ),
             names,
@@ -555,6 +568,41 @@ class McpToolsTest {
         }
 
     private fun kotlinx.serialization.json.JsonPrimitive.int(): Int = content.toInt()
+
+    // ---- analytics ---------------------------------------------------------------------------
+
+    @Test fun `analytics_events returns events, counts and the screen flow`() {
+        val events = listOf(
+            analytics("a", "screen_view", screen = "home", at = 1),
+            analytics("b", "add_to_cart", screen = "product", params = mapOf("id" to "7"), at = 2),
+            analytics("c", "screen_view", screen = "cart", at = 3),
+            analytics("d", "purchase_complete", screen = "cart", params = mapOf("value" to "499"), at = 4),
+        )
+        val out = call("analytics_events", events)
+
+        assertEquals(4, out["count"]!!.jsonPrimitive.int())
+        // by_name catches double-fires and wrong-count events.
+        assertEquals(2, out["by_name"]!!.jsonObject["screen_view"]!!.jsonPrimitive.int())
+        // params come through.
+        val purchase = out["events"]!!.jsonArray.single { it.jsonObject["name"]!!.jsonPrimitive.content == "purchase_complete" }
+        assertEquals("499", purchase.jsonObject["params"]!!.jsonObject["value"]!!.jsonPrimitive.content)
+
+        // screen_flow: home->product->cart; the two cart events don't invent a cart->cart edge.
+        val edges = out["screen_flow"]!!.jsonArray.map {
+            "${it.jsonObject["from"]!!.jsonPrimitive.content}->${it.jsonObject["to"]!!.jsonPrimitive.content}"
+        }
+        assertEquals(setOf("home->product", "product->cart"), edges.toSet())
+    }
+
+    @Test fun `analytics_events filters by name`() {
+        val events = listOf(
+            analytics("a", "screen_view", screen = "home"),
+            analytics("b", "purchase_complete", screen = "cart"),
+        )
+        val out = call("analytics_events", events, buildJsonObject { put("name", "purchase") })
+        assertEquals(1, out["count"]!!.jsonPrimitive.int())
+        assertEquals("purchase_complete", out["events"]!!.jsonArray.single().jsonObject["name"]!!.jsonPrimitive.content)
+    }
 
     // ---- sessions and the jump table --------------------------------------------------------
 
