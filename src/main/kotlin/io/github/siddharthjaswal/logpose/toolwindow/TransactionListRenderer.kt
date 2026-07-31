@@ -80,6 +80,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
             add(httpIcon)
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(methodLabel)
             add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(statusTag)
@@ -124,7 +125,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     // ---- FCM row --------------------------------------------------------------------------
     private val fcmIcon = JLabel(TypeIcons.forKind(Envelope.KIND_FCM)).fixed(JBUI.scale(18), JBUI.scale(20))
     private val fcmLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20)) // empty method slot
-    private val fcmTag = TagLabel().fixed(JBUI.scale(52), JBUI.scale(20))
+    private val fcmTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
     private val fcmText = JLabel()
     private val fcmCount = JLabel("", SwingConstants.RIGHT)
     private val fcmTime = JLabel("", SwingConstants.RIGHT)
@@ -138,6 +139,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
             add(fcmIcon)
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(fcmLabel)
             add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(fcmTag)
@@ -178,6 +180,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
             add(genIcon)
+            add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(genMethodPad)
             add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(genStatusPad)

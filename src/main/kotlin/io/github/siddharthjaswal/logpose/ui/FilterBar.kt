@@ -141,19 +141,19 @@ class FilterBar : JPanel() {
     )
     private val hideNoise = ToggleSwitch { onChange() }
     private val dupChip = chip("⚠ Dupes", Theme.warn, flat = false)
-    // Each chip is lit in its own type hue — the same colour as that kind's row gutter icon, so
-    // filter state is legible from the rows alone. (Analytics no longer borrows GET's blue.)
+    // Individual pills (not a segmented group), each lit in its own type hue — the same colour as
+    // that kind's row gutter icon, so filter state is legible from the rows alone.
     private val typeChips = linkedMapOf(
-        EventType.NET to chip("NET", Theme.typeColor(Envelope.KIND_HTTP), flat = true),
-        EventType.FCM to chip("FCM", Theme.typeColor(Envelope.KIND_FCM), flat = true),
-        EventType.DB to chip("DB", Theme.typeColor(Envelope.KIND_DB), flat = true).apply {
+        EventType.NET to chip("NET", Theme.typeColor(Envelope.KIND_HTTP), flat = false),
+        EventType.FCM to chip("FCM", Theme.typeColor(Envelope.KIND_FCM), flat = false),
+        EventType.DB to chip("DB", Theme.typeColor(Envelope.KIND_DB), flat = false).apply {
             toolTipText = "Database queries — hidden until you ask for them, since a busy screen " +
                 "can run hundreds a minute. They are still captured and readable by a coding agent."
         },
-        EventType.WORK to chip("WORK", Theme.typeColor(Envelope.KIND_WORKER), flat = true),
-        EventType.CONF to chip("CONF", Theme.typeColor(Envelope.KIND_CONFIG), flat = true),
-        EventType.ANALYTICS to chip("ANLY", Theme.typeColor(Envelope.KIND_ANALYTICS), flat = true),
-        EventType.APP to chip("APP", Theme.typeColor(Envelope.KIND_EVENT), flat = true),
+        EventType.WORK to chip("WORK", Theme.typeColor(Envelope.KIND_WORKER), flat = false),
+        EventType.CONF to chip("CONF", Theme.typeColor(Envelope.KIND_CONFIG), flat = false),
+        EventType.ANALYTICS to chip("ANLY", Theme.typeColor(Envelope.KIND_ANALYTICS), flat = false),
+        EventType.APP to chip("APP", Theme.typeColor(Envelope.KIND_EVENT), flat = false),
     )
     private val count = JBLabel().apply { foreground = Theme.textMuted }
 
@@ -207,20 +207,14 @@ class FilterBar : JPanel() {
             methodChips.values.forEach { add(it) }
         }
 
-        val typeGroup = object : JPanel() {
-            override fun paintComponent(g: Graphics) {
-                val g2 = g.create() as Graphics2D
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g2.color = Theme.borderStrong
-                g2.drawRoundRect(0, 0, width - 1, height - 1, 8, 8)
-                g2.dispose()
-                super.paintComponent(g)
-            }
-        }.apply {
+        // Individual pills with breathing room between them — no segmented frame.
+        val typeGroup = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
-            border = JBUI.Borders.empty(1)
-            typeChips.values.forEach { add(it) }
+            typeChips.values.forEachIndexed { i, chip ->
+                if (i > 0) add(strut(6))
+                add(chip)
+            }
         }
 
         return hbox(
@@ -273,7 +267,7 @@ class ToggleChip(text: String, private val color: Color, private val flat: Boole
 
     init {
         isOpaque = false
-        border = JBUI.Borders.empty(3, 12)
+        border = JBUI.Borders.empty(3, 13)
         font = JBUI.Fonts.label(11.5f).asBold()
         foreground = Theme.textDim
         cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
@@ -292,12 +286,12 @@ class ToggleChip(text: String, private val color: Color, private val flat: Boole
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
         if (selected) {
             g2.color = Theme.tint(color, 40)
-            g2.fillRoundRect(0, 0, width - 1, height - 1, 7, 7)
+            g2.fillRoundRect(0, 0, width - 1, height - 1, 10, 10)
             g2.color = color
-            g2.drawRoundRect(0, 0, width - 1, height - 1, 7, 7)
+            g2.drawRoundRect(0, 0, width - 1, height - 1, 10, 10)
         } else if (!flat) {
             g2.color = Theme.borderStrong
-            g2.drawRoundRect(0, 0, width - 1, height - 1, 7, 7)
+            g2.drawRoundRect(0, 0, width - 1, height - 1, 10, 10)
         }
         g2.dispose()
         super.paintComponent(g)
