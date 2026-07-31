@@ -311,6 +311,22 @@ This lives **only in the real `logpose-android` artifact** — the release `no-o
 no receiver, provider, or `MockRegistry`. Set `mocksEnabled = false` to opt this build out
 entirely.
 
+### Mocks in CI (no IDE)
+
+The mock push is just an `adb` broadcast, so a pipeline can set up the mocked tier before a
+Maestro (or any) flow runs — no IDE, no coding agent:
+
+```bash
+# push a rules file
+scripts/push-mocks.sh <app-package> mocks/orders-500.json
+# ...run your Maestro flow against the mocked responses...
+scripts/push-mocks.sh --clear <app-package>
+```
+
+`mocks/orders-500.json` is a JSON array of `MockRule` objects (method, `pathPattern`, `status`,
+`body`, `mode`, …). The same DUMP-gated channel the plugin uses, so it needs a debug/staging build
+with `logpose-android` ≥ 1.1.0 running on the connected device.
+
 Want a different transport (e.g. a socket via `adb reverse`)? Implement `EventEmitter` — one
 method, taking the `Envelope` every timeline event travels in — and pass it to the interceptor:
 
