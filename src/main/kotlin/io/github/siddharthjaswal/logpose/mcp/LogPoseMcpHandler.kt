@@ -129,6 +129,8 @@ class LogPoseMcpHandler : HttpRequestHandler() {
                 mocks = session.mocks,
                 sessions = session.store.sessions(),
                 sessionOf = { id -> session.store.sessionOf(id) },
+                captureRunning = session.captureRunning,
+                clearCapture = session.clearCapture,
             )
         }.getOrElse { e ->
             // Surface the failure as tool output: an agent can read and route around it, where a

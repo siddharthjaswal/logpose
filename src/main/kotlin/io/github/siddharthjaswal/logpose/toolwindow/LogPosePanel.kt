@@ -128,6 +128,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     // the caller and selects which open project's capture to serve.
     private val mcpToken = McpSessions.tokenFor(project)
 
+    // Whether logcat is being tailed right now — read from the MCP (Netty) thread, so an agent
+    // can tell "no matching events" from "capture isn't running". Kept off the UI's statusDot,
+    // which lives on the EDT.
+    @Volatile private var captureActive = false
+
     init {
         isOpaque = true
         background = Theme.bg0
@@ -139,6 +144,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 store = store,
                 hostAgeMillis = { id -> store.elapsedMillis(id) },
                 exposeBodies = { McpSessions.exposeBodies(project) },
+                captureRunning = { captureActive },
+                clearCapture = { store.clear() },
                 mocks = McpMocks(),
             ),
         )
@@ -279,6 +286,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     private fun startCapture() {
         parser.reset()
+        captureActive = true
         statusDot.capturing = true
         mocksController.onCaptureStarted()
         reader.start(
@@ -290,12 +298,13 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 }, 0)
             },
             // Reader ended (device disconnected / adb error) — reset capture state on the EDT.
-            onStopped = { refreshAlarm.addRequest({ statusDot.capturing = false }, 0) },
+            onStopped = { captureActive = false; refreshAlarm.addRequest({ statusDot.capturing = false }, 0) },
         )
         scheduleRefresh()
     }
 
     private fun stopCapture() {
+        captureActive = false
         statusDot.capturing = false
         reader.stop()
         // Fail-safe: clear any rules the device is holding so a forgotten mock can't linger
@@ -618,6 +627,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                     "the rule won't take effect yet"
             }
         }
+        override fun deviceReady() = mocksController.deviceState().helloSeen
         override fun create(rule: io.github.siddharthjaswal.logpose.model.MockRule, baseBody: String?) =
             mocksController.addOrUpdate(rule, baseBody)
         override fun setEnabled(id: String, enabled: Boolean) = mocksController.setEnabled(id, enabled)

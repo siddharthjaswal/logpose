@@ -66,6 +66,8 @@ object McpTools {
         fun hits(): Map<String, Int>
         /** Human-readable device sync state, e.g. "synced" or "waiting for device". */
         fun deviceHint(): String
+        /** True when a device is attached and synced, so a new rule takes effect immediately. */
+        fun deviceReady(): Boolean
         fun create(rule: MockRule, baseBody: String?)
         fun setEnabled(id: String, enabled: Boolean)
         fun delete(id: String)
@@ -180,6 +182,14 @@ object McpTools {
         )
         add(
             tool(
+                "clear_capture",
+                "Discard every captured event, so the next run starts clean — for test " +
+                    "orchestration ('reset, run the flow, read only my events'). Does not touch " +
+                    "mock rules; the app keeps emitting into the now-empty buffer.",
+            ) {}
+        )
+        add(
+            tool(
                 "list_mocks",
                 "The mock rules currently defined, with how many times each has been served and " +
                     "whether the device has them.",
@@ -257,16 +267,19 @@ object McpTools {
         mocks: Mocks? = null,
         sessions: List<EventStore.Session> = emptyList(),
         sessionOf: (String) -> Int = { 0 },
+        captureRunning: () -> Boolean = { true },
+        clearCapture: () -> Unit = {},
     ): JsonElement = when (name) {
-        "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf)
+        "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf, captureRunning)
         "get_event" -> getEvent(args, events, includeBodies)
         "get_trace" -> getTrace(args, events)
         "find_failures" -> findFailures(args, events)
-        "session_summary" -> summary(events, sessions, sessionOf)
+        "session_summary" -> summary(events, sessions, sessionOf, hostAgeMillis, captureRunning)
         "query_hotspots" -> queryHotspots(args, events)
         "worker_history" -> workerHistory(args, events)
         "config_changes" -> configChanges(args, events)
         "analytics_events" -> analyticsEvents(args, events, sessionOf)
+        "clear_capture" -> clearCaptureTool(clearCapture, events.size)
         "list_mocks" -> mocks.orError { listMocks(it) }
         "create_mock" -> mocks.orError { createMock(args, events, it) }
         "set_mock_enabled" -> mocks.orError { setMockEnabled(args, it) }
@@ -286,6 +299,7 @@ object McpTools {
         events: List<LogEvent>,
         hostAgeMillis: (String) -> Long,
         sessionOf: (String) -> Int,
+        captureRunning: () -> Boolean,
     ): JsonElement {
         val limit = args.int("limit") ?: 50
         val kind = args.str("kind")
@@ -314,10 +328,25 @@ object McpTools {
         return buildJsonObject {
             put("total_matched", matched.size)
             put("returned", page.size)
-            if (matched.size > page.size) {
+            // Empty is ambiguous — no such events, or capture isn't running (it dies silently on an
+            // app reinstall). Say which, so an agent doesn't read "0" as "nothing happened".
+            if (events.isEmpty() && !captureRunning()) {
+                put("capture_stopped", true)
+                put("note", "Capture is NOT running — the buffer is empty because logcat isn't " +
+                    "being tailed (it can stop on an app reinstall or adb disconnect). Press ▶ in " +
+                    "the LogPose window to reattach.")
+            } else if (matched.size > page.size) {
                 put("note", "Showing the ${page.size} most recent of ${matched.size} matches.")
             }
             put("events", buildJsonArray { page.forEach { add(brief(it)) } })
+        }
+    }
+
+    private fun clearCaptureTool(clear: () -> Unit, before: Int): JsonElement {
+        clear()
+        return buildJsonObject {
+            put("cleared", before)
+            put("note", "Event buffer reset. Mock rules are untouched. New events accrue from now.")
         }
     }
 
@@ -386,10 +415,22 @@ object McpTools {
         events: List<LogEvent>,
         sessions: List<EventStore.Session>,
         sessionOf: (String) -> Int,
+        hostAgeMillis: (String) -> Long,
+        captureRunning: () -> Boolean,
     ): JsonElement {
         val http = events.filterIsInstance<LogEvent.Http>()
         val dupes = DuplicateDetector.analyze(http.map { it.tx })
         return buildJsonObject {
+            // Capture health first: an agent needs to know whether "0 events" means quiet or dead.
+            // Capture stops silently on an app reinstall / adb disconnect.
+            val running = captureRunning()
+            put("capture", buildJsonObject {
+                put("running", running)
+                val lastAge = events.map { hostAgeMillis(it.id) }.filter { it >= 0 }.minOrNull()
+                if (lastAge != null) put("last_event_age_ms", lastAge)
+                if (!running) put("note", "Capture is stopped — press ▶ in the LogPose window to reattach.")
+                else if (events.isEmpty()) put("note", "Capture is running but nothing has arrived yet.")
+            })
             put("total_events", events.size)
 
             // A capture that spans an app restart holds several runs. Reporting one span over all
@@ -792,15 +833,28 @@ object McpTools {
         )
         mocks.create(rule, seed?.response?.body?.text)
 
+        val active = mocks.deviceReady()
         return buildJsonObject {
+            // Lead with whether the rule is actually serving. "created" alone read as success even
+            // when no device was attached, and an agent built a flow on a mock that never fired.
+            put("active", active)
             put("created", briefMock(rule, 0))
             put("device", mocks.deviceHint())
-            put(
-                "note",
-                "The running app will now receive this instead of the real response for matching " +
-                    "requests. Disable it with set_mock_enabled when you're done; all rules also " +
-                    "clear from the device when capture stops.",
-            )
+            if (!active) {
+                put(
+                    "warning",
+                    "NOT SERVING YET — no device is synced, so the running app is still getting the " +
+                        "real response. The rule is saved and activates once a device attaches with " +
+                        "capture running (logpose-android ≥ 1.1.0). Do not rely on it until active=true.",
+                )
+            } else {
+                put(
+                    "note",
+                    "The running app will now receive this instead of the real response for matching " +
+                        "requests. Disable it with set_mock_enabled when you're done; all rules also " +
+                        "clear from the device when capture stops.",
+                )
+            }
         }
     }
 

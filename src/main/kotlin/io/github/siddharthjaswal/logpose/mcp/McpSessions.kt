@@ -30,6 +30,12 @@ object McpSessions {
         /** Host-clock age of an event, since device timestamps can't be diffed against ours. */
         val hostAgeMillis: (String) -> Long,
         val exposeBodies: () -> Boolean,
+        /** Whether logcat is being tailed right now — lets a query distinguish "no matching
+         *  events" from "capture isn't running", which otherwise both read as empty. */
+        val captureRunning: () -> Boolean = { true },
+        /** Reset the capture (clear the event buffer) — for an agent orchestrating "start clean,
+         *  run, read only my events". */
+        val clearCapture: () -> Unit = {},
         /** Write surface for mock rules; null when this project can't serve mocks. */
         val mocks: McpTools.Mocks? = null,
     )

@@ -433,7 +433,9 @@ class McpToolsTest {
         var lastBaseBody: String? = null
         override fun list() = rules.toList()
         override fun hits() = mapOf<String, Int>()
-        override fun deviceHint() = "test-device · synced rev 1"
+        override fun deviceHint() = if (ready) "test-device · synced rev 1" else "waiting for device"
+        var ready = true
+        override fun deviceReady() = ready
         override fun create(rule: MockRule, baseBody: String?) { rules += rule; lastBaseBody = baseBody }
         override fun setEnabled(id: String, enabled: Boolean) {
             rules.replaceAll { if (it.id == id) it.copy(enabled = enabled) else it }
@@ -443,6 +445,36 @@ class McpToolsTest {
 
     private fun callWrite(name: String, args: JsonObject, mocks: McpTools.Mocks, events: List<LogEvent> = emptyList()) =
         McpTools.call(name, args, events, { 0 }, true, mocks).jsonObject
+
+    @Test fun `create_mock leads with active=false and a warning when no device is synced`() {
+        val mocks = FakeMocks().apply { ready = false }
+        val out = callWrite("create_mock", buildJsonObject { put("path_pattern", "/orders") }, mocks)
+        assertFalse(out["active"]!!.jsonPrimitive.content.toBoolean())
+        assertTrue(out.containsKey("warning"), "an unserved mock must warn, not just report device state as a footnote")
+    }
+
+    @Test fun `create_mock is active when a device is synced`() {
+        val out = callWrite("create_mock", buildJsonObject { put("path_pattern", "/orders") }, FakeMocks())
+        assertTrue(out["active"]!!.jsonPrimitive.content.toBoolean())
+    }
+
+    @Test fun `clear_capture resets and reports the count that was cleared`() {
+        var cleared = false
+        val out = McpTools.call(
+            "clear_capture", JsonObject(emptyMap()), listOf(http("a"), http("b")),
+            { 0 }, true, null, emptyList(), { 0 }, { true }, { cleared = true },
+        ).jsonObject
+        assertTrue(cleared, "the clear callback must actually fire")
+        assertEquals(2, out["cleared"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `session_summary reports capture health so empty is never ambiguous`() {
+        val stopped = McpTools.call(
+            "session_summary", JsonObject(emptyMap()), emptyList<LogEvent>(),
+            { 0 }, true, null, emptyList(), { 0 }, { false }, {},
+        ).jsonObject
+        assertFalse(stopped["capture"]!!.jsonObject["running"]!!.jsonPrimitive.content.toBoolean())
+    }
 
     @Test fun `create_mock copies method, path and body from a captured event`() {
         val mocks = FakeMocks()
@@ -544,7 +576,7 @@ class McpToolsTest {
         assertEquals(
             listOf(
                 "list_events", "get_event", "get_trace", "find_failures", "session_summary",
-                "query_hotspots", "worker_history", "config_changes", "analytics_events",
+                "query_hotspots", "worker_history", "config_changes", "analytics_events", "clear_capture",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
             ),
             names,
