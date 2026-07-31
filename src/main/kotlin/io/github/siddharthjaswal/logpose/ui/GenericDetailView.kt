@@ -10,6 +10,7 @@ import io.github.siddharthjaswal.logpose.model.Badge
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Section
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.awt.BorderLayout
 import java.awt.Color
@@ -38,6 +39,7 @@ import javax.swing.JPanel
  */
 class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
 
+    private val typeIcon = JBLabel()
     private val kindPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
     private val titleLabel = JBLabel().apply {
         foreground = Theme.text; font = JBUI.Fonts.label(13f).asBold()
@@ -75,7 +77,10 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         background = Theme.bg0
         border = JBUI.Borders.empty(8)
 
-        overview.add(row(hbox(kindPill, Box.createHorizontalStrut(JBUI.scale(8)), titleLabel), fill = false))
+        overview.add(row(hbox(
+            typeIcon, Box.createHorizontalStrut(JBUI.scale(6)),
+            kindPill, Box.createHorizontalStrut(JBUI.scale(8)), titleLabel,
+        ), fill = false))
         overview.add(vGap(8))
         overview.add(row(subtitle, fill = true))
         overview.add(vGap(8))
@@ -99,6 +104,7 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
 
     fun show(event: LogEvent?) {
         if (event == null) {
+            typeIcon.icon = null
             kindPill.set("—", Theme.textDim, Theme.bg2)
             titleLabel.text = ""
             subtitle.text = "Select an event"
@@ -109,17 +115,26 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         }
 
         val presentation = KindPresenter.present(event)
-        kindPill.set(KindPresenter.kindLabel(event), Theme.accent, Theme.tint(Theme.accent, 30))
+        // The type, stated once: the coloured glyph + the kind chip in the same hue as its row
+        // gutter. Any payload badge that just repeats the kind is dropped below.
+        val typeColor = Theme.typeColor(event.kind)
+        val kindLabel = KindPresenter.kindLabel(event)
+        typeIcon.icon = TypeIcons.forEvent(event)
+        kindPill.set(kindLabel, typeColor, Theme.tint(typeColor, 30))
         // A payload that isn't self-describing still gets a row and a readable payload tree —
         // it just has nothing but its kind to show up top.
         titleLabel.text = presentation?.title ?: event.kind
         subtitle.text = presentation?.subtitle.orEmpty()
 
         badges.removeAll()
-        presentation?.badges?.forEachIndexed { i, badge ->
-            if (i > 0) badges.add(Box.createHorizontalStrut(JBUI.scale(6)))
-            badges.add(badgeLabel(badge))
-        }
+        // The header chip already states the type, so drop any badge that just repeats it
+        // (e.g. an "ANALYTICS" badge next to the ANLY chip) — state the type exactly once.
+        presentation?.badges
+            ?.filterNot { it.text.equals(event.kind, ignoreCase = true) || it.text.equals(kindLabel, ignoreCase = true) }
+            ?.forEachIndexed { i, badge ->
+                if (i > 0) badges.add(Box.createHorizontalStrut(JBUI.scale(6)))
+                badges.add(badgeLabel(badge))
+            }
 
         chips.removeAll()
         val items = buildList {
@@ -170,10 +185,15 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
     }
 
     private fun sectionBlock(section: Section): JComponent {
+        // Flat key/value data (analytics params, DB bound args, config values) reads as a
+        // 2-column table, not a JSON blob with braces.
+        val kvObject = (section.body as? JsonObject)?.takeIf { section.type == Section.TYPE_KV }
+        if (kvObject != null) return kvSectionBlock(section.label, kvObject)
+
         val body = when (section.type) {
             Section.TYPE_TEXT, Section.TYPE_CODE ->
                 (section.body as? JsonPrimitive)?.content ?: section.body.toString()
-            // json / kv and anything unrecognised: pretty-print rather than dumping one line.
+            // json and anything unrecognised: pretty-print rather than dumping one line.
             else -> runCatching { pretty.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), section.body) }
                 .getOrElse { section.body.toString() }
         }
@@ -205,6 +225,34 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
                 } else area,
                 BorderLayout.CENTER,
             )
+        }
+    }
+
+    /** A flat map rendered as a 2-column key/value table inside the section card. */
+    private fun kvSectionBlock(label: String, obj: JsonObject): JComponent {
+        val grid = JPanel(java.awt.GridBagLayout()).apply { isOpaque = false; border = JBUI.Borders.empty(6, 10) }
+        val gc = java.awt.GridBagConstraints()
+        obj.entries.forEachIndexed { i, (key, value) ->
+            val text = (value as? JsonPrimitive)?.content ?: value.toString()
+            gc.gridx = 0; gc.gridy = i; gc.anchor = java.awt.GridBagConstraints.NORTHWEST
+            gc.insets = JBUI.insets(2, 0, 2, 14)
+            grid.add(JBLabel(key).apply {
+                foreground = Theme.textDim; font = JBUI.Fonts.create("JetBrains Mono", 12)
+            }, gc)
+            gc.gridx = 1; gc.weightx = 1.0; gc.fill = java.awt.GridBagConstraints.HORIZONTAL; gc.insets = JBUI.insets(2, 0)
+            grid.add(JBTextArea(text).apply {
+                isEditable = false; isOpaque = false; lineWrap = true; wrapStyleWord = false
+                foreground = Theme.text; font = JBUI.Fonts.create("JetBrains Mono", 12)
+            }, gc)
+            gc.weightx = 0.0; gc.fill = java.awt.GridBagConstraints.NONE
+        }
+        return CardPanel().apply {
+            alignmentX = Component.LEFT_ALIGNMENT
+            add(JBLabel(label).apply {
+                foreground = Theme.textDim; font = JBUI.Fonts.label(11f).asBold()
+                border = JBUI.Borders.empty(6, 10, 0, 10)
+            }, BorderLayout.NORTH)
+            add(grid, BorderLayout.CENTER)
         }
     }
 
