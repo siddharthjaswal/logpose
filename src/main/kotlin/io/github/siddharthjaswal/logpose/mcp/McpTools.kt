@@ -5,6 +5,7 @@ import io.github.siddharthjaswal.logpose.analysis.SqlSummary
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockRule
+import io.github.siddharthjaswal.logpose.model.Section
 import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
@@ -13,6 +14,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -47,6 +49,7 @@ object McpTools {
         Envelope.KIND_DB,
         Envelope.KIND_WORKER,
         Envelope.KIND_CONFIG,
+        Envelope.KIND_ANALYTICS,
         Envelope.KIND_EVENT,
     )
 
@@ -165,6 +168,18 @@ object McpTools {
         )
         add(
             tool(
+                "analytics_events",
+                "Analytics events the app logged, with their params — answer 'did purchase_complete " +
+                    "fire once with the right value after checkout?'. Also returns screen_flow: the " +
+                    "screen-to-screen transitions observed, i.e. the shape of the user flow.",
+            ) {
+                put("name", stringProp("Filter by event name (substring match)."))
+                put("screen", stringProp("Filter by the screen the event fired on."))
+                put("limit", intProp("Max events to return (default 50)."))
+            },
+        )
+        add(
+            tool(
                 "list_mocks",
                 "The mock rules currently defined, with how many times each has been served and " +
                     "whether the device has them.",
@@ -251,6 +266,7 @@ object McpTools {
         "query_hotspots" -> queryHotspots(args, events)
         "worker_history" -> workerHistory(args, events)
         "config_changes" -> configChanges(args, events)
+        "analytics_events" -> analyticsEvents(args, events, sessionOf)
         "list_mocks" -> mocks.orError { listMocks(it) }
         "create_mock" -> mocks.orError { createMock(args, events, it) }
         "set_mock_enabled" -> mocks.orError { setMockEnabled(args, it) }
@@ -639,6 +655,73 @@ object McpTools {
                         if (change.isNew || change.previous == null) put("new_key", true)
                         event.update.source?.let { put("source", it) }
                     })
+                }
+            })
+        }
+    }
+
+    /** One decoded analytics event: the library emits them as a self-describing Generic payload
+     *  under the `analytics` kind (title = name, subtitle = screen, a "kv" section of params). */
+    private class Analytic(
+        val id: String, val at: Long, val session: Int,
+        val name: String, val screen: String?, val params: Map<String, String>,
+    )
+
+    private fun decodeAnalytics(events: List<LogEvent>, sessionOf: (String) -> Int): List<Analytic> =
+        events.filter { it.kind == Envelope.KIND_ANALYTICS }.mapNotNull { event ->
+            val g = (event as? LogEvent.Generic)?.event ?: return@mapNotNull null
+            val params = g.sections.firstOrNull { it.type == Section.TYPE_KV }?.body
+                ?.let { it as? JsonObject }
+                ?.mapValues { (_, v) -> (v as? JsonPrimitive)?.content ?: v.toString() }
+                ?: emptyMap()
+            Analytic(event.id, event.timestampMillis, sessionOf(event.id), g.title, g.subtitle, params)
+        }
+
+    private fun analyticsEvents(args: JsonObject, events: List<LogEvent>, sessionOf: (String) -> Int): JsonElement {
+        val name = args.str("name")
+        val screen = args.str("screen")
+        val limit = args.int("limit") ?: 50
+
+        val all = decodeAnalytics(events, sessionOf)
+        val matched = all.filter { a ->
+            (name == null || a.name.contains(name, ignoreCase = true)) &&
+                (screen == null || a.screen?.contains(screen, ignoreCase = true) == true)
+        }
+
+        // Screen-to-screen transitions in arrival order — the shape of the user flow, and the seed
+        // for a flow graph. Reset at session boundaries so a restart doesn't invent an edge, and
+        // only count when the screen actually changes (repeated events on one screen aren't a move).
+        val transitions = LinkedHashMap<Pair<String, String>, Int>()
+        var prevScreen: String? = null
+        var prevSession = Int.MIN_VALUE
+        for (a in all) {
+            val to = a.screen ?: continue
+            if (a.session != prevSession) { prevScreen = null; prevSession = a.session }
+            val from = prevScreen
+            if (from != null && from != to) transitions[from to to] = (transitions[from to to] ?: 0) + 1
+            prevScreen = to
+        }
+
+        return buildJsonObject {
+            put("count", matched.size)
+            // How often each event fired — the double-fire / wrong-screen check.
+            put("by_name", buildJsonObject {
+                matched.groupingBy { it.name }.eachCount().forEach { (n, c) -> put(n, c) }
+            })
+            put("events", buildJsonArray {
+                matched.takeLast(limit).forEach { a ->
+                    add(buildJsonObject {
+                        put("id", a.id)
+                        put("at", a.at)
+                        put("name", a.name)
+                        a.screen?.let { put("screen", it) }
+                        if (a.params.isNotEmpty()) put("params", buildJsonObject { a.params.forEach { (k, v) -> put(k, v) } })
+                    })
+                }
+            })
+            put("screen_flow", buildJsonArray {
+                transitions.entries.sortedByDescending { it.value }.take(50).forEach { (edge, count) ->
+                    add(buildJsonObject { put("from", edge.first); put("to", edge.second); put("count", count) })
                 }
             })
         }
