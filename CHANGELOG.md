@@ -6,6 +6,22 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-07-30
+
+### Added
+- **Analytics events.** `LogPose.logAnalytics(AnalyticsEventInfo(name, params, screen, provider,
+  traceId))` — one line in your analytics facade puts every event on the timeline next to the API
+  call and screen that fired it. New `ANLY` filter chip; renders on older plugins as a generic row.
+- **`analytics_events` MCP tool** — verify contracts ("did `purchase_complete` fire once with the
+  right value?") via per-event params and `by_name` counts, and read `screen_flow`: the observed
+  screen-to-screen transitions (the seed for a flow graph).
+
+### Library — logpose-android 1.5.4 - 2026-07-30
+- `LogPose.logAnalytics(...)` (see above). Emitted under an `analytics` kind carrying a
+  self-describing payload; `analyticsEnabled` switches it off. Param masking is **off by default**
+  (staging/test data) — opt in with `redactAnalyticsParams = LogPoseConfig.DEFAULT_REDACT_PARAMS`.
+  Mirrored in the no-op.
+
 ## [1.7.3] - 2026-07-30
 
 ### Added

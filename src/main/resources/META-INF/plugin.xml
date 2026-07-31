@@ -90,6 +90,11 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Analytics on the timeline</b> — <code>LogPose.logAnalytics(...)</code> puts every
+                analytics event next to the API call and screen that fired it, with an
+                <b>ANLY</b> filter chip. A new <code>analytics_events</code> MCP tool verifies
+                event contracts and returns the observed screen-to-screen flow. Needs
+                <code>logpose-android</code> &ge; 1.5.4.</li>
             <li><b>Quick mock diff</b> — a diff button on each mock row opens the original captured
                 response beside what the rule serves, without opening the editor first.</li>
             <li><b>Replayed workers</b> — WorkManager replays finished work from earlier runs to a
