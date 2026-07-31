@@ -132,6 +132,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     // can tell "no matching events" from "capture isn't running". Kept off the UI's statusDot,
     // which lives on the EDT.
     @Volatile private var captureActive = false
+    private var reattachAttempts = 0
+    private val MAX_REATTACH = 5
+    private val REATTACH_DELAY_MS = 2_000
 
     init {
         isOpaque = true
@@ -287,20 +290,43 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun startCapture() {
         parser.reset()
         captureActive = true
+        reattachAttempts = 0
         statusDot.capturing = true
         mocksController.onCaptureStarted()
+        attachReader()
+        scheduleRefresh()
+    }
+
+    /**
+     * Tails logcat, and — if the stream ends while we still think we're capturing — reattaches a
+     * few times before giving up. Capture used to die silently on an app reinstall (adb drops the
+     * stream); an agent then saw empty queries with no signal. Any received line resets the
+     * attempt counter, so a healthy capture that later drops still gets a fresh set of retries.
+     */
+    private fun attachReader() {
         reader.start(
-            onLine = { line -> parser.accept(line)?.let { store.add(it) } },
+            onLine = { line ->
+                reattachAttempts = 0
+                parser.accept(line)?.let { store.add(it) }
+            },
             onError = { msg ->
                 refreshAlarm.addRequest({
                     detailCards.show(detailPane, "http")
                     detail.showError("⚠ LogPose capture error:\n\n$msg")
                 }, 0)
             },
-            // Reader ended (device disconnected / adb error) — reset capture state on the EDT.
-            onStopped = { captureActive = false; refreshAlarm.addRequest({ statusDot.capturing = false }, 0) },
+            onStopped = {
+                // captureActive is cleared by stopCapture() before reader.stop(), so if it's still
+                // set here the stream ended on its own — a transient device/adb drop worth retrying.
+                if (captureActive && reattachAttempts < MAX_REATTACH) {
+                    reattachAttempts++
+                    refreshAlarm.addRequest({ if (captureActive) attachReader() }, REATTACH_DELAY_MS)
+                } else {
+                    captureActive = false
+                    refreshAlarm.addRequest({ statusDot.capturing = false }, 0)
+                }
+            },
         )
-        scheduleRefresh()
     }
 
     private fun stopCapture() {
