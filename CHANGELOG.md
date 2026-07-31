@@ -6,6 +6,21 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.5] - 2026-07-31
+
+UI upgrade — no behaviour change, no library dependency.
+
+### Changed
+- **Typed rows.** Every row now leads with a colour-coded type glyph in the gutter, one hue per
+  kind. Non-network rows leave the method/status columns empty so the centre aligns with HTTP, and
+  the type is stated exactly once — the old doubled type text (a kind label plus a truncated pill
+  like `ANAL…` / `SELE…` / `SUCC…` / `ENQ…`) is gone.
+- **TYPE filter chips** are lit in their kind's hue, matching the row gutters — so filter state
+  reads from the rows alone, and analytics no longer borrows GET's blue.
+- **Detail pane** states the type once (a type glyph + kind chip in the matching hue, dropping the
+  duplicate badge), and renders flat key/value data (analytics params, DB bound args, config
+  values) as a 2-column table instead of a JSON blob.
+
 ## [1.7.4] - 2026-07-30
 
 ### Added

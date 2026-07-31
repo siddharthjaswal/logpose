@@ -90,6 +90,11 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Typed rows &amp; detail</b> — every row leads with a colour-coded type glyph
+                (one hue per kind); non-network rows keep the method/status columns clear so the
+                centre lines up, and the type is stated once instead of as a doubled, truncated
+                pill. TYPE filter chips are lit in the matching hue, and the detail pane renders
+                flat key/value data as a table.</li>
             <li><b>Analytics on the timeline</b> — <code>LogPose.logAnalytics(...)</code> puts every
                 analytics event next to the API call and screen that fired it, with an
                 <b>ANLY</b> filter chip. A new <code>analytics_events</code> MCP tool verifies
