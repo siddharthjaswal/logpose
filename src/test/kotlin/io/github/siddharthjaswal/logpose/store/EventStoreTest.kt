@@ -7,6 +7,7 @@ import io.github.siddharthjaswal.logpose.model.Request
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.encodeToJsonElement
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
@@ -30,7 +31,24 @@ class EventStoreTest {
         )
     }
 
+    private fun analytics(id: String): LogEvent.Generic {
+        val ev = io.github.siddharthjaswal.logpose.model.GenericEvent(title = "SFX_GEOFENCE_EVALUATE_LOCATION")
+        return LogEvent.Generic(ev, Envelope(kind = Envelope.KIND_ANALYTICS, id = id, at = 1, payload = json.encodeToJsonElement(ev)))
+    }
+
     private fun store() = EventStore()
+
+    @Test fun `a flood of analytics can't evict other kinds`() {
+        // The real capture: 365 geofence analytics events in 9 minutes drowning the one accept.
+        val store = store()
+        store.add(event("the-accept"))
+        repeat(1_000) { store.add(analytics("a$it")) }
+
+        val snapshot = store.snapshot()
+        assertTrue(snapshot.any { it.id == "the-accept" }, "the HTTP event must survive the analytics flood")
+        val analyticsCount = snapshot.count { it.kind == Envelope.KIND_ANALYTICS }
+        assertTrue(analyticsCount <= 400, "analytics is capped per-kind, not left to fill the buffer")
+    }
 
     @Test fun `a second hello from the same process does not split the session`() {
         // The provider says hello at startup and the interceptor re-announces on its first call.

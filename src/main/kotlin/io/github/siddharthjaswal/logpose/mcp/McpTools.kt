@@ -94,6 +94,7 @@ object McpTools {
                 put("method", stringProp("HTTP method filter, e.g. 'POST'."))
                 put("status_class", intProp("HTTP status class: 2, 3, 4 or 5."))
                 put("contains", stringProp("Substring match on URL, title, or subtitle."))
+                put("exclude", stringProp("Drop events whose text matches this — e.g. 'SFX_GEOFENCE' to hide a chatty location feed."))
                 put("failed_only", boolProp("Only failures: non-2xx responses and errors."))
                 put("since_seconds", intProp("Only events captured in the last N seconds."))
             },
@@ -309,6 +310,7 @@ object McpTools {
         val failedOnly = args.bool("failed_only") ?: false
         val sinceSeconds = args.int("since_seconds")
         val session = args.int("session")
+        val exclude = args.str("exclude")
 
         val matched = events.filter { event ->
             if (session != null && sessionOf(event.id) != session) return@filter false
@@ -319,6 +321,8 @@ object McpTools {
             if (method != null && tx?.request?.method?.uppercase() != method) return@filter false
             if (statusClass != null && (tx?.response?.code ?: 0) / 100 != statusClass) return@filter false
             if (contains != null && !event.haystack().contains(contains, ignoreCase = true)) return@filter false
+            // Server-side noise exclusion: drop e.g. every SFX_GEOFENCE_* event in one pass.
+            if (exclude != null && event.haystack().contains(exclude, ignoreCase = true)) return@filter false
             true
         }
 

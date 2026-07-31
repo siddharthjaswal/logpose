@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose.store
 
+import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -51,12 +52,27 @@ class EventStore(private val capacity: Int = 2_000) {
 
     @Synchronized
     fun add(event: LogEvent) {
+        val isNew = event.id !in all
         firstSeen.getOrPut(event.id) { System.currentTimeMillis() }
         // First seen wins: a response landing on its request's row keeps the request's session,
         // which is what stops a call that straddles a restart from being counted twice.
         sessionOf.getOrPut(event.id) { sessionList.lastOrNull()?.index ?: 0 }
         all[event.id] = event
+        // The chatty kinds (a geofence-happy analytics feed, a busy Room callback) would otherwise
+        // fill the whole buffer and evict the HTTP calls and the one accept/reject you opened
+        // LogPose to see. Cap them per-kind so they can only crowd out their own kind's history.
+        if (isNew) PER_KIND_CAP[event.kind]?.let { cap -> evictOldestOfKind(event.kind, cap) }
         listeners.forEach { it() }
+    }
+
+    /** Drops the oldest event of [kind] once that kind exceeds [cap], leaving other kinds alone. */
+    private fun evictOldestOfKind(kind: String, cap: Int) {
+        var count = 0
+        var oldestId: String? = null
+        for ((id, ev) in all) if (ev.kind == kind) { count++; if (oldestId == null) oldestId = id }
+        if (count > cap && oldestId != null) {
+            all.remove(oldestId); firstSeen.remove(oldestId); sessionOf.remove(oldestId)
+        }
     }
 
     /**
@@ -116,4 +132,12 @@ class EventStore(private val capacity: Int = 2_000) {
         firstSeen[id]?.let { System.currentTimeMillis() - it } ?: 0L
 
     fun addListener(l: () -> Unit) { listeners.add(l) }
+
+    companion object {
+        /** Per-kind ceilings for the chattiest kinds, so a flood can't evict everything else. */
+        private val PER_KIND_CAP = mapOf(
+            Envelope.KIND_ANALYTICS to 400,
+            Envelope.KIND_DB to 400,
+        )
+    }
 }
