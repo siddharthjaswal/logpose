@@ -649,8 +649,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             return if (device.helloSeen) {
                 "${device.pkg ?: "device"} · synced rev ${device.syncedRevision}"
             } else {
-                "waiting for device — needs logpose-android ≥ 1.1.0 and capture running, so " +
-                    "the rule won't take effect yet"
+                "waiting for the app to announce itself — restart the app (or start capture " +
+                    "before launching it); needs logpose-android ≥ 1.1.0. Rules won't serve yet."
             }
         }
         override fun deviceReady() = mocksController.deviceState().helloSeen

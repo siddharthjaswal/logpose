@@ -6,6 +6,28 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.7] - 2026-08-01
+
+Plugin **1.7.7**, library **v1.5.6**. A third coding-agent report, again ordered by pain. The
+theme: trust the honest signals.
+
+### Fixed
+- **`list_mocks` now reports `served`** — counted from the captured `mocked: true` responses in
+  the buffer, the trustworthy signal — instead of the device `hits` counter, which only rode back
+  on a rule-set apply and so read 0 while a rule was demonstrably serving. The device counter is
+  kept as a secondary `device_hits`.
+- **Ambient trace now covers the FCM row itself** — `logFcmMessage` / `logFcmToken` bypassed the
+  trace-injecting `emit()`, so a push handled inside `withTrace { }` correlated everything it
+  triggered *except* the push. (library)
+
+### Added
+- **`create_mock` warning names the real precondition** — a mock activates once the app has
+  announced itself to *this* capture; the warning now says to restart the app, not just "start
+  capture".
+- **`LogPose.continueTrace { }`** — carry the ambient trace across one async hop
+  (`val work = continueTrace { … }; launch { work() }`), since the thread-local trace doesn't
+  follow a `viewModelScope.launch`. (library)
+
 ## [1.7.6] - 2026-07-31
 
 Acting on a second coding-agent report, ordered by the pain each caused. The theme: making

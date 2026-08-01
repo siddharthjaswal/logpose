@@ -281,7 +281,7 @@ object McpTools {
         "config_changes" -> configChanges(args, events)
         "analytics_events" -> analyticsEvents(args, events, sessionOf)
         "clear_capture" -> clearCaptureTool(clearCapture, events.size)
-        "list_mocks" -> mocks.orError { listMocks(it) }
+        "list_mocks" -> mocks.orError { listMocks(it, events) }
         "create_mock" -> mocks.orError { createMock(args, events, it) }
         "set_mock_enabled" -> mocks.orError { setMockEnabled(args, it) }
         "delete_mock" -> mocks.orError { deleteMock(args, it) }
@@ -774,12 +774,32 @@ object McpTools {
 
     // ---- mocks (write) ---------------------------------------------------------------------
 
-    private fun listMocks(mocks: Mocks): JsonElement {
-        val hits = mocks.hits()
+    private fun listMocks(mocks: Mocks, events: List<LogEvent>): JsonElement {
+        // `served` is counted from the captured `mocked:true` responses, not the device's hit
+        // counter — the counter only rides back when a rule set is (re)applied, so it reads 0
+        // while a rule is demonstrably serving. The event flag is the trustworthy signal.
+        val deviceHits = mocks.hits()
         return buildJsonObject {
             put("device", mocks.deviceHint())
             put("count", mocks.list().size)
-            put("mocks", buildJsonArray { mocks.list().forEach { add(briefMock(it, hits[it.id] ?: 0)) } })
+            put("served_note", "'served' is counted from captured mocked responses in this buffer " +
+                "(it resets with clear_capture); 'device_hits' is the app's own counter, which can lag.")
+            put("mocks", buildJsonArray {
+                mocks.list().forEach { add(briefMock(it, ruleServed(it, events), deviceHits[it.id] ?: 0)) }
+            })
+        }
+    }
+
+    /** How many captured responses this rule actually served — matched the way the device does. */
+    private fun ruleServed(rule: MockRule, events: List<LogEvent>): Int {
+        val pathRegex = runCatching {
+            Regex(rule.pathPattern.split("*").joinToString(".*") { Regex.escape(it) })
+        }.getOrNull()
+        return events.count { ev ->
+            val tx = (ev as? LogEvent.Http)?.tx ?: return@count false
+            tx.mocked &&
+                (rule.method == "*" || tx.request.method.equals(rule.method, ignoreCase = true)) &&
+                (pathRegex?.matches(tx.request.path.ifBlank { tx.request.url }) ?: false)
         }
     }
 
@@ -842,14 +862,16 @@ object McpTools {
             // Lead with whether the rule is actually serving. "created" alone read as success even
             // when no device was attached, and an agent built a flow on a mock that never fired.
             put("active", active)
-            put("created", briefMock(rule, 0))
+            put("created", briefMock(rule, 0, 0))
             put("device", mocks.deviceHint())
             if (!active) {
                 put(
                     "warning",
-                    "NOT SERVING YET — no device is synced, so the running app is still getting the " +
-                        "real response. The rule is saved and activates once a device attaches with " +
-                        "capture running (logpose-android ≥ 1.1.0). Do not rely on it until active=true.",
+                    "NOT SERVING YET — the app hasn't announced itself to this capture, so the " +
+                        "running app is still getting the real response. The gate is the app→IDE " +
+                        "handshake, not just capture: if the app was already running when capture " +
+                        "started, RESTART IT (or start capture before launching). The rule activates " +
+                        "when the device shows 'synced rev N'. Do not rely on it until active=true.",
                 )
             } else {
                 put(
@@ -885,7 +907,7 @@ object McpTools {
         return buildJsonObject { put("deleted", id); put("device", mocks.deviceHint()) }
     }
 
-    private fun briefMock(rule: MockRule, hits: Int): JsonObject = buildJsonObject {
+    private fun briefMock(rule: MockRule, served: Int, deviceHits: Int): JsonObject = buildJsonObject {
         put("id", rule.id)
         put("match", "${rule.method} ${rule.pathPattern}")
         put("enabled", rule.enabled)
@@ -894,7 +916,8 @@ object McpTools {
         else put("status", rule.status)
         if (rule.latencyMillis > 0) put("latency_ms", rule.latencyMillis)
         if (rule.serveLimit > 0) put("serve_limit", rule.serveLimit)
-        put("hits", hits)
+        put("served", served)
+        put("device_hits", deviceHits)
     }
 
     // ---- shared shaping -------------------------------------------------------------------

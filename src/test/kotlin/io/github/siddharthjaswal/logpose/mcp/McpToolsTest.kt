@@ -46,6 +46,7 @@ class McpToolsTest {
         durationMillis: Long? = 30,
         body: String? = null,
         traceId: String? = null,
+        mocked: Boolean = false,
     ): LogEvent.Http {
         val tx = Transaction(
             id = id,
@@ -54,6 +55,7 @@ class McpToolsTest {
             response = code?.let { Response(code = it, body = body?.let { b -> Body(text = b) }) },
             durationMillis = durationMillis,
             error = error,
+            mocked = mocked,
         )
         return LogEvent.Http(
             tx,
@@ -564,6 +566,41 @@ class McpToolsTest {
         val mocks = FakeMocks()
         val out = callWrite("list_mocks", JsonObject(emptyMap()), mocks)
         assertEquals("test-device · synced rev 1", out["device"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `list_mocks counts served from captured mocked responses, not the device counter`() {
+        // The device hit counter only rides back on a rule-set apply, so it reads 0 while a rule
+        // is demonstrably serving. The mocked:true flag on captured responses is the honest signal.
+        val mocks = FakeMocks()
+        callWrite("create_mock", buildJsonObject { put("method", "GET"); put("path_pattern", "/orders") }, mocks)
+        val id = mocks.rules.single().id
+
+        val events = listOf(
+            http("m1", method = "GET", path = "/orders", mocked = true),
+            http("m2", method = "GET", path = "/orders", mocked = true),
+            http("r1", method = "GET", path = "/orders", mocked = false), // real, not served by the rule
+            http("o1", method = "GET", path = "/feed", mocked = true),     // mocked but a different path
+        )
+        val out = callWrite("list_mocks", JsonObject(emptyMap()), mocks, events)
+
+        val rule = out["mocks"]!!.jsonArray.single { it.jsonObject["id"]!!.jsonPrimitive.content == id }.jsonObject
+        assertEquals(2, rule["served"]!!.jsonPrimitive.int(), "two mocked /orders responses were served")
+        assertEquals(0, rule["device_hits"]!!.jsonPrimitive.int(), "the device counter stays a footnote")
+    }
+
+    @Test fun `list_mocks served count honours the path glob`() {
+        val mocks = FakeMocks()
+        callWrite("create_mock", buildJsonObject { put("method", "*"); put("path_pattern", "/v1/*/orders") }, mocks)
+        val id = mocks.rules.single().id
+
+        val events = listOf(
+            http("a", method = "GET", path = "/v1/abc/orders", mocked = true),
+            http("b", method = "POST", path = "/v1/xyz/orders", mocked = true),
+            http("c", method = "GET", path = "/v1/abc/items", mocked = true), // outside the glob
+        )
+        val out = callWrite("list_mocks", JsonObject(emptyMap()), mocks, events)
+        val rule = out["mocks"]!!.jsonArray.single { it.jsonObject["id"]!!.jsonPrimitive.content == id }.jsonObject
+        assertEquals(2, rule["served"]!!.jsonPrimitive.int())
     }
 
     @Test fun `write tools refuse cleanly when mocking is unavailable`() {

@@ -40,6 +40,8 @@ object LogPose {
 
     fun <T> withTrace(traceId: String = "", block: () -> T): T = block()
 
+    fun <T> continueTrace(block: () -> T): () -> T = block
+
     fun logAnalytics(info: AnalyticsEventInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
 
     fun logDbQuery(info: DbQueryInfo, config: LogPoseConfig = LogPoseConfig()) = Unit

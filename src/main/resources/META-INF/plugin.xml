@@ -90,6 +90,13 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Honest mock hit counts</b> — <code>list_mocks</code> now reports
+                <code>served</code>, counted from the captured mocked responses in the buffer,
+                instead of the device counter that read 0 while a rule was demonstrably serving.
+                <code>create_mock</code>'s warning names the real precondition (restart the app so it
+                announces itself to this capture). Ambient trace now also covers the FCM row itself,
+                and <code>LogPose.continueTrace { }</code> carries a trace across a
+                <code>viewModelScope.launch</code> — both need <code>logpose-android</code> &ge; 1.5.6.</li>
             <li><b>Reliability &amp; test-orchestration</b> — capture now reports whether it's running
                 (and auto-reattaches after an adb drop, so it no longer dies silently on a
                 reinstall); <code>create_mock</code> warns loudly when no device is synced; a new

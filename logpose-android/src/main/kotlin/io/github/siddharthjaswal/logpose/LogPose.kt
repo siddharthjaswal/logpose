@@ -134,6 +134,22 @@ object LogPose {
         }
     }
 
+    /**
+     * Carry the current ambient trace across one async hop. [withTrace] is thread-local, so a
+     * `viewModelScope.launch { … }` runs on another thread with no trace in scope. Capture at the
+     * launch site and let the returned lambda re-enter the trace wherever it actually runs:
+     * ```kotlin
+     * val work = LogPose.continueTrace { repository.getOrder(id) } // grabs the id now
+     * viewModelScope.launch { work() }                             // re-enters it there
+     * ```
+     * If no trace is in scope when captured, [block] runs unwrapped. This binds the trace once at
+     * the hop; it is not a substitute for `withTrace` around a coroutine that suspends repeatedly.
+     */
+    fun <T> continueTrace(block: () -> T): () -> T {
+        val captured = currentTrace.get()
+        return { if (captured == null) block() else withTrace(captured, block) }
+    }
+
     // ---- Analytics ----------------------------------------------------------------------
 
     /**
@@ -382,7 +398,7 @@ object LogPose {
             )
         } else null
 
-        LogcatEmitter(config).emit(
+        emitFcm(
             WireFcmMessage(
                 id = info.messageId ?: newId(),
                 event = "message",
@@ -397,20 +413,22 @@ object LogPose {
                 priority = info.priority,
                 notification = notification,
                 data = info.data,
-            )
+            ),
+            config,
         )
     }
 
     /** Record an FCM registration-token refresh. Call from `onNewToken`. */
     fun logFcmToken(token: String, config: LogPoseConfig = LogPoseConfig()) {
         if (!config.enabled) return
-        LogcatEmitter(config).emit(
+        emitFcm(
             WireFcmMessage(
                 id = newId(),
                 event = "token",
                 receivedAtMillis = System.currentTimeMillis(),
                 token = token,
-            )
+            ),
+            config,
         )
     }
 
@@ -425,6 +443,21 @@ object LogPose {
     private val configSnapshot = mutableMapOf<String, String>()
 
     private fun newId(): String = UUID.randomUUID().toString().substring(0, 8)
+
+    /** Wrap an FCM message in its envelope and emit through [emit], so it inherits the ambient
+     *  trace like every other kind — the FCM row is the anchor of a push trace, so it must be in it. */
+    private fun emitFcm(fcm: WireFcmMessage, config: LogPoseConfig) {
+        emit(
+            Envelope(
+                kind = Envelope.KIND_FCM,
+                id = fcm.id,
+                at = fcm.receivedAtMillis,
+                endedAt = fcm.receivedAtMillis,
+                payload = json.encodeToJsonElement(fcm),
+            ),
+            config,
+        )
+    }
 
     private fun emit(envelope: Envelope, config: LogPoseConfig) {
         // Auto-attach the ambient trace (see withTrace) when the event didn't set one itself, so a
