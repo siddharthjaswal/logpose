@@ -6,6 +6,21 @@ format may still change.
 
 ## [Unreleased]
 
+Library **v1.5.7** (plugin unchanged — the `Envelope` already carries `traceId`, so `get_trace`
+groups these rows with no plugin release).
+
+### Added
+- **Trace-tagged HTTP rows.** The ambient `withTrace` is thread-local, but the interceptor emits
+  on OkHttp's own thread — so an async request's row never carried the trace. Now a
+  `LogPoseTrace` request tag (or the ambient trace, for a synchronous call) is resolved at
+  intercept time and stamped onto the row. Attach it per call with `Request.Builder.logPoseTrace()`
+  or once around a client with `LogPose.traceCalls(callFactory)` — which tags each request with
+  the ambient trace **at call-creation time** (the coroutine frame, before the network hop).
+- **`LogPose.traceContext()`** — a coroutine `ThreadContextElement` that keeps the ambient trace in
+  scope across `launch`/`withContext` hops, so an async flow's HTTP row and its analytics/db events
+  land in one `get_trace` group. Coroutines is a `compileOnly` dep; the no-op stubs it with
+  `EmptyCoroutineContext`.
+
 ## [1.7.7] - 2026-08-01
 
 Plugin **1.7.7**, library **v1.5.6**. A third coding-agent report, again ordered by pain. The

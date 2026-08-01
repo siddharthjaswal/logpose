@@ -50,10 +50,15 @@ dependencies {
     // OkHttp is provided by the host app — keep it as compileOnly so LogPose
     // doesn't pin a version on consumers.
     compileOnly("com.squareup.okhttp3:okhttp:4.12.0")
+    // Coroutines is only needed for the optional trace context element; the host app already
+    // has it, so keep it compileOnly and off consumers who don't use traceContext().
+    compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
 }
 
 // Version comes from -Pversion (JitPack passes the git tag via $VERSION), defaulting

@@ -1,5 +1,8 @@
 package io.github.siddharthjaswal.logpose
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -31,5 +34,17 @@ class TraceScopeTest {
             }
             assertEquals("outer", LogPose.currentTraceId())
         }
+    }
+
+    @Test fun `traceContext carries the trace across a dispatcher hop`() = runBlocking {
+        assertNull(LogPose.currentTraceId())
+        withContext(LogPose.traceContext("flow-1") + Dispatchers.Default) {
+            assertEquals("flow-1", LogPose.currentTraceId())
+            // A further hop to another dispatcher must keep the trace in scope.
+            withContext(Dispatchers.IO) {
+                assertEquals("flow-1", LogPose.currentTraceId())
+            }
+        }
+        assertNull("the trace must not leak onto the caller thread", LogPose.currentTraceId())
     }
 }

@@ -20,14 +20,17 @@ private val wireJson = Json { encodeDefaults = true; explicitNulls = false }
 
 /**
  * Wrap and emit an HTTP exchange. A transaction with no duration yet is still in flight, so
- * its span stays open (`endedAt = null`) and the IDE renders it as pending.
+ * its span stays open (`endedAt = null`) and the IDE renders it as pending. [traceId] carries the
+ * trace resolved by the interceptor (from a [io.github.siddharthjaswal.logpose.LogPoseTrace] tag
+ * or the ambient scope), so the row lands in the right `get_trace` group.
  */
-fun EventEmitter.emit(tx: Transaction) = emit(
+fun EventEmitter.emit(tx: Transaction, traceId: String? = null) = emit(
     Envelope(
         kind = Envelope.KIND_HTTP,
         id = tx.id,
         at = tx.startedAtMillis,
         endedAt = tx.durationMillis?.let { tx.startedAtMillis + it },
+        traceId = traceId,
         payload = wireJson.encodeToJsonElement(tx),
     )
 )

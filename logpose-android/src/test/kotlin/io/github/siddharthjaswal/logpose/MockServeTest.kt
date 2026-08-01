@@ -15,12 +15,14 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -163,6 +165,52 @@ class MockServeTest {
         assertTrue(proceeded)
         assertEquals(200, response.code)
         assertFalse("a real network response is not mocked", emitted.single().mocked)
+    }
+
+    // ---- trace resolution -------------------------------------------------------------------
+
+    private fun ok(req: Request = request()): Response = Response.Builder()
+        .request(req).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+        .body("".toByteArray().toResponseBody(null)).build()
+
+    @Test fun `interceptor files the row under a LogPoseTrace tag on the request`() {
+        val tagged = request().newBuilder().logPoseTrace("trace-xyz").build()
+        interceptor.intercept(FakeChain(tagged) { ok(tagged) })
+        assertEquals("trace-xyz", envelopes.single().traceId)
+    }
+
+    @Test fun `interceptor falls back to the ambient trace for a synchronous call`() {
+        LogPose.withTrace("amb-1") { interceptor.intercept(FakeChain(request()) { ok() }) }
+        assertEquals("amb-1", envelopes.single().traceId)
+    }
+
+    @Test fun `an explicit request tag wins over the ambient trace`() {
+        val tagged = request().newBuilder().logPoseTrace("explicit").build()
+        LogPose.withTrace("ambient") { interceptor.intercept(FakeChain(tagged) { ok(tagged) }) }
+        assertEquals("explicit", envelopes.single().traceId)
+    }
+
+    @Test fun `untraced call carries no trace`() {
+        interceptor.intercept(FakeChain(request()) { ok() })
+        assertNull(envelopes.single().traceId)
+    }
+
+    @Test fun `traceCalls tags new requests with the ambient trace, but never overwrites an explicit one`() {
+        var seen: Request? = null
+        val client = OkHttpClient()
+        val delegate = object : Call.Factory {
+            override fun newCall(request: Request): Call { seen = request; return client.newCall(request) }
+        }
+        val factory = LogPose.traceCalls(delegate)
+
+        LogPose.withTrace("ambient") { factory.newCall(request()) }
+        assertEquals("ambient", seen!!.tag(LogPoseTrace::class.java)?.traceId)
+
+        LogPose.withTrace("ambient") { factory.newCall(request().newBuilder().logPoseTrace("explicit").build()) }
+        assertEquals("explicit", seen!!.tag(LogPoseTrace::class.java)?.traceId)
+
+        factory.newCall(request()) // no trace in scope
+        assertNull(seen!!.tag(LogPoseTrace::class.java))
     }
 
     /** Minimal [Interceptor.Chain]: serves [request], delegates proceed() to [onProceed]. */

@@ -69,6 +69,11 @@ class LogPoseInterceptor @JvmOverloads constructor(
             body = runCatching { BodyCapture.captureRequest(request, config) }.getOrNull(),
         )
 
+        // The trace to file this row under: a LogPoseTrace tag on the request (set at call time,
+        // it survives the hop to this OkHttp thread) wins; otherwise the ambient trace, which is
+        // only set here for a synchronous call made inside withTrace on this same thread.
+        val traceId = request.tag(LogPoseTrace::class.java)?.traceId ?: LogPose.currentTraceId()
+
         // Mock short-circuit: if an active rule matches, serve it instead of hitting the
         // network (replace mode), or let the real response through and patch it (patch mode).
         // Either way the transaction is emitted flagged mocked=true, so the timeline never
@@ -77,9 +82,9 @@ class LogPoseInterceptor @JvmOverloads constructor(
             val rule = MockRegistry.match(request.method, request.url.encodedPath)
             if (rule != null) {
                 return if (rule.mode == MockRule.MODE_PATCH)
-                    servePatch(rule, chain, request, wireRequest, id, startedAt, startNs)
+                    servePatch(rule, chain, request, wireRequest, id, startedAt, startNs, traceId)
                 else
-                    serveMock(rule, request, wireRequest, id, startedAt, startNs)
+                    serveMock(rule, request, wireRequest, id, startedAt, startNs, traceId)
             }
         }
 
@@ -87,7 +92,7 @@ class LogPoseInterceptor @JvmOverloads constructor(
         // so the IDE can show the in-flight request with a live timer. The completed event
         // below shares the same id and replaces it.
         if (config.emitPending) {
-            emitter.emit(Transaction(id = id, startedAtMillis = startedAt, request = wireRequest))
+            emitter.emit(Transaction(id = id, startedAtMillis = startedAt, request = wireRequest), traceId)
         }
 
         // Catch *any* failure, not just IOException: a downstream interceptor (auth, error
@@ -104,7 +109,8 @@ class LogPoseInterceptor @JvmOverloads constructor(
                     request = wireRequest,
                     error = t.toString(),
                     durationMillis = elapsedMs(startNs),
-                )
+                ),
+                traceId,
             )
             throw t
         }
@@ -121,7 +127,8 @@ class LogPoseInterceptor @JvmOverloads constructor(
                     headers = BodyCapture.headersToMap(response.headers, config),
                     body = runCatching { BodyCapture.captureResponse(response, config) }.getOrNull(),
                 ),
-            )
+            ),
+            traceId,
         )
         return response
     }
@@ -141,6 +148,7 @@ class LogPoseInterceptor @JvmOverloads constructor(
         id: String,
         startedAt: Long,
         startNs: Long,
+        traceId: String?,
     ): Response {
         MockRegistry.recordServe(rule)
         if (rule.latencyMillis > 0) {
@@ -164,7 +172,8 @@ class LogPoseInterceptor @JvmOverloads constructor(
                     error = failure.toString(),
                     durationMillis = elapsedMs(startNs),
                     mocked = true,
-                )
+                ),
+                traceId,
             )
             throw failure
         }
@@ -193,7 +202,8 @@ class LogPoseInterceptor @JvmOverloads constructor(
                     body = runCatching { BodyCapture.captureResponse(response, config) }.getOrNull(),
                 ),
                 mocked = true,
-            )
+            ),
+            traceId,
         )
         return response
     }
@@ -211,6 +221,7 @@ class LogPoseInterceptor @JvmOverloads constructor(
         id: String,
         startedAt: Long,
         startNs: Long,
+        traceId: String?,
     ): Response {
         MockRegistry.recordServe(rule)
         if (rule.latencyMillis > 0) {
@@ -225,7 +236,8 @@ class LogPoseInterceptor @JvmOverloads constructor(
                 Transaction(
                     id = id, startedAtMillis = startedAt, request = wireRequest,
                     error = t.toString(), durationMillis = elapsedMs(startNs), mocked = true,
-                )
+                ),
+                traceId,
             )
             throw t
         }
@@ -259,7 +271,8 @@ class LogPoseInterceptor @JvmOverloads constructor(
                     body = runCatching { BodyCapture.captureResponse(response, config) }.getOrNull(),
                 ),
                 mocked = true,
-            )
+            ),
+            traceId,
         )
         return response
     }

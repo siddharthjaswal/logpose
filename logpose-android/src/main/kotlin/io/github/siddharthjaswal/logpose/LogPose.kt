@@ -125,14 +125,27 @@ object LogPose {
      * explicitly (or re-enter `withTrace`) on the other side of an async boundary.
      */
     fun <T> withTrace(traceId: String = newTraceId(), block: () -> T): T {
-        val previous = currentTrace.get()
-        currentTrace.set(traceId)
+        val previous = installTrace(traceId)
         try {
             return block()
         } finally {
-            currentTrace.set(previous)
+            restoreTrace(previous)
         }
     }
+
+    /**
+     * Install [traceId] as the ambient trace on the current thread, returning the previous value to
+     * hand back to [restoreTrace]. The enter/exit primitives behind [withTrace], exposed for the
+     * coroutine [traceContext] element (which must set and restore around each dispatch), not for
+     * general use.
+     */
+    internal fun installTrace(traceId: String?): String? {
+        val previous = currentTrace.get()
+        currentTrace.set(traceId)
+        return previous
+    }
+
+    internal fun restoreTrace(previous: String?) = currentTrace.set(previous)
 
     /**
      * Carry the current ambient trace across one async hop. [withTrace] is thread-local, so a
