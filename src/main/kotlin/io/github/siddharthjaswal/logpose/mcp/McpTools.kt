@@ -544,8 +544,9 @@ object McpTools {
                 // A bare [] reads like "nothing to worry about" when it actually means the app
                 // never set a trace id — LogPose does no implicit propagation.
                 put("traces_note", "No event carries a trace id. LogPose never infers causality: " +
-                    "trace ids are set explicitly by the app (LogPose.newTraceId()), so get_trace " +
-                    "has nothing to group until the app opts in.")
+                    "the app opts in by wrapping a flow (LogPose.withTrace { } / traceContext()), " +
+                    "which stamps the events it emits — including HTTP rows, when the client is set " +
+                    "up with LogPose.traceCalls(...) — so get_trace has nothing to group until then.")
             }
         }
     }

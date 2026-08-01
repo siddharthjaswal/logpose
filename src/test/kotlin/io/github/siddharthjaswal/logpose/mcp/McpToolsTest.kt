@@ -747,6 +747,6 @@ class McpToolsTest {
         val out = call("session_summary", listOf(http("a")))
         assertTrue(out["traces"]!!.jsonArray.isEmpty())
         // A bare [] reads as "no problems" when it really means the app never set a trace id.
-        assertTrue(out["traces_note"]!!.jsonPrimitive.content.contains("explicitly"))
+        assertTrue(out["traces_note"]!!.jsonPrimitive.content.contains("opts in"))
     }
 }

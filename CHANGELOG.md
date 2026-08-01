@@ -6,10 +6,11 @@ format may still change.
 
 ## [Unreleased]
 
-Library **v1.5.7** (plugin unchanged — the `Envelope` already carries `traceId`, so `get_trace`
-groups these rows with no plugin release).
+## [1.7.8] - 2026-08-01
 
-### Added
+Plugin **1.7.8**, library **v1.5.7**. Async HTTP rows can now join a trace.
+
+### Added (library)
 - **Trace-tagged HTTP rows.** The ambient `withTrace` is thread-local, but the interceptor emits
   on OkHttp's own thread — so an async request's row never carried the trace. Now a
   `LogPoseTrace` request tag (or the ambient trace, for a synchronous call) is resolved at
@@ -20,6 +21,11 @@ groups these rows with no plugin release).
   scope across `launch`/`withContext` hops, so an async flow's HTTP row and its analytics/db events
   land in one `get_trace` group. Coroutines is a `compileOnly` dep; the no-op stubs it with
   `EmptyCoroutineContext`.
+
+### Changed (plugin)
+- **`session_summary`'s empty-traces note** now tells the agent how a flow opts in
+  (`withTrace` / `traceContext`, HTTP rows via `traceCalls`) instead of pointing only at
+  `newTraceId()`.
 
 ## [1.7.7] - 2026-08-01
 

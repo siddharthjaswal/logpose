@@ -90,6 +90,11 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Async HTTP rows can join a trace</b> — wrap a flow in
+                <code>LogPose.withTrace { }</code> or <code>traceContext()</code> and, with the client
+                set up via <code>LogPose.traceCalls(...)</code>, the request's row lands in the same
+                <code>get_trace</code> group as the flow's other events — even across a
+                <code>viewModelScope.launch</code>. Needs <code>logpose-android</code> &ge; 1.5.7.</li>
             <li><b>Honest mock hit counts</b> — <code>list_mocks</code> now reports
                 <code>served</code>, counted from the captured mocked responses in the buffer,
                 instead of the device counter that read 0 while a rule was demonstrably serving.
