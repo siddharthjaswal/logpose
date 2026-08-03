@@ -24,6 +24,9 @@ internal object MockRegistry {
     @Volatile var revision: Int = 0
         private set
 
+    /** Rules currently applied (0 after a process restart / wipe). */
+    val ruleCount: Int get() = rules.size
+
     // rule id → times served in this process. Survives re-pushes (ids are stable), so the
     // IDE's hit counts don't reset every time the user edits an unrelated rule.
     private val hitCounts = ConcurrentHashMap<String, Int>()

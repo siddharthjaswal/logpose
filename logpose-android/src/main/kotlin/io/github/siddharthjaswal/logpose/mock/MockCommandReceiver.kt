@@ -61,6 +61,7 @@ internal class MockCommandReceiver : BroadcastReceiver() {
                     MockAck(
                         pkg = context.packageName,
                         revision = MockRegistry.revision,
+                        ruleCount = MockRegistry.ruleCount,
                         hits = MockRegistry.hits(),
                     )
                 )

@@ -90,6 +90,14 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Headless capture export for CI</b> — with <code>logpose-android</code> &ge; 1.6.0 and
+                <code>LogPoseConfig(exportEnabled = true)</code>, <code>scripts/export-capture.sh</code>
+                dumps the whole capture as NDJSON over adb, so a pipeline can assert on the wire with
+                no IDE/MCP session. <code>create_mock</code> now warns when a <code>timeout</code>/
+                <code>connection_failure</code> has <code>latency_ms = 0</code> (it throws instantly,
+                testing the failure path, not an in-flight window), and a mocked request shows an
+                in-flight row while its latency plays out. <code>push-mocks.sh --verify</code> reads the
+                device ack back to confirm rules actually applied.</li>
             <li><b>Async HTTP rows can join a trace</b> — wrap a flow in
                 <code>LogPose.withTrace { }</code> or <code>traceContext()</code> and, with the client
                 set up via <code>LogPose.traceCalls(...)</code>, the request's row lands in the same

@@ -22,6 +22,8 @@ data class LogPoseConfig(
     val maxBodyBytes: Long = 250_000L,
     val maxLineChars: Int = 3500,
     val emitPending: Boolean = true,
+    val exportEnabled: Boolean = false,
+    val exportBufferSize: Int = 2000,
     val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
     val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
     val bodyDecoders: List<BodyDecoder> = emptyList(),

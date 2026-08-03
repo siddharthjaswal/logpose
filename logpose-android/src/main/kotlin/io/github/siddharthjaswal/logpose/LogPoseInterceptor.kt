@@ -151,6 +151,11 @@ class LogPoseInterceptor @JvmOverloads constructor(
         traceId: String?,
     ): Response {
         MockRegistry.recordServe(rule)
+        // Show the request in flight while its latency plays out — otherwise a slow mock (the way
+        // you reproduce a timeout-during-X race) has no visible in-flight window, only a final row.
+        if (config.emitPending) {
+            emitter.emit(Transaction(id = id, startedAtMillis = startedAt, request = wireRequest), traceId)
+        }
         if (rule.latencyMillis > 0) {
             runCatching { Thread.sleep(rule.latencyMillis) }
                 .onFailure { Thread.currentThread().interrupt() }
@@ -224,6 +229,9 @@ class LogPoseInterceptor @JvmOverloads constructor(
         traceId: String?,
     ): Response {
         MockRegistry.recordServe(rule)
+        if (config.emitPending) {
+            emitter.emit(Transaction(id = id, startedAtMillis = startedAt, request = wireRequest), traceId)
+        }
         if (rule.latencyMillis > 0) {
             runCatching { Thread.sleep(rule.latencyMillis) }
                 .onFailure { Thread.currentThread().interrupt() }

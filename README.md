@@ -276,12 +276,22 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.5.1")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.6.0")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.5.1")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.6.0")
 }
 ```
+
+> **Use the split consistently, and never pull both jars into one classpath.** The real and no-op
+> artifacts deliberately share class names (that's what lets your call sites compile unchanged), so
+> two artifacts on one variant's classpath is a duplicate-class build error. That happens if you
+> (a) reference a repo-level **aggregator** coordinate (`com.github.siddharthjaswal:logpose`), which
+> drags in *both* modules, or (b) put **one module on the split and another on plain
+> `implementation`** — the plain one adds the real jar to the release classpath alongside the no-op.
+> Fix: use the `debug`/`release` split (or all-variants `implementation`, below) — the *same choice*
+> in **every** module that touches LogPose, and address the two `logpose-android` / `logpose-no-op`
+> modules directly rather than the aggregator.
 
 ```kotlin
 val client = OkHttpClient.Builder()
@@ -293,8 +303,10 @@ val client = OkHttpClient.Builder()
 
 With the `debug`/`release` split above, the release build links against the no-op stub, so
 LogPose is gone from production by construction. `enabled = BuildConfig.DEBUG` is then just
-belt-and-suspenders. (Prefer a single artifact in all variants? Use only the
-`debugImplementation` line and rely on the `enabled` flag.) See
+belt-and-suspenders. (Prefer a single artifact in all variants? Use plain
+`implementation("…:logpose-android:v1.6.0")` everywhere and rely on the `enabled` flag — but then
+the real artifact, including its auto-init provider and DUMP-gated receivers, ships in release too.)
+See
 [`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
 header redaction, custom tag, custom transport).
 

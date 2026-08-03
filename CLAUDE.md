@@ -135,6 +135,12 @@ releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:<tag>")
   are gitignored).
 - **Wire compatibility:** the plugin's `model/Transaction.kt` and the library's `wire/Wire.kt`
   describe the same JSON. Change them together, and treat the format as still pre-1.0.
+- **No-op swap:** `logpose-android` and `logpose-no-op` share FQCNs on purpose (so call sites
+  compile unchanged), so they must never land on one classpath together — consumers use a
+  `debugImplementation(real)` / `releaseImplementation(no-op)` split applied the **same way in
+  every module**, and address the two module coordinates directly, never a repo aggregator. Mixing
+  a plain `implementation` of the real artifact into a release that also pulls the no-op is the
+  duplicate-class trap. Keep the no-op a byte-for-byte API mirror of the real public surface.
 - **EDT discipline:** never block the EDT on `adb`/process I/O in the plugin — that caused an
   IDE-freeze bug; all reader/process work runs on background threads.
 - **Theme:** use `Theme.*` tokens (`JBColor` light/dark pairs), never hard-coded colors, so

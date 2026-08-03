@@ -228,7 +228,9 @@ object McpTools {
                     "'normal' (default), 'timeout', or 'connection_failure' to simulate a " +
                         "network fault instead of returning a response.",
                 ))
-                put("latency_ms", intProp("Delay before responding."))
+                put("latency_ms", intProp("Delay before responding — and before a timeout/" +
+                    "connection_failure throws. Leave a failure at 0 to test the failure path; raise " +
+                    "it above your race window to hold the request in flight and reproduce a race."))
                 put("serve_limit", intProp("Serve this many times then deactivate; 0 (default) = always."))
             },
         )
@@ -880,6 +882,17 @@ object McpTools {
                     "The running app will now receive this instead of the real response for matching " +
                         "requests. Disable it with set_mock_enabled when you're done; all rules also " +
                         "clear from the device when capture stops.",
+                )
+            }
+            // A timeout/failure with no latency throws almost instantly — it exercises the failure
+            // path but never holds the request in flight, so it can't reproduce a race *during* a
+            // slow call. Flag it so an agent doesn't verify against the wrong thing.
+            if (behavior != MockRule.BEHAVIOR_NORMAL && rule.latencyMillis <= 0) {
+                put(
+                    "latency_warning",
+                    "This '$behavior' fires almost instantly (latency_ms=0), testing the failure path, " +
+                        "not an in-flight window. To reproduce a race during a slow call, set latency_ms " +
+                        "above the window you're testing.",
                 )
             }
         }

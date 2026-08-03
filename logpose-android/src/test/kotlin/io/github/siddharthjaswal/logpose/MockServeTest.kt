@@ -153,6 +153,26 @@ class MockServeTest {
         assertEquals(1, data[1].jsonObject["status"]!!.jsonPrimitive.int)       // element 1 untouched
     }
 
+    @Test fun `a mocked serve shows the request in flight before the final row`() {
+        // Without a visible pending row, a slow mock (how you reproduce a timeout-during-X race)
+        // would have no in-flight window on the timeline — only the finished row.
+        MockRegistry.apply(
+            MockRuleSet(
+                revision = 1,
+                rules = listOf(MockRule(id = "a", method = "GET", pathPattern = "/app/v1/x", status = 200, body = "{}")),
+            )
+        )
+        val pendingInterceptor = LogPoseInterceptor(config.copy(emitPending = true), emitter)
+
+        pendingInterceptor.intercept(FakeChain(request()) { fail("network must not be hit"); error("") })
+
+        assertEquals(2, emitted.size)
+        assertEquals("both rows are the same request", emitted[0].id, emitted[1].id)
+        assertEquals("first row is in-flight (no response yet)", null, emitted[0].response)
+        assertEquals(200, emitted[1].response?.code)
+        assertTrue(emitted[1].mocked)
+    }
+
     @Test fun `unmatched request proceeds to the network`() {
         var proceeded = false
         val networkResponse = Response.Builder()

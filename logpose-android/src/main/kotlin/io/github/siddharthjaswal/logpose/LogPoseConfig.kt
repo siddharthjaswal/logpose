@@ -25,6 +25,15 @@ data class LogPoseConfig(
     val maxLineChars: Int = 3500,
     /** Emit a "pending" event when a request starts (lets the IDE show it live). */
     val emitPending: Boolean = true,
+    /**
+     * Retain emitted events in a bounded in-memory ring so the whole capture buffer can be dumped
+     * to a file for headless/CI verification (see the EXPORT broadcast in `mock/`), with no IDE or
+     * MCP session in the loop. **Off by default** — turn it on in the staging/debug build a CI gate
+     * reads, so ordinary runs pay no retention cost.
+     */
+    val exportEnabled: Boolean = false,
+    /** Max events kept for [exportEnabled]; the oldest fall off. */
+    val exportBufferSize: Int = 2000,
     val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
     val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
     /**

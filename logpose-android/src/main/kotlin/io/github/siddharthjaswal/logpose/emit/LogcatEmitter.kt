@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.emit
 
 import android.util.Log
 import io.github.siddharthjaswal.logpose.LogPoseConfig
+import io.github.siddharthjaswal.logpose.export.ExportBuffer
 import io.github.siddharthjaswal.logpose.wire.Chunk
 import io.github.siddharthjaswal.logpose.wire.Envelope
 import io.github.siddharthjaswal.logpose.wire.Hello
@@ -28,7 +29,16 @@ class LogcatEmitter(private val config: LogPoseConfig) : EventEmitter {
         explicitNulls = false
     }
 
-    override fun emit(event: Envelope) = emitLine(event.id, json.encodeToString(event))
+    override fun emit(event: Envelope) {
+        val line = json.encodeToString(event)
+        // Retain the event line for headless export when asked (control messages below never are —
+        // export is a dump of the timeline, not the IDE handshake).
+        if (config.exportEnabled) {
+            ExportBuffer.capacity = config.exportBufferSize
+            ExportBuffer.record(line)
+        }
+        emitLine(event.id, line)
+    }
 
     /** Emit the process handshake (package name + current mock revision); see `mock/`. */
     fun emit(hello: Hello) = emitLine(controlId(), json.encodeToString(hello))

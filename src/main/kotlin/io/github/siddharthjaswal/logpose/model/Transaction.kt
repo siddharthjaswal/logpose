@@ -303,7 +303,9 @@ data class MockRule(
     val headers: Map<String, String> = emptyMap(),
     val body: String? = null,
     val contentType: String = "application/json",
-    /** Delay before responding (also the delay before a timeout/failure fires). */
+    /** Delay before responding — and before a timeout/failure throws. A failure with latency 0
+     *  throws almost instantly (failure path, not an in-flight window); raise it to hold the
+     *  request in flight and reproduce a race during a slow call. */
     val latencyMillis: Long = 0,
     /** "normal" | "timeout" | "connection_failure" */
     val behavior: String = BEHAVIOR_NORMAL,
@@ -345,6 +347,8 @@ data class Hello(
     val pkg: String,
     val libVersion: String,
     val mockRevision: Int = 0,
+    /** Active mock rules right now (library 1.6.0+); 0 after a restart wiped the registry. */
+    val ruleCount: Int = 0,
     /**
      * Random per app run (library 1.5.0+; empty from older libraries). Same id across two hellos
      * = same process re-announcing itself; a different id = the app restarted, which is the
@@ -359,6 +363,8 @@ data class MockAck(
     val kind: String = "mock_ack",
     val pkg: String,
     val revision: Int,
+    /** Active rules after this set applied (library 1.6.0+). */
+    val ruleCount: Int = 0,
     /** rule id → times served so far in this process. */
     val hits: Map<String, Int> = emptyMap(),
 )

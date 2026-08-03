@@ -312,7 +312,12 @@ data class MockRule(
     val headers: Map<String, String> = emptyMap(),
     val body: String? = null,
     val contentType: String = "application/json",
-    /** Delay before responding (also the delay before a timeout/failure fires). */
+    /**
+     * Delay (ms) before the response is served — and, for a `timeout`/`connection_failure`
+     * behavior, the delay before it throws. **A failure with latency 0 throws almost instantly,**
+     * so it tests the failure *path*, not the failure *window*: to reproduce a race during a slow
+     * call (e.g. an expiry firing mid-request) set this above the window you're testing.
+     */
     val latencyMillis: Long = 0,
     /** "normal" | "timeout" | "connection_failure" */
     val behavior: String = BEHAVIOR_NORMAL,
@@ -356,6 +361,9 @@ data class Hello(
     val pkg: String,
     val libVersion: String,
     val mockRevision: Int = 0,
+    /** How many mock rules are active right now — 0 after a process restart wiped the registry,
+     *  which (with [mockRevision]) is how a pusher spots "rules vanished, re-push". */
+    val ruleCount: Int = 0,
     /**
      * Random per process. Two hellos carrying the same id are the same app run (the provider
      * emits one at startup and the interceptor re-emits on its first call); a different id means
@@ -371,6 +379,8 @@ data class MockAck(
     val kind: String = "mock_ack",
     val pkg: String,
     val revision: Int,
+    /** Rules active after applying this set — lets a headless pusher assert what actually took. */
+    val ruleCount: Int = 0,
     /** rule id → times served so far in this process. */
     val hits: Map<String, Int> = emptyMap(),
 )

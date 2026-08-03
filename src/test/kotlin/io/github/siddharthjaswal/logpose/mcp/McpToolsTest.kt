@@ -460,6 +460,18 @@ class McpToolsTest {
         assertTrue(out["active"]!!.jsonPrimitive.content.toBoolean())
     }
 
+    @Test fun `create_mock warns a failure with no latency tests the path, not the window`() {
+        val mocks = FakeMocks()
+        val instant = callWrite("create_mock", buildJsonObject { put("path_pattern", "/a"); put("behavior", "timeout") }, mocks)
+        assertTrue(instant.containsKey("latency_warning"), "a 0-latency failure must warn it can't reproduce an in-flight race")
+
+        val windowed = callWrite("create_mock", buildJsonObject { put("path_pattern", "/b"); put("behavior", "timeout"); put("latency_ms", 500) }, mocks)
+        assertFalse(windowed.containsKey("latency_warning"), "a failure with latency has a real window")
+
+        val normal = callWrite("create_mock", buildJsonObject { put("path_pattern", "/c") }, mocks)
+        assertFalse(normal.containsKey("latency_warning"), "a normal mock is not a failure")
+    }
+
     @Test fun `clear_capture resets and reports the count that was cleared`() {
         var cleared = false
         val out = McpTools.call(

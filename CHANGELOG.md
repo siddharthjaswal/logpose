@@ -6,6 +6,34 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.7.9] - 2026-08-03
+
+Plugin **1.7.9**, library **v1.6.0**. A third coding-agent report, this time from building a
+gandalf CI release gate — the theme is making LogPose trustworthy as headless test infrastructure.
+
+### Added (library)
+- **Headless capture export.** A CI gate can now get wire-level verdicts with no IDE or MCP session:
+  set `LogPoseConfig(exportEnabled = true)` and the library retains events in a bounded on-device
+  ring; a new DUMP-gated `LogPoseExportReceiver` dumps them as NDJSON into the app's external-files
+  dir. `scripts/export-capture.sh <pkg>` broadcasts the dump and `adb pull`s the file.
+- **`ruleCount` on the `Hello`/`MockAck` handshake** — how many mock rules are actually active, so a
+  pusher can tell "0 rules, expected N" (the silent reset an app reinstall causes) from a healthy sync.
+
+### Changed
+- **A mocked request now shows an in-flight row during its latency** (library) — a slow mock, the way
+  you reproduce a timeout-during-X race, was previously invisible until it finished.
+- **`create_mock` warns when a `timeout`/`connection_failure` rule has `latency_ms = 0`** (plugin) — it
+  throws almost instantly, testing the failure *path* but never an in-flight *window*; the doc and
+  schema now say so. (A failure with latency already delayed correctly; this closes the footgun that
+  let a race verification pass while testing the wrong thing.)
+- **`push-mocks.sh --verify`** reads the device ack back and asserts the pushed revision/rule-count
+  actually applied, turning a silent reinstall-reset into a one-line CI error.
+
+### Docs
+- **The no-op swap is documented sharply**: `logpose-android` / `logpose-no-op` share class names on
+  purpose, so use the `debug`/`release` split the *same way in every module* and never a repo
+  aggregator — either path puts both jars on one classpath and fails with duplicate classes.
+
 ## [1.7.8] - 2026-08-01
 
 Plugin **1.7.8**, library **v1.5.7**. Async HTTP rows can now join a trace.

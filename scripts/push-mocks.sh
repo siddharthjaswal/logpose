@@ -7,6 +7,7 @@
 # Usage:
 #   scripts/push-mocks.sh <app-package> <rules.json> [adb-serial]
 #   scripts/push-mocks.sh --clear <app-package> [adb-serial]     # remove all rules
+#   add --verify anywhere to read back the device's ack and assert the rules actually applied
 #
 # <rules.json> is a JSON array of MockRule objects, e.g.:
 #   [
@@ -20,6 +21,14 @@ set -euo pipefail
 RECEIVER="io.github.siddharthjaswal.logpose.mock.MockCommandReceiver"
 FLAG="0x00000020"          # FLAG_INCLUDE_STOPPED_PACKAGES — matches the plugin
 SLICE=2000                 # SLICE_CHARS — keep in sync with MocksController
+
+# Pull an optional --verify out of the args (it may sit anywhere); the rest stay positional.
+VERIFY=0
+args=()
+for a in "$@"; do
+  if [ "$a" = "--verify" ]; then VERIFY=1; else args+=("$a"); fi
+done
+if [ "${#args[@]}" -gt 0 ]; then set -- "${args[@]}"; else set --; fi
 
 if [ "${1:-}" = "--clear" ]; then
   PKG="${2:?usage: push-mocks.sh --clear <app-package> [serial]}"
@@ -59,3 +68,29 @@ while [ "$offset" -lt "$LEN" ] || [ "$seq" -eq 0 ]; do
 done
 
 echo "Done. The app now serves these rules (mocked responses are flagged in logcat)."
+
+# --verify: an app reinstall (or a stale-revision reject) silently resets the device to zero rules,
+# and the flow only false-fails minutes later. Read the ack back and assert what actually applied.
+if [ "$VERIFY" = "1" ]; then
+  echo "Verifying revision ${REV} applied on ${PKG} ..."
+  ackline=""
+  for _ in $(seq 1 20); do
+    ackline="$("${ADB[@]}" logcat -d -s LogPose:I 2>/dev/null \
+      | grep '"kind":"mock_ack"' | grep "\"revision\":${REV}" | tail -1 || true)"
+    [ -n "$ackline" ] && break
+    sleep 0.3
+  done
+  if [ -z "$ackline" ]; then
+    echo "VERIFY FAILED: no ack for revision ${REV} — rules did not apply (wrong package, missing DUMP, or app not running)." >&2
+    exit 1
+  fi
+  applied="$(printf '%s' "$ackline" | sed -n 's/.*"ruleCount":\([0-9]*\).*/\1/p')"
+  expect="$(printf '%s' "$RULES" \
+    | { python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null \
+        || jq 'length' 2>/dev/null || echo '?'; })"
+  if [ "$expect" != "?" ] && [ -n "$applied" ] && [ "$applied" != "$expect" ]; then
+    echo "VERIFY FAILED: device applied ${applied} rule(s), expected ${expect}." >&2
+    exit 1
+  fi
+  echo "Verified: device applied ${applied:-?} rule(s) at revision ${REV}."
+fi
