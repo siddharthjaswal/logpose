@@ -93,6 +93,44 @@ class TransactionParserTest {
         val ack = (control.single() as ControlMessage.MockApplied).ack
         assertEquals(5, ack.revision)
         assertEquals(2, ack.hits["a"])
+        assertEquals(0, ack.ruleCount, "absent ruleCount (pre-1.6.0 library) defaults to 0")
+    }
+
+    @Test
+    fun `mock_ack carries the rule count the sync check compares against`() {
+        val control = mutableListOf<ControlMessage>()
+        parser.onControl = { control.add(it) }
+        parser.accept("""{"kind":"mock_ack","pkg":"com.x","revision":5,"ruleCount":3,"hits":{}}""")
+        assertEquals(3, (control.single() as ControlMessage.MockApplied).ack.ruleCount)
+    }
+
+    @Test
+    fun `push_ack line dispatches a control message and is not a row`() {
+        val control = mutableListOf<ControlMessage>()
+        parser.onControl = { control.add(it) }
+        val event = parser.accept(
+            """{"kind":"push_ack","pkg":"com.x","id":"inj-1","delivered":"none","error":"no handler"}"""
+        )
+        assertNull(event, "control messages are not timeline rows")
+        val ack = (control.single() as ControlMessage.PushDelivered).ack
+        assertEquals("inj-1", ack.id)
+        assertEquals("com.x", ack.pkg)
+        assertEquals("none", ack.delivered)
+        assertEquals("no handler", ack.error)
+    }
+
+    @Test
+    fun `a chunked push_ack is reassembled before dispatch`() {
+        val control = mutableListOf<ControlMessage>()
+        parser.onControl = { control.add(it) }
+        val payload =
+            """{"kind":"push_ack","pkg":"com.x","id":"inj-2","delivered":"service","error":"$LONG"}"""
+        val half = payload.length / 2
+        assertNull(parser.accept("""{"id":"inj-2","seq":0,"total":2,"payload":${quote(payload.substring(0, half))}}"""))
+        assertNull(parser.accept("""{"id":"inj-2","seq":1,"total":2,"payload":${quote(payload.substring(half))}}"""))
+        val ack = (control.single() as ControlMessage.PushDelivered).ack
+        assertEquals("service", ack.delivered)
+        assertEquals(LONG, ack.error)
     }
 
     // ---- Envelopes (logpose-android >= 1.3.0) ---------------------------------------------

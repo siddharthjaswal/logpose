@@ -33,6 +33,13 @@ class OverviewPanel : CardPanel(null) {
     var onCopyCurl: () -> Unit = {}
     var onCopyJson: () -> Unit = {}
 
+    /**
+     * Opens the trace waterfall. Only the **LogPose** trace chip is a link: a server-side
+     * `x-request-id` names a request in someone else's system, and LogPose has nothing to show
+     * for it.
+     */
+    var onOpenTrace: (String) -> Unit = {}
+
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS")
 
     private val statusPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
@@ -174,7 +181,15 @@ class OverviewPanel : CardPanel(null) {
         return inner
     }
 
-    fun show(tx: Transaction?, dup: DuplicateDetector.Mark? = null) {
+    /**
+     * Shows [tx]. [envelope] is the transport it arrived in — the only carrier of the LogPose
+     * trace id, which the transaction payload itself doesn't hold.
+     */
+    fun show(
+        tx: Transaction?,
+        dup: DuplicateDetector.Mark? = null,
+        envelope: io.github.siddharthjaswal.logpose.model.Envelope? = null,
+    ) {
         applyDuplicate(tx, dup)
         applyError(tx)
         if (tx == null) {
@@ -220,6 +235,16 @@ class OverviewPanel : CardPanel(null) {
             val trace = traceId(tx)
             if (trace != null) add(StatChip(trace.first, ellipsize(trace.second), tip = trace.second))
             else add(StatChip("id", tx.id, tip = "Internal LogPose correlation id"))
+            // The LogPose trace, when the app set one — a link, because it's the flow this call
+            // belongs to and not just another identifier.
+            envelope?.traceId?.takeIf { it.isNotBlank() }?.let { flow ->
+                add(
+                    StatChip("trace", ellipsize(flow))
+                        .clickable("LogPose trace $flow — open the waterfall for this flow") {
+                            onOpenTrace(flow)
+                        },
+                )
+            }
         }
         items.forEachIndexed { i, c ->
             if (i > 0) chips.add(Box.createHorizontalStrut(JBUI.scale(8)))

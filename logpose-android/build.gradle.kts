@@ -46,7 +46,33 @@ kotlin {
     }
 }
 
+/**
+ * The built `:no-op` jar, handed to the unit tests as a *file path* rather than a dependency:
+ * `ApiParityTest` loads the stub's classes in a child-first classloader to reflect over them.
+ * It can never be a plain `testImplementation` — the two artifacts share FQCNs on purpose, so
+ * putting both on one classpath is exactly the duplicate-class trap the parity test polices.
+ */
+val noOpArtifact: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    attributes {
+        attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage::class.java, Usage.JAVA_RUNTIME))
+        attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category::class.java, Category.LIBRARY))
+        attribute(
+            LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE,
+            objects.named(LibraryElements::class.java, LibraryElements.JAR),
+        )
+    }
+}
+
+tasks.withType<Test>().configureEach {
+    inputs.files(noOpArtifact).withPropertyName("noOpArtifact")
+    doFirst { systemProperty("logpose.noop.jar", noOpArtifact.asPath) }
+}
+
 dependencies {
+    noOpArtifact(project(":no-op"))
+
     // OkHttp is provided by the host app — keep it as compileOnly so LogPose
     // doesn't pin a version on consumers.
     compileOnly("com.squareup.okhttp3:okhttp:4.12.0")

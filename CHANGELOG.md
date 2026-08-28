@@ -6,6 +6,109 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-28
+
+Plugin **1.8.0**, library **v1.7.0**. LogPose can now *start* a flow, not only watch or mock one.
+Most mobile journeys begin with a push — order assigned, payment confirmed — so the origin of
+every flow used to be the one thing that couldn't be reproduced. See
+[`docs/flow-driver-prd.md`](docs/flow-driver-prd.md) for the whole plan.
+
+### Added (library — v1.7.0)
+- **Push injection.** The IDE can deliver a synthetic FCM message into the running app in-process
+  — no Play services, no network. Register the app's entry point once and it flows through exactly
+  as a real data message does:
+  ```kotlin
+  LogPose.onPushInject { info -> MyPushRouter.handle(info.data, info.notificationTitle) }
+  ```
+  Without a handler LogPose falls back to calling the manifest's `FirebaseMessagingService.
+  onMessageReceived` reflectively (Firebase stays off the dependency list entirely, not even
+  `compileOnly`). The ack reports which tier took it — `handler` / `service` / `none` — so
+  "nothing is listening" is a stated outcome rather than a click that silently did nothing.
+  **Caveat:** this simulates *foreground data-message delivery*. It cannot reproduce the
+  system-tray path a background notification message takes; data messages are what trigger flows,
+  so that's the tradeoff.
+- **Richer mock matching** — `matchQuery`, `matchHeaders` (both accept `*` for "present, any
+  value") and `matchBodyContains` narrow a rule beyond method + path. Body matching **fails
+  closed**: a body the device couldn't buffer never matches, so a streaming upload goes to the
+  network rather than being mocked on a guess.
+- **Sequential mock responses** — `responses: [{status:500}, {status:200, body:…}]` serves a
+  different response per hit, with the last step sticking. Retry logic is testable with one rule.
+  Step selection is best-effort under concurrent identical calls (match and serve-count aren't
+  atomic) — documented, not locked, because locking would wrap the network call.
+- **An injected push is flagged on the wire** (`injected = true`), never inferred. `logFcmMessage`
+  from the app's real service can't set it.
+
+### Added (plugin)
+- **Re-send / compose a push.** Right-click any captured FCM row → **Re-send this push** replays
+  it verbatim (fresh message id, send time and trace); **Compose push…** (also on the toolbar,
+  so it works with an empty timeline) opens a dialog for `from`, collapse key, notification
+  title/body and a JSON editor for the data map. Injected pushes appear as ordinary FCM rows
+  with an **INJ** pill and a banner in the detail — the timeline never lies about where a push
+  came from.
+- **Scenarios** — named, committable rule sets under `<project>/.logpose/scenarios/<name>.json`.
+  The **Scenarios ▾** menu saves the current rules, *snapshots the whole session* into an offline
+  demo (one replace-rule per endpoint, built from the latest real response), and loads either by
+  merging or replacing. A snapshot never invents data: endpoints with no completed response are
+  skipped **and counted**, and rows LogPose itself mocked are always skipped rather than laundered
+  back in as "what the backend said". Sharing a repro with a teammate is now committing a file —
+  and those files contain captured response bodies, so review before committing.
+- **Trace waterfall.** A fourth detail card lays one trace on a shared time axis: one lane per
+  event in arrival order, spans as bars, point events as dots, in-flight spans drawn out to "now"
+  with the same breathing treatment the rows use. The header states the event count, the wall
+  span and the slowest event; clicking a lane opens that event's row. Reachable from the
+  structured-row and FCM-row context menus ("Show waterfall", beside "Filter by trace") and by
+  clicking the **trace** chip on any detail card. Events with no trace id simply don't offer it.
+- **Mock dialog: "Only when…" and "Then respond…"** — the new matchers and a reorderable step
+  list, hidden until wanted, in the dialog's existing style. The mocks strip shows a `×N steps`
+  chip and names the constraints in its tooltip.
+- **FCM rows joined the rest of the UI** — they finally have *Filter by trace*, and the detail
+  pane renders the at/trace/parent chips off the envelope like every other kind.
+
+### Added (MCP — 5 new tools, 19 total)
+- **`await_event`** — block until a matching event *arrives after the call starts*, instead of
+  polling `list_events` and hoping. This is what turns the agent loop into trigger → await →
+  assert. A timeout is a normal result (`matched: false`), not an error. Waiters are bounded (8
+  per capture), time out on a shared scheduler, and complete off the store's lock — the MCP
+  handler runs on a Netty IO thread and must never block it.
+- **`inject_fcm`** — send a push, or replay a captured one by `from_event_id`. Returns the trace
+  id it delivered inside, which is exactly what to hand `await_event` next. `await: true` waits
+  ≤ 10s for the delivery ack.
+- **`list_scenarios` / `load_scenario` / `save_scenario`** — the scenario files over MCP, with the
+  same skip-mocked rule the UI applies.
+- **`create_mock` extended** with `match_query`, `match_headers`, `match_body_contains` and
+  `responses`. Unknown keys and bad enums are rejected loudly rather than coerced.
+- `scripts/agent-flow-check.sh` walks the whole loop (create_mock → inject_fcm → await_event →
+  assert) with curl, as a readable reference for wiring an agent or a pipeline up by hand.
+
+### Changed
+- **The mocks strip tells the truth about sync.** It compares the pushed revision against the one
+  the device acknowledged and shows pending/failed instead of implying "live"; a failed
+  `am broadcast` is caught (its exit code *and* its output — `am` prints `Error: …` and still
+  exits 0); an ack that never arrives raises a notification; and the `ruleCount` the device
+  reports (added in v1.6.0 and until now unread) surfaces the reinstall-reset case — 0 rules
+  active when N were pushed. Scenarios would have been dishonest without this: "loaded" is not
+  "live".
+- **Rules using a new matcher are withheld from an old device** rather than pushed and silently
+  ignored. A rule that matches *too broadly* on an old library is exactly the trust failure
+  LogPose exists to prevent, so the row says "needs device lib ≥ 1.7.0" and stays out of the push.
+  The push actions are gated the same way, off `Hello.libVersion`.
+- **New failure surfaces use IDE notifications, never the detail pane** — a push that wasn't
+  acknowledged or a scenario that wouldn't load is about the session, not about whatever row you
+  were reading.
+- **Acks respect a custom tag.** `mock_ack` (and the new `push_ack`) were emitted through a
+  hardcoded `LogPoseConfig()`, so an app with a custom `tag` never got its acks read.
+
+### Fixed
+- **The no-op had already drifted** — it was missing the two-arg
+  `LogPoseInterceptor(config, emitter)` constructor, so a call site that used it compiled in debug
+  and broke in release. That's fixed, and a reflection-based **API parity test** now compares the
+  real and no-op public surfaces in the library build, so the next drift fails CI instead of a
+  release build.
+
+### Deferred
+- README screenshots of the waterfall card (it needs a running device and a real trace to be worth
+  photographing).
+
 ## [1.7.9] - 2026-08-03
 
 Plugin **1.7.9**, library **v1.6.0**. A third coding-agent report, this time from building a

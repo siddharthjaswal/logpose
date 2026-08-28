@@ -24,9 +24,10 @@ it exceeds logcat's limit). It also:
 > **Update the IDE plugin too.** `v1.5.x` sends every event wrapped in an envelope, which
 > plugin **1.5.0+** is the first version able to read — on an older plugin the timeline simply
 > stays empty, with no error to tell you why. Plugin **1.6.0+** additionally renders db, worker
-> and config as first-class rows, and **1.7.0+** splits a capture that spans an app restart into
-> separate sessions. On a newer plugin an older library still works: legacy payloads are
-> recognised and wrapped.
+> and config as first-class rows, **1.7.0+** splits a capture that spans an app restart into
+> separate sessions, and **1.8.0+** is required for push injection, scenarios and the new mock
+> matchers/steps this version adds. On a newer plugin an older library still works: legacy
+> payloads are recognised and wrapped.
 
 ```kotlin
 // settings.gradle.kts
@@ -37,9 +38,9 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.5.1")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.0")
     // Release builds: a zero-overhead no-op with the same API (no logcat, no extra deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.5.1")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.0")
 }
 ```
 
@@ -99,6 +100,42 @@ class MyMessagingService : FirebaseMessagingService() {
     }
 }
 ```
+
+### Let the IDE send a push *in* (optional, plugin 1.8.0+)
+
+The above is one direction: your app tells LogPose about a push it received. The other direction
+lets the IDE **start a flow** — deliver a synthetic push into this process, with no Play services
+and no network — so an order-assigned or payment-confirmed journey can be reproduced on demand
+instead of waiting for a real one. Give LogPose the app's push entry point, once, at init:
+
+```kotlin
+// Application.onCreate(), debug builds. Compiles unchanged in release: the no-op ignores it.
+LogPose.onPushInject { info ->
+    // Route it exactly as your FirebaseMessagingService would.
+    MyPushRouter.handle(info.data, info.notificationTitle)
+}
+```
+
+`info` is the same plain `FcmMessageInfo` you fill in above, so a handler that shares a routing
+function with `onMessageReceived` is a one-liner. Then, in the IDE: right-click any captured FCM
+row → **Re-send this push**, or **Compose push…** for a new one.
+
+- The handler runs **off the main thread**, inside the injection's trace, and may be called
+  concurrently with real pushes — treat it exactly like `onMessageReceived`.
+- **Without a handler**, LogPose resolves your `FirebaseMessagingService` from the manifest and
+  calls `onMessageReceived` reflectively. Firebase stays off the dependency list entirely (not
+  even `compileOnly`), so this is best-effort — and the device reports which tier actually took
+  the push (`handler` / `service` / `none`) back to the IDE, so "nothing consumed it" is an
+  answer rather than a silence.
+- **What it can't do:** injection simulates **foreground data-message delivery** — the
+  `onMessageReceived` path. It cannot reproduce the system-tray path of a *background
+  notification* message, because that's the OS posting a notification, not your app receiving
+  one. Data messages are what trigger flows, so this is the useful half.
+- Injected rows carry `injected = true` on the wire and show an **INJ** pill in the timeline;
+  `logFcmMessage` from your real service never sets it, so the capture can't confuse the two.
+
+Injection arrives over the same DUMP-gated adb receiver mocks use — it ships **only in the real
+artifact**, and the release no-op mirrors `onPushInject` as an inert function.
 
 ## Database, workers and config (optional)
 
@@ -306,6 +343,40 @@ IDE → device via `adb shell am broadcast` to a receiver that ships in this art
 on the `DUMP` permission — only the adb shell holds it, so no third-party app can push rules. The
 interceptor short-circuits matching requests and emits them flagged `mocked = true`; the device
 confirms sync and reports hit counts back over the normal logcat channel.
+
+### Narrower matches, and a different response per hit (v1.7.0+)
+
+A rule matches on method and path pattern, and since v1.7.0 it can narrow further — every
+constraint present must hold:
+
+| Field | Meaning |
+|---|---|
+| `matchQuery` | query pairs the request must carry; value `"*"` means "present, any value" |
+| `matchHeaders` | headers it must carry (name case-insensitive); `"*"` again means any value |
+| `matchBodyContains` | case-insensitive substring of the request body |
+
+Body matching **fails closed**: the registry only peeks at a body when some active rule actually
+asks for it, reuses the buffered copy the capture already made, and never touches a streaming or
+duplex body — one it can't read simply doesn't match, so the call goes to the network instead of
+being mocked on a guess.
+
+`responses` turns one rule into a sequence — hit *N* serves step `min(N, last)`, so the last step
+sticks:
+
+```jsonc
+{ "method": "GET", "pathPattern": "/v1/orders/*",
+  "responses": [ { "status": 500 }, { "status": 200, "body": "{\"orders\":[]}" } ] }
+```
+
+That's a complete retry test in one rule. The rule-level `status`/`body`/`headers`/`contentType`/
+`latencyMillis`/`behavior` are ignored while `responses` is present; `serveLimit` and `mode` still
+apply (in patch mode each step's body is the patch). Step selection is **best-effort** under
+concurrent identical calls: matching a rule and counting the serve aren't atomic, and locking
+around the network call would be the wrong trade for a debug tool.
+
+Rules using any of these are withheld by plugin 1.8.0+ from a device running an older library,
+rather than pushed and silently ignored — a rule that matches *too broadly* on an old library is
+exactly the quiet failure this tool exists to prevent.
 
 This lives **only in the real `logpose-android` artifact** — the release `no-op` jar contains
 no receiver, provider, or `MockRegistry`. Set `mocksEnabled = false` to opt this build out

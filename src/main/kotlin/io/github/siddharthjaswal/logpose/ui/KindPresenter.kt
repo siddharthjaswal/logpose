@@ -5,6 +5,7 @@ import io.github.siddharthjaswal.logpose.model.Badge
 import io.github.siddharthjaswal.logpose.model.ConfigUpdate
 import io.github.siddharthjaswal.logpose.model.DbQuery
 import io.github.siddharthjaswal.logpose.model.Envelope
+import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.GenericEvent
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Section
@@ -36,6 +37,29 @@ object KindPresenter {
         }
         else -> event.kind.uppercase()
     }
+
+    /**
+     * The one-line name of an event, without its kind — what a copied timeline line, a waterfall
+     * lane and any other compact listing all call it. Kept here so those never drift apart.
+     *
+     * HTTP includes its method because "POST /orders" *is* the name of the call; the other kinds
+     * are named by whatever they're about, since their kind is already stated by the glyph or
+     * label beside them.
+     */
+    fun rowLabel(event: LogEvent): String = when (event) {
+        is LogEvent.Http ->
+            "${event.tx.request.method} ${event.tx.request.path.ifBlank { event.tx.request.url }}"
+        is LogEvent.Fcm -> fcmLabel(event.msg)
+        else -> present(event)?.title ?: event.id
+    }
+
+    /** A push names itself by its channel, then whatever else identifies it. */
+    private fun fcmLabel(msg: FcmMessage): String =
+        msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
+            ?.value?.takeIf { it.isNotBlank() }
+            ?: msg.collapseKey?.takeIf { it.isNotBlank() }
+            ?: msg.from?.takeIf { it.isNotBlank() }
+            ?: if (msg.event == "token") "token refreshed" else "data message"
 
     /**
      * The presentation for a structured event, or the device's own for a self-describing one.

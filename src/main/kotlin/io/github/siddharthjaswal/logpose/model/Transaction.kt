@@ -16,8 +16,8 @@ import kotlinx.serialization.json.JsonElement
  *  - `endedAt == at`   — a point-in-time event (a push, a log line).
  *  - `endedAt > at`    — a completed span.
  *
- * Reverse-channel control messages ([Hello], [MockAck]) are NOT enveloped — they are a
- * separate IDE ↔ device protocol, not timeline rows.
+ * Reverse-channel control messages ([Hello], [MockAck], [PushAck]) are NOT enveloped — they are
+ * a separate IDE ↔ device protocol, not timeline rows.
  *
  * MUST stay structurally in sync with the library's `wire/Wire.kt`.
  */
@@ -273,6 +273,13 @@ data class FcmMessage(
     val data: Map<String, String> = emptyMap(),
     // token events:
     val token: String? = null,
+    /**
+     * True when LogPose itself delivered this push on the IDE's behalf (see [PushInject]) rather
+     * than the app reporting one Firebase actually delivered. The timeline never passes an
+     * injected push off as a real one; the library's `logFcmMessage` always leaves this false.
+     * Library 1.7.0+; older payloads simply omit it.
+     */
+    val injected: Boolean = false,
 )
 
 @Serializable
@@ -285,9 +292,10 @@ data class FcmNotification(
 )
 
 // ---------------------------------------------------------------------------------------------
-// Mock & replay (reverse channel). Rules travel IDE → device via an adb broadcast to the
-// library's MockCommandReceiver; Hello/MockAck travel device → IDE on the normal LogPose
-// logcat tag (discriminated by "kind", like FcmMessage). Mirrors the library's wire/Wire.kt.
+// Mock & replay + push injection (reverse channel). Commands travel IDE → device via an adb
+// broadcast to the library's MockCommandReceiver, told apart by the `cmd` extra
+// (`rules` | `push`); Hello/MockAck/PushAck travel device → IDE on the normal LogPose logcat tag
+// (discriminated by "kind", like FcmMessage). Mirrors the library's wire/Wire.kt.
 // ---------------------------------------------------------------------------------------------
 
 /** One mock rule: match by method + path pattern, serve the described response. */
@@ -317,6 +325,33 @@ data class MockRule(
      * real backend response (override keys, add keys, keep the rest).
      */
     val mode: String = MODE_REPLACE,
+    /**
+     * Extra match constraints, all narrowing on top of method + [pathPattern]. Every entry must
+     * hold for the rule to match, and an empty map is no constraint at all — so a rule written
+     * before these existed behaves exactly as it did. Needs device library 1.7.0+ (see
+     * [io.github.siddharthjaswal.logpose.mock.DeviceFeature.RICH_MATCHERS]).
+     *
+     * Query pairs the request must carry: exact value, or [MATCH_ANY] for "key present, any value".
+     */
+    val matchQuery: Map<String, String> = emptyMap(),
+    /** Request headers that must be present. Name matched case-insensitively; value exactly, or
+     *  [MATCH_ANY] for "header present, any value". Needs device library 1.7.0+. */
+    val matchHeaders: Map<String, String> = emptyMap(),
+    /**
+     * Case-insensitive substring the request body must contain. Matching **fails closed** on the
+     * device: a body it could not buffer never matches, so the call goes to the network rather
+     * than being mocked on a guess. Needs device library 1.7.0+.
+     */
+    val matchBodyContains: String? = null,
+    /**
+     * Sequential responses. When non-empty these replace the single [status]/[body]/[headers]/
+     * [contentType]/[latencyMillis]/[behavior] above: hit *N* (0-based, from this rule's serve
+     * count) serves step `min(N, responses.lastIndex)`, so the last step sticks once the list
+     * runs out. `[{status:500}, {status:200, body:…}]` is the canonical retry test.
+     *
+     * [serveLimit] and [mode] still apply at rule level. Needs device library 1.7.0+.
+     */
+    val responses: List<MockStep> = emptyList(),
 ) {
     companion object {
         const val BEHAVIOR_NORMAL = "normal"
@@ -324,8 +359,27 @@ data class MockRule(
         const val BEHAVIOR_CONNECTION_FAILURE = "connection_failure"
         const val MODE_REPLACE = "replace"
         const val MODE_PATCH = "patch"
+        /** Matcher value meaning "present, whatever the value". */
+        const val MATCH_ANY = "*"
     }
 }
+
+/**
+ * One response in a [MockRule.responses] sequence. Same shape as the rule's own response fields,
+ * so a single-response rule and a one-step sequence serve identically — including the defaults,
+ * which are the rule's defaults (a step that omits `contentType` serves `application/json`
+ * rather than inheriting the now-ignored rule-level value).
+ */
+@Serializable
+data class MockStep(
+    val status: Int = 200,
+    val body: String? = null,
+    val headers: Map<String, String> = emptyMap(),
+    val contentType: String = "application/json",
+    val latencyMillis: Long = 0,
+    /** "normal" | "timeout" | "connection_failure" — see [MockRule.behavior]. */
+    val behavior: String = MockRule.BEHAVIOR_NORMAL,
+)
 
 /** The full replacement rule set pushed by the IDE; applied atomically by revision. */
 @Serializable
@@ -368,3 +422,70 @@ data class MockAck(
     /** rule id → times served so far in this process. */
     val hits: Map<String, Int> = emptyMap(),
 )
+
+/**
+ * A synthetic push the IDE asks the device to deliver in-process — no Play services, no network.
+ * Pushed over the same broadcast channel as [MockRuleSet], told apart by the `cmd` extra
+ * (`push`); the revision extra is meaningless here and ignored.
+ *
+ * The device emits the resulting FCM row with [FcmMessage.injected] set **before** it attempts
+ * delivery, so an injection that fails to reach a handler still shows on the timeline, and then
+ * reports the outcome in a [PushAck] carrying the same [id]. Needs device library 1.7.0+.
+ */
+@Serializable
+data class PushInject(
+    val kind: String = "push_inject",
+    /** Correlation id: the FCM row's envelope id, and the id the [PushAck] comes back under. */
+    val id: String,
+    /** Trace to deliver inside, so everything the push triggers lands in one `get_trace` group. */
+    val traceId: String? = null,
+    val message: PushMessage = PushMessage(),
+)
+
+/**
+ * The push itself, field-for-field the app-facing `FcmMessageInfo` (flat, not the nested
+ * [FcmNotification] shape [FcmMessage] uses) — so a captured push can be replayed by copying
+ * the row's fields straight across.
+ */
+@Serializable
+data class PushMessage(
+    val messageId: String? = null,
+    val from: String? = null,
+    val to: String? = null,
+    val collapseKey: String? = null,
+    val messageType: String? = null,
+    val sentTimeMillis: Long? = null,
+    val ttlSeconds: Int? = null,
+    val priority: Int? = null,
+    val notificationTitle: String? = null,
+    val notificationBody: String? = null,
+    val notificationChannelId: String? = null,
+    val notificationClickAction: String? = null,
+    val notificationImageUrl: String? = null,
+    val data: Map<String, String> = emptyMap(),
+)
+
+/**
+ * Emitted after an injected push has been offered to the app; [delivered] says which tier took
+ * it. [DELIVERED_NONE] is the "nothing is listening" answer the IDE turns into the
+ * register-a-handler hint — an outcome, never a crash: delivery failures are reported, not thrown.
+ */
+@Serializable
+data class PushAck(
+    val kind: String = "push_ack",
+    val pkg: String,
+    /** The [PushInject.id] this answers. */
+    val id: String,
+    /** [DELIVERED_HANDLER] | [DELIVERED_SERVICE] | [DELIVERED_NONE]. */
+    val delivered: String = DELIVERED_NONE,
+    val error: String? = null,
+) {
+    companion object {
+        /** Tier 1: the app's own `LogPose.onPushInject { }` handler ran. */
+        const val DELIVERED_HANDLER = "handler"
+        /** Tier 2: the manifest's FirebaseMessagingService got `onMessageReceived` reflectively. */
+        const val DELIVERED_SERVICE = "service"
+        /** Nothing consumed it — no handler registered and no service reachable. */
+        const val DELIVERED_NONE = "none"
+    }
+}

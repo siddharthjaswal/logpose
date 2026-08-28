@@ -7,6 +7,7 @@ import io.github.siddharthjaswal.logpose.wire.Chunk
 import io.github.siddharthjaswal.logpose.wire.Envelope
 import io.github.siddharthjaswal.logpose.wire.Hello
 import io.github.siddharthjaswal.logpose.wire.MockAck
+import io.github.siddharthjaswal.logpose.wire.PushAck
 import java.util.UUID
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -18,7 +19,8 @@ import kotlinx.serialization.json.Json
  * survive logcat's per-line truncation.
  *
  * Timeline events go out wrapped in an [Envelope]. Reverse-channel control messages ([Hello],
- * [MockAck]) are written bare: they are a separate IDE ↔ device protocol, not timeline rows.
+ * [MockAck], [PushAck]) are written bare: they are a separate IDE ↔ device protocol, not
+ * timeline rows.
  */
 class LogcatEmitter(private val config: LogPoseConfig) : EventEmitter {
 
@@ -45,6 +47,9 @@ class LogcatEmitter(private val config: LogPoseConfig) : EventEmitter {
 
     /** Emit a mock rule-set acknowledgement (revision + per-rule hit counts); see `mock/`. */
     fun emit(ack: MockAck) = emitLine(controlId(), json.encodeToString(ack))
+
+    /** Emit an injected-push acknowledgement (which delivery tier took it); see `mock/`. */
+    fun emit(ack: PushAck) = emitLine(controlId(), json.encodeToString(ack))
 
     private fun controlId(): String = "ctl-" + UUID.randomUUID().toString().substring(0, 8)
 

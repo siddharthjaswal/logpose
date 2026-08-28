@@ -11,7 +11,7 @@ package io.github.siddharthjaswal.logpose
  * `BuildConfig.DEBUG`.
  */
 @Suppress("UNUSED_PARAMETER")
-class EventBuilder internal constructor() {
+class EventBuilder internal constructor(title: String) {
 
     var subtitle: String? = null
     var id: String = ""

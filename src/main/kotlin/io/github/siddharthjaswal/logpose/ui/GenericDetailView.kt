@@ -39,6 +39,12 @@ import javax.swing.JPanel
  */
 class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
 
+    /**
+     * Opens the trace waterfall. A trace id is the one chip that's also a destination — everything
+     * else on the card is a fact about this event, but the trace is the flow it belongs to.
+     */
+    var onOpenTrace: (String) -> Unit = {}
+
     private val typeIcon = JBLabel()
     private val kindPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
     private val titleLabel = JBLabel().apply {
@@ -141,7 +147,12 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
             if (event.timestampMillis > 0) add(StatChip("at", timeFmt.format(Date(event.timestampMillis))))
             event.durationMillis?.let { add(StatChip("took", "${it}ms")) }
             if (event.isOpen) add(StatChip("state", "running"))
-            event.traceId?.let { add(StatChip("trace", it, tip = it)) }
+            event.traceId?.takeIf { it.isNotBlank() }?.let { trace ->
+                add(
+                    StatChip("trace", trace)
+                        .clickable("$trace — open the waterfall for this flow") { onOpenTrace(trace) },
+                )
+            }
             event.envelope.parentId?.let { add(StatChip("parent", it, tip = it)) }
             add(StatChip("id", event.id, tip = event.id))
         }

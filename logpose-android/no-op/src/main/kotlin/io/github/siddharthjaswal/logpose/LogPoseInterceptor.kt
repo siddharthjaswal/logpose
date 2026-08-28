@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose
 
+import io.github.siddharthjaswal.logpose.emit.EventEmitter
 import okhttp3.Interceptor
 import okhttp3.Response
 
@@ -25,8 +26,10 @@ import okhttp3.Response
  * output, no kotlinx-serialization on the classpath, zero transitive dependencies. OkHttp
  * is `compileOnly`, so it pins no version on the consumer.
  */
+@Suppress("UNUSED_PARAMETER")
 class LogPoseInterceptor @JvmOverloads constructor(
-    @Suppress("UNUSED_PARAMETER") config: LogPoseConfig = LogPoseConfig(),
+    config: LogPoseConfig = LogPoseConfig(),
+    emitter: EventEmitter = EventEmitter {},
 ) : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response = chain.proceed(chain.request())
 }

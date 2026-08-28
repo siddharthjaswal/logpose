@@ -24,6 +24,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.jetbrains.ide.HttpRequestHandler
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Serves the LogPose capture to MCP clients — a coding agent working in the repo can read what
@@ -87,7 +88,13 @@ class LogPoseMcpHandler : HttpRequestHandler() {
             }))
             "tools/call" -> {
                 if (session == null) return send(context, request, unauthorized(id))
-                send(context, request, result(id, callTool(params, session)))
+                val tool = (params["name"] as? JsonPrimitive)?.content.orEmpty()
+                // Most tools answer from the snapshot they're handed and can be written straight
+                // back. A few can't: a wait ends when the app does something, a push when the
+                // device reports, a scenario when the disk read finishes. Those hold the request
+                // open — see [callToolDeferred].
+                if (McpTools.isAsync(tool)) callToolDeferred(tool, params, session, id, context, request)
+                else send(context, request, result(id, callTool(params, session)))
             }
             else -> send(context, request, errorResponse(id, -32601, "Method not found: $method"))
         }
@@ -110,7 +117,11 @@ class LogPoseMcpHandler : HttpRequestHandler() {
                 "LogPose exposes the HTTP traffic, push messages, and app events captured from " +
                     "an Android device that is running right now. Start with session_summary or " +
                     "list_events to see what the app did, then get_event for full bodies. When a " +
-                    "call failed, get_trace shows what led to it.",
+                    "call failed, get_trace shows what led to it. LogPose can also drive the app: " +
+                    "create_mock changes what a request returns, inject_fcm delivers a push that " +
+                    "starts a flow, and await_event waits for the result instead of polling — so " +
+                    "a check reads mock → inject → await → assert. Those three change what the " +
+                    "running app receives; the timeline always shows which rows they produced.",
             )
         }
     }
@@ -140,6 +151,70 @@ class LogPoseMcpHandler : HttpRequestHandler() {
             }), isError = true)
         }
         return toolResult(json.encodeToString(JsonElement.serializer(), payload), isError = false)
+    }
+
+    /**
+     * Run a tool whose answer arrives later, and write the JSON-RPC response when it does.
+     *
+     * This is the one place the plugin lets a request outlive `process`. Three things make it
+     * safe:
+     *  - **Nothing from [request] survives the return.** The platform releases it (and its
+     *    refcounted buffer) once we hand back, so everything needed — the keep-alive flag, the
+     *    RPC id — is read here and captured by value. The [ChannelHandlerContext] itself stays
+     *    valid for the life of the connection.
+     *  - **The write happens on the completing thread**, which is the store's waiter executor, the
+     *    device-ack thread, or a pooled thread doing file I/O — never Netty's event loop and never
+     *    the EDT. `writeAndFlush` is thread-safe by design; Netty hands the write to the loop
+     *    itself.
+     *  - **Exactly one response.** A push that acks after its own deadline, or a completion racing
+     *    an argument failure, must not write twice onto the same request — hence the latch.
+     *
+     * A client that disconnects mid-wait simply makes the eventual write fail; the waiter still
+     * expires on its own timeout, so nothing is leaked.
+     */
+    private fun callToolDeferred(
+        name: String,
+        params: JsonObject,
+        session: McpSessions.Session,
+        id: JsonElement,
+        context: ChannelHandlerContext,
+        request: FullHttpRequest,
+    ): Boolean {
+        val args = params["arguments"] as? JsonObject ?: JsonObject(emptyMap())
+        val keepAlive = HttpUtil.isKeepAlive(request)
+        val written = AtomicBoolean(false)
+        val respond: (JsonObject) -> Unit = { payload ->
+            if (written.compareAndSet(false, true)) {
+                write(
+                    context, keepAlive, HttpResponseStatus.OK,
+                    json.encodeToString(JsonElement.serializer(), result(id, payload)),
+                )
+            }
+        }
+
+        runCatching {
+            McpTools.callAsync(
+                name = name,
+                args = args,
+                events = session.store.snapshot(),
+                push = session.push,
+                waits = session.waits,
+                scenarios = session.scenarios,
+                captureRunning = session.captureRunning,
+            ) { payload ->
+                respond(toolResult(json.encodeToString(JsonElement.serializer(), payload), isError = false))
+            }
+        }.onFailure { e ->
+            respond(
+                toolResult(
+                    json.encodeToString(JsonElement.serializer(), buildJsonObject {
+                        put("error", "Tool '$name' failed: ${e.message ?: e::class.java.simpleName}")
+                    }),
+                    isError = true,
+                )
+            )
+        }
+        return true
     }
 
     private fun toolResult(text: String, isError: Boolean): JsonObject = buildJsonObject {
@@ -172,21 +247,28 @@ class LogPoseMcpHandler : HttpRequestHandler() {
     }
 
     private fun send(context: ChannelHandlerContext, request: FullHttpRequest, payload: JsonObject): Boolean =
-        write(context, request, HttpResponseStatus.OK, json.encodeToString(JsonElement.serializer(), payload))
+        write(
+            context, HttpUtil.isKeepAlive(request), HttpResponseStatus.OK,
+            json.encodeToString(JsonElement.serializer(), payload),
+        )
 
     private fun sendStatus(
         context: ChannelHandlerContext,
         request: FullHttpRequest,
         status: HttpResponseStatus,
-    ): Boolean = write(context, request, status, "")
+    ): Boolean = write(context, HttpUtil.isKeepAlive(request), status, "")
 
     /**
      * Write the response by hand rather than via the platform's `Responses` helper — that class
      * ships in a jar the plugin compile classpath doesn't see, and Netty alone is enough here.
+     *
+     * Takes [keepAlive] rather than the request: a deferred answer is written long after the
+     * request object has been released, so the only thing it may carry forward is the flag.
+     * Callable from any thread — `writeAndFlush` hands the write to the channel's event loop.
      */
     private fun write(
         context: ChannelHandlerContext,
-        request: FullHttpRequest,
+        keepAlive: Boolean,
         status: HttpResponseStatus,
         text: String,
     ): Boolean {
@@ -196,7 +278,6 @@ class LogPoseMcpHandler : HttpRequestHandler() {
         response.headers().set(HttpHeaderNames.CONTENT_LENGTH, buffer.readableBytes())
         response.headers().set(HttpHeaderNames.CACHE_CONTROL, "no-cache, no-store, must-revalidate")
 
-        val keepAlive = HttpUtil.isKeepAlive(request)
         if (keepAlive) response.headers().set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE)
         val future = context.channel().writeAndFlush(response)
         if (!keepAlive) future.addListener(ChannelFutureListener.CLOSE)

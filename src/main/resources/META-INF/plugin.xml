@@ -32,8 +32,13 @@
                 retry?", "what flag changed before this broke?"</li>
             <li><b>Change what the app receives</b> — <code>create_mock</code>,
                 <code>set_mock_enabled</code>, <code>delete_mock</code>,
-                <code>list_mocks</code>, so an agent can reproduce a state and verify its own
-                fix without you driving the UI</li>
+                <code>list_mocks</code>, plus <code>list_scenarios</code> /
+                <code>load_scenario</code> / <code>save_scenario</code> for whole bottled
+                sessions, so an agent can reproduce a state and verify its own fix without you
+                driving the UI</li>
+            <li><b>Start a flow and wait for the result</b> — <code>inject_fcm</code> delivers a
+                synthetic push into the running app and <code>await_event</code> blocks until what
+                it triggered arrives: trigger → await → assert, with no polling</li>
             <li>Response bodies can be withheld while still exposing request shape, statuses and
                 timings</li>
         </ul>
@@ -75,21 +80,81 @@
                 what to override, and see the original value beside your change</li>
             <li>Inject latency, timeouts and connection failures, cap how many times a rule
                 serves, and match paths with <code>*</code> wildcards</li>
+            <li>Narrow a rule to requests carrying particular query parameters, headers or body
+                text, and serve a <b>different response per hit</b> — a 500 then a 200 tests retry
+                logic in one rule</li>
             <li>Rules sync to the device over adb, report live hit counts, and clear themselves
                 when you stop capturing — mocked rows are badged, so the timeline never lies
                 about what the app actually received</li>
+            <li>Save a rule set, or a whole recorded session, as a committable
+                <b>scenario</b> file and load it to put the app in a known state offline</li>
+        </ul>
+
+        <h3>Drive</h3>
+        <ul>
+            <li><b>Inject a push</b> — most mobile journeys start with one, so LogPose delivers a
+                synthetic FCM data message into the running app in-process (no Play services, no
+                network). Re-send a captured push verbatim, or compose a new one</li>
+            <li><b>Trace waterfall</b> — read a whole flow on one time axis: what the push set off,
+                what overlapped, what is still running, and what took the longest</li>
         </ul>
 
         <p>
             Requires the <code>logpose-android</code> interceptor in your debug/staging build (a
             zero-overhead no-op ships for release). Mocking needs <code>logpose-android</code>
-            1.2.1+; database, worker, config and app events need 1.4.0+. Works in IntelliJ IDEA
-            and Android Studio, light and dark.
+            1.2.1+; database, worker, config and app events need 1.4.0+; push injection and the
+            new mock matchers/steps need 1.7.0+. Works in IntelliJ IDEA and Android Studio, light
+            and dark.
         </p>
     ]]></description>
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Start a flow, don't just watch it</b> — right-click any captured push →
+                <b>Re-send this push</b>, or <b>Compose push…</b> for a new one: LogPose delivers
+                it into the running app in-process, no Play services and no network. Register
+                <code>LogPose.onPushInject { }</code> in app init (or keep a
+                <code>FirebaseMessagingService</code> in the manifest and LogPose finds it
+                reflectively). Injected pushes appear as ordinary FCM rows marked <b>INJ</b>, and
+                the device reports which tier consumed it. Simulates foreground <i>data-message</i>
+                delivery — not the system notification tray. Needs
+                <code>logpose-android</code> &ge; 1.7.0.</li>
+            <li><b>Scenarios</b> — save the current mocks, or <i>snapshot the whole session</i>,
+                into a committable <code>.logpose/scenarios/&lt;name&gt;.json</code>, then load it
+                to put the app in a known state offline. A snapshot builds one rule per endpoint
+                from the latest real response, skips (and counts) endpoints with no completed
+                response, and never re-serves LogPose's own mocked rows as if the backend had said
+                them. Scenario files contain captured bodies — review before committing.</li>
+            <li><b>Trace waterfall</b> — a new detail card lays a whole trace on one time axis:
+                a lane per event, spans as bars, point events as dots, in-flight spans drawn out to
+                now, with the event count, wall span and slowest event in the header. Open it from
+                a row's context menu (<b>Show waterfall</b>) or by clicking the <b>trace</b> chip
+                on any detail card; click a lane to jump to its row.</li>
+            <li><b>Richer mocks</b> — an <b>Only when…</b> section matches on query parameters,
+                headers and a request-body substring, and a <b>Then respond…</b> step list serves a
+                different response per hit (<code>500</code> then <code>200</code> tests retry
+                logic in one rule). Body matching fails closed, so a body the device can't buffer
+                goes to the network rather than being mocked on a guess. Rules using these are
+                <i>withheld</i> from a device on an older library instead of being pushed and
+                silently ignored. Needs <code>logpose-android</code> &ge; 1.7.0.</li>
+            <li><b>Five new MCP tools (19 total)</b> — <code>await_event</code> blocks until the
+                event you're waiting for arrives, so an agent's loop becomes trigger → await →
+                assert instead of polling <code>list_events</code>; <code>inject_fcm</code> sends
+                or replays a push and returns the trace it delivered inside;
+                <code>list_scenarios</code> / <code>load_scenario</code> /
+                <code>save_scenario</code> expose the scenario files. <code>create_mock</code>
+                gains <code>match_query</code>, <code>match_headers</code>,
+                <code>match_body_contains</code> and <code>responses</code>.</li>
+            <li><b>The mocks strip tells the truth about sync</b> — pushed revision vs the one the
+                device acknowledged, so pending and failed read as pending and failed; a broadcast
+                adb refused is caught (<code>am</code> prints errors and still exits 0); an ack
+                that never arrives raises a notification instead of hijacking the detail pane; and
+                the device's active rule count now surfaces the reinstall-reset case. "Loaded" is
+                not "live", and the strip finally says which.</li>
+            <li><b>No-op parity is now enforced</b> — the release stub had drifted (it was missing
+                <code>LogPoseInterceptor(config, emitter)</code>, so a custom sink compiled in
+                debug and failed in release). Fixed, and a reflection parity test in the library
+                build fails on the next drift.</li>
             <li><b>Headless capture export for CI</b> — with <code>logpose-android</code> &ge; 1.6.0 and
                 <code>LogPoseConfig(exportEnabled = true)</code>, <code>scripts/export-capture.sh</code>
                 dumps the whole capture as NDJSON over adb, so a pipeline can assert on the wire with
@@ -224,6 +289,11 @@
             anchor="bottom"
             icon="/icons/toolWindowLogPose.svg"
             factoryClass="io.github.siddharthjaswal.logpose.toolwindow.LogPoseToolWindowFactory" />
+
+        <!-- Failures that aren't about the selected row (a rule set the device never
+             acknowledged, a broadcast adb refused) surface here rather than replacing whatever
+             transaction the developer is reading in the detail pane. -->
+        <notificationGroup id="LogPose" displayType="BALLOON" />
     </extensions>
 
     <!-- MCP endpoint on the IDE's built-in web server, so a coding agent can read the live

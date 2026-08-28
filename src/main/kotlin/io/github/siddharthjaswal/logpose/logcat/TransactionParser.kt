@@ -9,6 +9,7 @@ import io.github.siddharthjaswal.logpose.model.GenericEvent
 import io.github.siddharthjaswal.logpose.model.Hello
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockAck
+import io.github.siddharthjaswal.logpose.model.PushAck
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import kotlinx.serialization.json.Json
@@ -17,12 +18,14 @@ import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Control messages the device emits alongside timeline events — the reverse-channel
- * handshake and mock acknowledgements. Unlike [LogEvent]s these don't become rows; the panel
- * routes them to the mocks controller.
+ * handshake, mock acknowledgements and push-injection outcomes. Unlike [LogEvent]s these don't
+ * become rows; the panel routes them to the mocks controller.
  */
 sealed interface ControlMessage {
     data class DeviceHello(val hello: Hello) : ControlMessage
     data class MockApplied(val ack: MockAck) : ControlMessage
+    /** The device reporting how an injected push was (or wasn't) delivered. Library 1.7.0+. */
+    data class PushDelivered(val ack: PushAck) : ControlMessage
 }
 
 /**
@@ -31,8 +34,8 @@ sealed interface ControlMessage {
  *
  * A line is one of:
  *  - an [Envelope] wrapping a timeline event of any [Envelope.kind],
- *  - a control message — `"kind":"hello"` / `"kind":"mock_ack"` — dispatched to [onControl]
- *    rather than returned (it isn't a timeline row),
+ *  - a control message — `"kind":"hello"` / `"kind":"mock_ack"` / `"kind":"push_ack"` —
+ *    dispatched to [onControl] rather than returned (it isn't a timeline row),
  *  - a [Chunk] envelope that must be joined with its siblings before parsing, or
  *  - a **legacy** bare [Transaction] / [FcmMessage], emitted by `logpose-android` before
  *    1.3.0. Those are wrapped into an [Envelope] here so everything downstream sees one shape.
@@ -47,7 +50,7 @@ class TransactionParser {
         isLenient = true
     }
 
-    /** Sink for reverse-channel control messages (hello / mock ack). Set by the panel. */
+    /** Sink for reverse-channel control messages (hello / mock ack / push ack). Set by the panel. */
     var onControl: (ControlMessage) -> Unit = {}
 
     /**
@@ -93,6 +96,11 @@ class TransactionParser {
             "mock_ack" -> {
                 runCatching { json.decodeFromString<MockAck>(payload) }.getOrNull()
                     ?.let { onControl(ControlMessage.MockApplied(it)) }
+                return null
+            }
+            "push_ack" -> {
+                runCatching { json.decodeFromString<PushAck>(payload) }.getOrNull()
+                    ?.let { onControl(ControlMessage.PushDelivered(it)) }
                 return null
             }
         }

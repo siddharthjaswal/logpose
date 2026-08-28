@@ -85,3 +85,45 @@ emit '{"v":1,"kind":"config","id":"demo-config","at":'"$((TS + 500))"',"endedAt"
 {"key":"NEW_ROUTING_ENABLED","value":"true","isNew":true}]}}'
 
 echo "Emitted 5 more: db, worker and config events."
+
+# ---- A whole flow, for the trace waterfall (plugin 1.8.0+) ----------------------------------
+#
+# Everything below shares $FLOW, so right-clicking any of these rows offers "Show waterfall" and
+# the card renders all three shapes at once: a point (the push), a completed span (the API call)
+# and an OPEN span that keeps growing towards "now" (the second call never gets a response line).
+#
+# The push row carries "injected":true, so it renders with the INJ pill — that's what a push
+# LogPose delivered looks like on the wire. To let the IDE actually deliver one into YOUR app
+# (right-click an FCM row → "Re-send this push", or the toolbar's Compose push…), give LogPose
+# the app's push entry point once at init — needs logpose-android >= 1.7.0:
+#
+#   LogPose.onPushInject { info ->
+#       MyPushRouter.handle(info.data, info.notificationTitle)
+#   }
+#
+# Without it LogPose falls back to your manifest's FirebaseMessagingService reflectively, and
+# reports back which tier took the push (handler | service | none). Injection simulates
+# foreground data-message delivery; it can't reproduce the system notification tray.
+
+FLOW="flow$(date +%s)"
+
+# The push that starts the flow — a point in time, marked as LogPose-injected.
+emit '{"v":1,"kind":"fcm","id":"demo-push","at":'"$((TS + 600))"',"endedAt":'"$((TS + 600))"',"traceId":"'"$FLOW"'",
+"payload":{"kind":"fcm","id":"demo-push","event":"message","receivedAtMillis":'"$((TS + 600))"',
+"messageId":"demo-push","from":"/topics/orders","collapseKey":"order_assigned","injected":true,
+"data":{"channel":"order_assigned","orderId":"91"}}}'
+
+# The call the push triggered: a completed span.
+emit '{"v":1,"kind":"http","id":"demo-http-1","at":'"$((TS + 640))"',"endedAt":'"$((TS + 940))"',"traceId":"'"$FLOW"'",
+"payload":{"id":"demo-http-1","startedAtMillis":'"$((TS + 640))"',"durationMillis":300,
+"request":{"method":"GET","url":"https://api.example.com/v1/orders/91","host":"api.example.com","path":"/v1/orders/91","headers":{}},
+"response":{"code":200,"message":"OK","headers":{"Content-Type":"application/json"},
+"body":{"contentType":"application/json","sizeBytes":42,"text":"{\"id\":91,\"status\":\"assigned\"}"}}}}'
+
+# A call with no response line: still open, so the waterfall draws it out to now, forever.
+emit '{"v":1,"kind":"http","id":"demo-http-open","at":'"$((TS + 960))"',"traceId":"'"$FLOW"'",
+"payload":{"id":"demo-http-open","startedAtMillis":'"$((TS + 960))"',
+"request":{"method":"POST","url":"https://api.example.com/v1/orders/91/accept","host":"api.example.com","path":"/v1/orders/91/accept","headers":{},
+"body":{"contentType":"application/json","sizeBytes":18,"text":"{\"accepted\":true}"}}}}'
+
+echo "Emitted 3 more in trace '$FLOW' — right-click one → \"Show waterfall\"."

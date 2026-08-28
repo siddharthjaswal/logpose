@@ -31,6 +31,11 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     private val request = JsonTreePanel("Request", project) { Theme.methodColor(currentMethod) }
     private val response = JsonTreePanel("Response", project)
 
+    /** Opens the trace waterfall for the flow this call belongs to (see [OverviewPanel]). */
+    var onOpenTrace: (String) -> Unit
+        get() = overview.onOpenTrace
+        set(value) { overview.onOpenTrace = value }
+
     private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
     private val pretty = Json { prettyPrint = true; encodeDefaults = true }
     private var current: Transaction? = null
@@ -66,10 +71,14 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         add(outer, BorderLayout.CENTER)
     }
 
-    fun show(tx: Transaction?, dup: io.github.siddharthjaswal.logpose.analysis.DuplicateDetector.Mark? = null) {
+    fun show(
+        tx: Transaction?,
+        dup: io.github.siddharthjaswal.logpose.analysis.DuplicateDetector.Mark? = null,
+        envelope: io.github.siddharthjaswal.logpose.model.Envelope? = null,
+    ) {
         current = tx
         currentMethod = tx?.request?.method ?: "GET"
-        overview.show(tx, dup)
+        overview.show(tx, dup, envelope)
         if (tx == null) {
             request.setElement(null); request.setStatus(null)
             response.setElement(null); response.setStatus(null)

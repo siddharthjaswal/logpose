@@ -38,6 +38,15 @@ object McpSessions {
         val clearCapture: () -> Unit = {},
         /** Write surface for mock rules; null when this project can't serve mocks. */
         val mocks: McpTools.Mocks? = null,
+        /** Push injection; null when this project can't reach a device. */
+        val push: McpTools.Push? = null,
+        /** Committable scenario files; null for a project with no directory on disk. */
+        val scenarios: McpTools.Scenarios? = null,
+        /**
+         * "Tell me when the app does X", backed by [EventStore.addWaiter]. Passed as a lambda like
+         * everything else here so a stale session can't keep a store alive by identity alone.
+         */
+        val waits: McpTools.Waits? = null,
     )
 
     private const val TOKEN_KEY = "logpose.mcp.token"

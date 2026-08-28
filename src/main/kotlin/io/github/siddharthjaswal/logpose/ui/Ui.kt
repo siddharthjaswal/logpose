@@ -228,6 +228,8 @@ class StatChip(caption: String, value: String, tip: String? = null) : CardPanel(
         foreground = Theme.text
         font = JBUI.Fonts.create("JetBrains Mono", 14).asBold()
     }
+    private val captionLabel =
+        JLabel(caption.uppercase()).apply { foreground = Theme.textMuted; font = JBUI.Fonts.label(9.5f) }
 
     init {
         arc = 8
@@ -235,12 +237,41 @@ class StatChip(caption: String, value: String, tip: String? = null) : CardPanel(
         stroke = Theme.borderStrong
         border = JBUI.Borders.empty(6, 10)
         tip?.let { toolTipText = it }
-        add(JLabel(caption.uppercase()).apply { foreground = Theme.textMuted; font = JBUI.Fonts.label(9.5f) })
+        add(captionLabel)
         add(valueLabel)
     }
 
     /** Update the value in place (used for the live duration of a pending request). */
     fun value(v: String) { valueLabel.text = v }
+
+    /**
+     * Turns the chip into a link: accent-coloured value, hand cursor, [action] on click.
+     *
+     * A trace id isn't only a fact about the selected event — it's the way into that flow's
+     * waterfall — so the chip that states it is also the control that opens it. The listener goes
+     * on the labels too, since a click lands on whichever child is under the pointer.
+     */
+    fun clickable(tooltip: String? = null, action: () -> Unit): StatChip {
+        tooltip?.let { toolTipText = it }
+        valueLabel.foreground = Theme.accent
+        val hand = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        val listener = object : java.awt.event.MouseAdapter() {
+            override fun mouseClicked(e: java.awt.event.MouseEvent) = action()
+            override fun mouseEntered(e: java.awt.event.MouseEvent) {
+                stroke = Theme.accent; valueLabel.foreground = Theme.accentHover; repaint()
+            }
+            override fun mouseExited(e: java.awt.event.MouseEvent) {
+                // Crossing from a label to the panel exits one and enters the other in the same
+                // gesture, so the highlight simply re-arms rather than needing bounds arithmetic.
+                stroke = Theme.borderStrong; valueLabel.foreground = Theme.accent; repaint()
+            }
+        }
+        listOf<JComponent>(this, valueLabel, captionLabel).forEach {
+            it.cursor = hand
+            it.addMouseListener(listener)
+        }
+        return this
+    }
 }
 
 /** Rounded action button — filled (accent) or ghost (outlined). */

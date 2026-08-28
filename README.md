@@ -58,7 +58,17 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
   into the real response to override a single field and leave the rest backend-generated.
   Edit the response **field by field** (fold, tick what to override, see the original beside
   your change), inject latency / timeouts / connection failures, cap serves, match paths with
-  `*`. Rules sync over adb, show hit counts, and clear when capture stops.
+  `*`, narrow by query/header/body, and serve **a different response per hit**. Rules sync over
+  adb, show hit counts, and clear when capture stops.
+- **Start the flow, don't just watch it** — LogPose can deliver a synthetic **FCM push** into the
+  running app, in-process, with no Play services and no network. Re-send a captured push or
+  compose a new one; injected rows are marked **INJ** so the timeline never passes one off as
+  real. See [Push injection & replay](#push-injection--replay).
+- **Scenarios** — bottle the current mocks, or a whole recorded session, into a committable
+  `.logpose/scenarios/<name>.json` and load it to put the app in a known state offline. Sharing a
+  repro becomes committing a file. See [Scenarios](#scenarios).
+- **Trace waterfall** — read a whole flow on one time axis: what the push set off, what
+  overlapped, what's still running, what took longest. See [Trace waterfall](#trace-waterfall).
 - **FCM in the same timeline** — Firebase pushes and token refreshes appear inline with HTTP
   traffic, so you can read push → API call → UI as one story. Notification, metadata and data
   payload are all inspectable.
@@ -202,8 +212,10 @@ Chunk envelope (for oversized payloads — unchanged, and wraps any of the above
 { "id": "a1b2c3", "seq": 0, "total": 3, "payload": "<json-fragment>" }
 ```
 
-Reverse-channel control messages (`hello`, `mock_ack`) are deliberately **not** enveloped:
-they're a separate IDE ↔ device protocol, not timeline rows.
+Reverse-channel control messages (`hello`, `mock_ack`, `push_ack`) are deliberately **not**
+enveloped: they're a separate IDE ↔ device protocol, not timeline rows. Commands travel the other
+way as `adb shell am broadcast` to a `DUMP`-gated receiver — a rule set (`cmd=rules`) or a
+synthetic push (`cmd=push`).
 
 Bodies stay opaque to the transport, and presentation stays semantic — a badge carries a tone
 and a section carries a type, never a color or a layout, so a theme change can never become a
@@ -233,12 +245,13 @@ version independently:
 
 | Half | What it does | Where it comes from | Version |
 |---|---|---|---|
-| **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.6.0 |
-| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.4.0` |
+| **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.8.0 |
+| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.7.0` |
 
 Install the plugin but not the library and the timeline stays empty — there's nothing being
-emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.4.0` needs
-plugin 1.5.0+, and on an older plugin rows are dropped silently, with no error saying why.
+emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.7.0` needs
+plugin 1.5.0+ to render at all (1.8.0 for push injection and the new mock matchers), and on an
+older plugin rows are dropped silently, with no error saying why.
 
 ### 1. Install the plugin
 
@@ -264,8 +277,9 @@ cd logpose
 ### 2. Add the interceptor to your app
 
 The interceptor is distributed via [JitPack](https://jitpack.io/#siddharthjaswal/logpose).
-**Library `v1.4.0` needs plugin 1.5.0+** (1.6.0+ for db/worker/config rows) — on an older
-plugin the timeline stays empty with no error explaining why:
+**Library `v1.7.0` needs plugin 1.5.0+** (1.6.0+ for db/worker/config rows, 1.8.0 for push
+injection, scenarios and the new mock matchers) — on an older plugin the timeline stays empty
+with no error explaining why:
 
 ```kotlin
 // settings.gradle.kts
@@ -276,10 +290,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.6.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.0")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.6.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.0")
 }
 ```
 
@@ -304,7 +318,7 @@ val client = OkHttpClient.Builder()
 With the `debug`/`release` split above, the release build links against the no-op stub, so
 LogPose is gone from production by construction. `enabled = BuildConfig.DEBUG` is then just
 belt-and-suspenders. (Prefer a single artifact in all variants? Use plain
-`implementation("…:logpose-android:v1.6.0")` everywhere and rely on the `enabled` flag — but then
+`implementation("…:logpose-android:v1.7.0")` everywhere and rely on the `enabled` flag — but then
 the real artifact, including its auto-init provider and DUMP-gated receivers, ships in release too.)
 See
 [`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
@@ -378,10 +392,136 @@ touching backend or app code.
    and the row shows a purple **MOCK** pill — the timeline always reflects what the app
    actually received.
 
+### Match on more than the path
+
+A path pattern isn't always enough — the same endpoint serves the happy path and the one you're
+trying to break. The **Only when…** section of the mock dialog narrows a rule further, and every
+constraint you add has to hold:
+
+| Constraint | Matches when |
+|---|---|
+| **Query** `debug = 1` | the request carries `?debug=1`. Use `*` as the value for "present, any value" |
+| **Header** `X-Tenant = acme` | the request has that header (name case-insensitive); `*` again means "any value" |
+| **Body contains** `"orderId":"91"` | the request body contains that text, case-insensitively |
+
+Body matching **fails closed**: a body the device couldn't buffer (a streaming or duplex upload)
+never matches, so the call goes to the network rather than being mocked on a guess.
+
+### Serve a different response per hit
+
+**Then respond…** turns one rule into a sequence. Hit 1 serves step 1, hit 2 step 2, and the last
+step sticks once the list runs out — so `500` then `200` is a complete retry test in a single
+rule:
+
+```jsonc
+"responses": [
+  { "status": 500 },
+  { "status": 200, "body": "{\"orders\":[]}" }
+]
+```
+
+Each step takes `status`, `body`, `headers`, `contentType`, `latencyMillis` and `behavior`; the
+rule-level response fields are ignored while `responses` is present, but `serveLimit` and
+`mode` still apply. Step selection is best-effort under concurrent identical calls — matching and
+counting a serve aren't atomic, and locking around a network call would be a worse trade for a
+debug tool.
+
+Both of these need `logpose-android` ≥ 1.7.0. A rule that uses them is **withheld** from a device
+running an older library rather than pushed and silently ignored: an old device matching *too
+broadly* is exactly the kind of quiet lie LogPose exists to prevent, so the rule row says
+"needs device lib ≥ 1.7.0" instead.
+
 Rules are pushed to the device over adb (`am broadcast` to a receiver gated by the `DUMP`
 permission, which only the adb shell holds — third-party apps can't reach it). The mock
 machinery ships **only in the real `logpose-android` artifact** (never the release no-op), and
 rules are cleared automatically when you stop capturing. Requires `logpose-android` ≥ 1.1.0.
+
+## Push injection & replay
+
+Most mobile flows don't start with the app making a request — they start with a **push**: order
+assigned, payment confirmed, config kicked. LogPose can deliver one on demand, straight into the
+running app's process. No Play services, no network, no FCM console.
+
+- **Right-click any captured FCM row → "Re-send this push"** — every field of the captured
+  message goes back to the device verbatim, with a fresh message id, send time and trace.
+- **"Compose push…"** (the row menu, or the toolbar so it works with an empty timeline) — a
+  dialog for `from`, collapse key, notification title/body, and a JSON editor for the data map.
+- Injected pushes appear as ordinary FCM rows with an **INJ** pill and a banner in the detail.
+  The timeline says who sent a push; it never passes an injected one off as real.
+
+Tell LogPose where your app's push handling starts — one line at app init, and the reliable tier:
+
+```kotlin
+LogPose.onPushInject { info ->
+    // route it exactly as your FirebaseMessagingService would
+    MyPushRouter.handle(info.data, info.notificationTitle)
+}
+```
+
+Without a handler LogPose falls back to resolving your `FirebaseMessagingService` from the
+manifest and calling `onMessageReceived` reflectively. That works, but it's best effort — and
+either way the device reports back which tier consumed the push (`handler` / `service` / `none`),
+so "nothing is listening" is an answer you get rather than a click that did nothing.
+
+> **What injection can and can't do.** It simulates **foreground data-message delivery** — the
+> `onMessageReceived` path. It cannot reproduce the system-tray path a *background notification*
+> message takes, because that's the OS delivering a notification, not your app receiving a
+> message. Data messages are what actually trigger flows, so this is the useful half.
+
+Delivery runs inside a trace, so everything the push sets off groups with it — read the result as
+a [waterfall](#trace-waterfall), or over MCP with `get_trace` / `await_event`. Needs
+`logpose-android` ≥ 1.7.0; the release no-op mirrors `onPushInject` as an inert function, and the
+receiver ships only in the real artifact.
+
+## Scenarios
+
+A scenario is a **named, committable set of mock rules** — the whole app in a known state, in one
+file. The **Scenarios ▾** menu (mocks strip, or the toolbar) does three things:
+
+- **Save current rules as…** — bottle the rules you just built by hand.
+- **Snapshot session into scenario…** — walk the capture and build one rule per endpoint from the
+  **latest real response**, turning a recorded session into an offline demo of the whole app.
+- **Load** (merge or replace) — apply a saved scenario and push it to the device in one action.
+
+Files live at `<project>/.logpose/scenarios/<name>.json`:
+
+```jsonc
+{ "name": "orders-empty", "createdAt": 1756400000000, "note": "empty-state repro",
+  "rules": [ /* wire MockRule objects */ ] }
+```
+
+Because they're files, sharing a repro with a teammate is committing one. Two things LogPose is
+careful about:
+
+- **A snapshot never invents data.** Bodies come verbatim from the capture; endpoints with no
+  completed response are skipped **and counted** ("skipped 3 in-flight/bodyless endpoints"); and
+  rows LogPose itself mocked are always skipped rather than laundered back in as "what the
+  backend said".
+- **Loaded is not live.** After a load the mocks strip reports the device's actual sync state —
+  pending until the device acknowledges the rules, failed if the push didn't land.
+
+> ⚠️ **Scenario files contain captured response bodies.** That's the point — but a capture can hold
+> tokens, personal data and anything else your backend returned. **Review a scenario before you
+> commit it.** LogPose deliberately doesn't add `.logpose/` to your `.gitignore`: committing these
+> is the feature, and the decision is yours to make per file.
+
+## Trace waterfall
+
+Group events into a trace (`LogPose.withTrace { }`, an injected push, or an explicit `traceId`)
+and the whole flow can be read on one time axis instead of as a list of rows.
+
+Open it from a row's context menu — **Show waterfall**, beside *Filter by trace* — or by clicking
+the **trace** chip on any detail card. Rows with no trace id don't offer it.
+
+- One lane per event, in arrival order, sharing one axis.
+- Spans (HTTP calls, workers) draw as bars; point events (pushes, analytics, config) as dots.
+- **In-flight spans are drawn out to "now"** and keep growing, with the same breathing treatment
+  the timeline rows use.
+- The header states the event count, the wall span and the slowest event — including an
+  in-flight one, which it marks as still running rather than implying it finished.
+- Failed HTTP calls take the danger colour, so the thing that went wrong isn't the same blue as
+  everything else.
+- Click a lane to jump to that event's row, which is also how you leave the card.
 
 ## Database, workers and config
 
@@ -486,8 +626,10 @@ unrecognised kind still gets a row and an inspectable payload rather than being 
 The public API takes only strings and maps, so the release `logpose-no-op` artifact mirrors it
 exactly and your call sites compile unchanged. Requires `logpose-android` ≥ 1.3.0.
 
-> Want to see it without wiring up an app? `./scripts/emit-demo-events.sh` writes a few
-> synthetic events straight to a connected device's logcat.
+> Want to see it without wiring up an app? `./scripts/emit-demo-events.sh` writes a set of
+> synthetic events straight to a connected device's logcat — including a complete traced flow
+> (a push, a finished call, and one left in flight), so the [waterfall](#trace-waterfall) has
+> something to draw. It also carries the `onPushInject` snippet you need for real injection.
 
 ## Connect a coding agent
 
@@ -510,6 +652,13 @@ client), so you can just *ask*.
 > *"Using logpose, add a 5s delay to `/v1/feed`, then remove it."*
 > *"Using logpose, make `/v1/orders` time out so I can test the retry flow."*
 
+**Start a flow and check what it did** — the loop that needs no clicks at all:
+
+> *"Using logpose, inject an `order_assigned` push and tell me every call it triggered."*
+> *"Using logpose, make `/v1/accept` fail once then succeed, re-send the last push, and check the
+> app retried."*
+> *"Using logpose, snapshot this session as the `orders-empty` scenario so I can replay it offline."*
+
 That last group is the real trick: read the actual 404, serve a 200, watch the screen recover —
 all from the chat, while the app keeps running.
 
@@ -523,10 +672,27 @@ claude mcp add --transport http logpose http://localhost:63342/api/logpose/mcp \
   --header "X-LogPose-Token: <your project token>"
 ```
 
-**Tools (12).** Read the capture: `list_events`, `get_event`, `get_trace`, `find_failures`,
-`session_summary`. Diagnose the other kinds: `query_hotspots`, `worker_history`,
-`config_changes`. Change what the app receives: `list_mocks`, `create_mock`,
-`set_mock_enabled`, `delete_mock`.
+**Tools (19).**
+
+| Group | Tools |
+|---|---|
+| **Read the capture** | `list_events`, `get_event`, `get_trace`, `find_failures`, `session_summary`, `clear_capture` |
+| **Diagnose the other kinds** | `query_hotspots`, `worker_history`, `config_changes`, `analytics_events` |
+| **Change what the app receives** | `list_mocks`, `create_mock`, `set_mock_enabled`, `delete_mock` |
+| **Bottle a state** | `list_scenarios`, `load_scenario`, `save_scenario` |
+| **Start a flow and wait for it** | `inject_fcm`, `await_event` |
+
+That last row is what makes an agent's loop deterministic. Instead of triggering something and
+polling `list_events` until the result shows up, it's **trigger → await → assert**:
+
+> *"Using logpose, mock `/v1/orders` to 500, then inject an `order_assigned` push and tell me
+> what the app called next."*
+
+`inject_fcm` returns the trace it delivered inside; `await_event` blocks (bounded, default 30s)
+until an event matching a filter **arrives after the call started**, and returns it. A timeout is
+a normal result (`matched: false`), not an error — it just means nothing happened. See
+[`scripts/agent-flow-check.sh`](scripts/agent-flow-check.sh) for the whole loop written out in
+curl.
 
 It serves on the IDE's own built-in web server (localhost, default port 63342 — check the
 copied command, since a second IDE gets the next free port). A few things worth knowing:
@@ -561,14 +727,20 @@ for the device-side setup.
 - [x] Copy as cURL / JSON, endpoint muting, one-click filter bar, find-in-body
 - [x] Live in-flight requests — appear on hit, ticking timer + loader until the response
 - [x] Modern "Studio" card UI, custom icon, light & dark theme
+- [x] Mock & replay — path/query/header/body matching, patch mode, latency & failures,
+      per-hit response sequences, committable scenario files
+- [x] Push injection — deliver a synthetic FCM data message into the running app
+- [x] Trace waterfall — a whole flow on one time axis
+- [x] MCP server for coding agents, including trigger → await → assert (`inject_fcm` +
+      `await_event`)
 
 ## Road to 1.0 — production checklist
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.5.1`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.7.0`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.5.1`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.0`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).
@@ -582,16 +754,21 @@ for the device-side setup.
 - [x] **`CHANGELOG.md`** + `<change-notes>` in `plugin.xml`; semantic versioning.
 - [x] **Security/privacy**: documented — runs on *debug/staging* only, `Authorization` &
       cookies redacted on-device, bodies never leave logcat.
-- [ ] **Tests** for the pure logic: `TransactionParser` (incl. chunk reassembly),
-      `CurlBuilder` quoting, `FilterState` matching, `MutedEndpoints.normalize`, body
-      capture (multipart/binary/gzip/truncation). *(the main remaining item)*
+- [x] **Tests for the pure logic** — ~425 across the two halves: `TransactionParser` (incl. chunk
+      reassembly), the MCP tool surface, duplicate detection, SQL summarising, the event store and
+      its waiters, mock matching/serving/steps, scenario snapshot + store, push wire round-trips,
+      the waterfall layout, redaction and body decoding. A reflection **API-parity test** keeps
+      the no-op an exact mirror of the real library.
+- [ ] Still untested: `CurlBuilder` quoting, `FilterState` matching, `MutedEndpoints.normalize`,
+      and body capture's multipart/binary/gzip/truncation paths.
 
 ### Polish / nice-to-have
 
 - [ ] Per-device picker when multiple devices/emulators are attached.
 - [ ] Settings panel (tag, body limits, default filters) instead of code-only config.
 - [ ] Optional socket transport (`adb reverse`) to bypass logcat truncation entirely.
-- [ ] Persist/replay captured sessions; export HAR.
+- [x] Persist/replay a captured session — [scenarios](#scenarios) bottle one as mock rules.
+- [ ] Export HAR (scenarios cover offline replay, not interop with other tools).
 - [ ] Zero-setup "raw OkHttp" capture mode (parse stock `HttpLoggingInterceptor` output).
 
 ## Contributing

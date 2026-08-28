@@ -19,9 +19,21 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal object LogPoseRuntime {
     /** Kept in sync with the published library version (used by the IDE's handshake). */
-    const val VERSION = "1.6.0"
+    const val VERSION = "1.7.0"
 
     @Volatile var packageName: String? = null
+
+    /**
+     * The most specific [LogPoseConfig] seen so far — the interceptor's once the app has made a
+     * call, otherwise the default the init provider has to assume.
+     *
+     * Receiver-side emissions (mock acks, push acks) have no config of their own: they are
+     * triggered by an adb broadcast, not by app code. Emitting them through a hardcoded default
+     * put them on the default logcat tag, so an app with a custom [LogPoseConfig.tag] never saw
+     * its own acks. They go through this instead.
+     */
+    @Volatile var config: LogPoseConfig = LogPoseConfig()
+        private set
 
     /**
      * Identifies this app run. Generated once per process, so every hello from the same launch
@@ -33,6 +45,7 @@ internal object LogPoseRuntime {
     private val helloFromIntercept = AtomicBoolean(false)
 
     fun emitHello(config: LogPoseConfig) {
+        this.config = config
         val pkg = packageName ?: return
         LogcatEmitter(config).emit(
             Hello(

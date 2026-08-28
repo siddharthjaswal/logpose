@@ -9,6 +9,7 @@ import kotlinx.serialization.json.encodeToJsonElement
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.concurrent.TimeUnit
 
 /**
  * Session boundaries: the store's job is to keep two app runs from being reported as one
@@ -108,6 +109,58 @@ class EventStoreTest {
         assertEquals(listOf(1, 2), store.sessions().map { it.index })
         assertEquals(1, store.sessionOf("a"))
         assertEquals(2, store.sessionOf("b"))
+    }
+
+    // ---- waiters ----------------------------------------------------------------------------
+
+    /** Completions run inline so a wait's outcome is observable the moment it's decided. */
+    private fun waitingStore() = EventStore(completer = { it.run() })
+
+    @Test fun `a waiter completes with the event that arrives after it parks`() {
+        val store = waitingStore()
+        store.add(event("before"))
+
+        val future = store.addWaiter(5_000) { it.id == "after" }!!
+        assertTrue(!future.isDone, "an event captured before the wait must not satisfy it")
+
+        store.add(event("noise"))
+        assertTrue(!future.isDone)
+
+        store.add(event("after"))
+        assertEquals("after", future.get(2, TimeUnit.SECONDS)?.id)
+        assertEquals(0, store.waiterCount(), "a completed waiter is removed, not left to leak")
+    }
+
+    @Test fun `a waiter completes with null when its timeout elapses`() {
+        // A timeout is an answer ("nothing happened"), which is why it completes rather than fails.
+        val store = waitingStore()
+        val future = store.addWaiter(20) { true }!!
+        assertEquals(null, future.get(2, TimeUnit.SECONDS))
+        assertEquals(0, store.waiterCount())
+    }
+
+    @Test fun `a timed-out waiter can't be completed twice by a later event`() {
+        val store = waitingStore()
+        val future = store.addWaiter(20) { true }!!
+        future.get(2, TimeUnit.SECONDS)
+        store.add(event("late"))
+        assertEquals(null, future.get(), "the timeout already claimed this waiter")
+    }
+
+    @Test fun `waiters are capped so a client can't park an unbounded queue`() {
+        val store = waitingStore()
+        val futures = (1..EventStore.MAX_WAITERS).map { store.addWaiter(5_000) { false } }
+        assertTrue(futures.all { it != null })
+        assertEquals(null, store.addWaiter(5_000) { true }, "beyond the cap the store refuses, clearly")
+        assertEquals(EventStore.MAX_WAITERS, store.waiterCount())
+    }
+
+    @Test fun `a throwing predicate is not a match and does not break the capture`() {
+        val store = waitingStore()
+        val future = store.addWaiter(5_000) { error("bad predicate") }!!
+        store.add(event("a"))
+        assertTrue(!future.isDone)
+        assertEquals(1, store.snapshot().size, "the event is still recorded")
     }
 
     @Test fun `clear drops sessions along with events`() {

@@ -9,6 +9,7 @@ import io.github.siddharthjaswal.logpose.wire.DbQuery
 import io.github.siddharthjaswal.logpose.wire.FcmNotification
 import io.github.siddharthjaswal.logpose.wire.WorkerEvent
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -20,6 +21,8 @@ import io.github.siddharthjaswal.logpose.wire.FcmMessage as WireFcmMessage
  *
  * HTTP traffic arrives on its own via [LogPoseInterceptor]; this object covers the rest:
  * push messages ([logFcmMessage] / [logFcmToken]) and arbitrary app events ([event] / [log]).
+ * [onPushInject] runs the other way — it lets the IDE *start* a flow by delivering a synthetic
+ * push into the app.
  *
  * The event API is the framework half of LogPose — HTTP and FCM are two kinds among many, so
  * an app can put its own subsystems (database queries, background jobs, analytics,
@@ -397,38 +400,7 @@ object LogPose {
     /** Record an incoming FCM push. Call from `FirebaseMessagingService.onMessageReceived`. */
     fun logFcmMessage(info: FcmMessageInfo, config: LogPoseConfig = LogPoseConfig()) {
         if (!config.enabled) return
-        val notification = if (
-            info.notificationTitle != null || info.notificationBody != null ||
-            info.notificationChannelId != null || info.notificationClickAction != null ||
-            info.notificationImageUrl != null
-        ) {
-            FcmNotification(
-                title = info.notificationTitle,
-                body = info.notificationBody,
-                channelId = info.notificationChannelId,
-                clickAction = info.notificationClickAction,
-                imageUrl = info.notificationImageUrl,
-            )
-        } else null
-
-        emitFcm(
-            WireFcmMessage(
-                id = info.messageId ?: newId(),
-                event = "message",
-                receivedAtMillis = System.currentTimeMillis(),
-                messageId = info.messageId,
-                from = info.from,
-                to = info.to,
-                collapseKey = info.collapseKey,
-                messageType = info.messageType,
-                sentTimeMillis = info.sentTimeMillis,
-                ttlSeconds = info.ttlSeconds,
-                priority = info.priority,
-                notification = notification,
-                data = info.data,
-            ),
-            config,
-        )
+        emitFcm(fcmMessage(info, id = info.messageId ?: newId()), config)
     }
 
     /** Record an FCM registration-token refresh. Call from `onNewToken`. */
@@ -445,6 +417,30 @@ object LogPose {
         )
     }
 
+    /**
+     * Hand LogPose the app's push entry point, so the IDE can **inject** a push — replay a
+     * captured one, or compose a new one — and have it flow through the app exactly as a real
+     * data message would. One line at app init:
+     *
+     * ```kotlin
+     * LogPose.onPushInject { info ->
+     *     MyPushRouter.handle(info.data, info.notificationTitle)
+     * }
+     * ```
+     *
+     * This is the reliable tier and the actual contract. Without it LogPose falls back to
+     * calling the manifest's `FirebaseMessagingService.onMessageReceived` reflectively, which
+     * is best-effort and reported back to the IDE when it fails.
+     *
+     * [handler] runs off the main thread, inside the injection's trace, and may be called
+     * concurrently with real pushes — treat it exactly like `onMessageReceived`. Registering
+     * again replaces the previous handler. Injection only ever originates from a developer's
+     * machine over adb, and the release no-op ignores this call entirely.
+     */
+    fun onPushInject(handler: (FcmMessageInfo) -> Unit) {
+        pushHandler.set(handler)
+    }
+
     // ---- internals --------------------------------------------------------------------
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
@@ -457,15 +453,78 @@ object LogPose {
 
     private fun newId(): String = UUID.randomUUID().toString().substring(0, 8)
 
+    /** The app's injected-push handler (see [onPushInject]); null until it registers one. */
+    private val pushHandler = AtomicReference<((FcmMessageInfo) -> Unit)?>(null)
+
+    internal fun pushInjectHandler(): ((FcmMessageInfo) -> Unit)? = pushHandler.get()
+
+    /** Test hook: forget the registered handler so tiers can be exercised independently. */
+    internal fun clearPushInjectHandler() = pushHandler.set(null)
+
+    /**
+     * Emit the timeline row for a push LogPose injected on the IDE's behalf (see
+     * `mock/PushInjector`), flagged [WireFcmMessage.injected] so the capture never passes it off
+     * as a real one. The envelope id and trace come from the injection, so the ack, the row, and
+     * everything the push triggers all line up.
+     */
+    internal fun logInjectedFcm(
+        info: FcmMessageInfo,
+        id: String,
+        traceId: String?,
+        config: LogPoseConfig = LogPoseConfig(),
+    ) {
+        if (!config.enabled) return
+        emitFcm(fcmMessage(info, id = id, injected = true), config, traceId)
+    }
+
+    /** The wire form of an [FcmMessageInfo]; shared by the real and the injected paths. */
+    private fun fcmMessage(
+        info: FcmMessageInfo,
+        id: String,
+        injected: Boolean = false,
+    ): WireFcmMessage {
+        val notification = if (
+            info.notificationTitle != null || info.notificationBody != null ||
+            info.notificationChannelId != null || info.notificationClickAction != null ||
+            info.notificationImageUrl != null
+        ) {
+            FcmNotification(
+                title = info.notificationTitle,
+                body = info.notificationBody,
+                channelId = info.notificationChannelId,
+                clickAction = info.notificationClickAction,
+                imageUrl = info.notificationImageUrl,
+            )
+        } else null
+
+        return WireFcmMessage(
+            id = id,
+            event = "message",
+            receivedAtMillis = System.currentTimeMillis(),
+            messageId = info.messageId,
+            from = info.from,
+            to = info.to,
+            collapseKey = info.collapseKey,
+            messageType = info.messageType,
+            sentTimeMillis = info.sentTimeMillis,
+            ttlSeconds = info.ttlSeconds,
+            priority = info.priority,
+            notification = notification,
+            data = info.data,
+            injected = injected,
+        )
+    }
+
     /** Wrap an FCM message in its envelope and emit through [emit], so it inherits the ambient
      *  trace like every other kind — the FCM row is the anchor of a push trace, so it must be in it. */
-    private fun emitFcm(fcm: WireFcmMessage, config: LogPoseConfig) {
+    private fun emitFcm(fcm: WireFcmMessage, config: LogPoseConfig, traceId: String? = null) {
         emit(
             Envelope(
                 kind = Envelope.KIND_FCM,
                 id = fcm.id,
                 at = fcm.receivedAtMillis,
                 endedAt = fcm.receivedAtMillis,
+                traceId = traceId,
                 payload = json.encodeToJsonElement(fcm),
             ),
             config,

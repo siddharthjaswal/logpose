@@ -3,7 +3,10 @@ package io.github.siddharthjaswal.logpose.ui
 import com.intellij.icons.AllIcons
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.mock.DeviceCapability
+import io.github.siddharthjaswal.logpose.mock.DeviceFeature
 import io.github.siddharthjaswal.logpose.mock.MocksController
+import io.github.siddharthjaswal.logpose.mock.SyncState
 import io.github.siddharthjaswal.logpose.model.MockRule
 import java.awt.BorderLayout
 import java.awt.Color
@@ -34,6 +37,8 @@ class MocksBar(
     private val onToggle: (String, Boolean) -> Unit,
     private val onDisableAll: () -> Unit,
     private val onDiff: (MockRule) -> Unit,
+    /** Opens the scenarios menu under the clicked label (the panel owns the actions + file I/O). */
+    private val onScenarios: (Component) -> Unit = {},
 ) : JPanel(BorderLayout()) {
 
     private val rowsHost = JPanel().apply {
@@ -44,6 +49,16 @@ class MocksBar(
     private val syncDot = JBLabel("●").apply { font = JBUI.Fonts.label(9f) }
     private val syncText = JBLabel().apply { font = JBUI.Fonts.label(11f) }
     private val disableAll = linkLabel("Disable all") { onDisableAll() }
+    private val scenarios = JBLabel("Scenarios ▾").apply {
+        foreground = Theme.accent
+        font = JBUI.Fonts.label(11f)
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        toolTipText = "Save the current rules, snapshot the session, or load a saved scenario " +
+            "from .logpose/scenarios"
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) = onScenarios(this@apply)
+        })
+    }
 
     init {
         isOpaque = true
@@ -64,38 +79,93 @@ class MocksBar(
                 add(syncText)
             }
             add(left, BorderLayout.WEST)
-            add(disableAll, BorderLayout.EAST)
+            add(JPanel(FlowLayout(FlowLayout.RIGHT, JBUI.scale(12), 0)).apply {
+                isOpaque = false
+                add(scenarios)
+                add(disableAll)
+            }, BorderLayout.EAST)
         }
         add(header, BorderLayout.NORTH)
         add(rowsHost, BorderLayout.CENTER)
         isVisible = false
     }
 
-    /** Rebuilds the strip from the current rules + device state. Auto-hides when empty. */
-    fun refresh(rules: List<MockRule>, device: MocksController.DeviceState) {
+    /**
+     * Rebuilds the strip from the current rules + device state. Hides itself when there is
+     * nothing to show — but *not* when the project has saved scenarios, since the strip is where
+     * you load one, and a hidden strip would make a saved scenario unreachable.
+     */
+    fun refresh(rules: List<MockRule>, device: MocksController.DeviceState, scenarioCount: Int = 0) {
         rowsHost.removeAll()
-        rules.forEach { rowsHost.add(ruleRow(it, device.hits[it.id] ?: 0)) }
+        rules.forEach { rowsHost.add(ruleRow(it, device.hits[it.id] ?: 0, device)) }
         applySync(device)
         disableAll.isVisible = rules.any { it.enabled }
-        isVisible = rules.isNotEmpty()
+        scenarios.text = if (scenarioCount > 0) "Scenarios ($scenarioCount) ▾" else "Scenarios ▾"
+        isVisible = rules.isNotEmpty() || scenarioCount > 0
         revalidate(); repaint()
     }
 
+    /**
+     * Three states, not two: a green dot used to appear the moment a device said hello, whether
+     * or not it had actually taken the rules. Now green means the device acknowledged *this*
+     * revision with the rule count we sent, amber means we're still waiting on it, and red means
+     * the push failed or went unanswered — with the reason in the tooltip.
+     */
     private fun applySync(device: MocksController.DeviceState) {
-        if (device.helloSeen) {
-            syncDot.foreground = Theme.methodColor("POST") // green
-            syncText.foreground = Theme.textDim
-            syncText.text = "${device.pkg ?: "device"}  ·  synced rev ${device.syncedRevision}"
-        } else {
-            syncDot.foreground = Theme.warn
-            syncText.foreground = Theme.textMuted
-            syncText.text = "waiting for device — needs logpose-android ≥ 1.1.0 + capture running"
+        val sync = device.sync
+        val name = device.pkg ?: "device"
+        var tip: String? = sync.message
+        when {
+            !device.helloSeen -> {
+                syncDot.foreground = Theme.warn
+                syncText.foreground = Theme.textMuted
+                syncText.text = "waiting for device — needs logpose-android ≥ 1.1.0 + capture running"
+                tip = "No device has announced itself yet. Start capture and run the app."
+            }
+            sync.phase == SyncState.Phase.FAILED -> {
+                syncDot.foreground = Theme.danger
+                syncText.foreground = Theme.danger
+                syncText.text = "$name  ·  not synced — rules may not be live"
+            }
+            !device.capturing -> {
+                syncDot.foreground = Theme.textMuted
+                syncText.foreground = Theme.textMuted
+                syncText.text = "$name  ·  capture stopped — device rules cleared"
+                tip = "Rules stay here; they're pushed again when capture restarts."
+            }
+            sync.phase == SyncState.Phase.PENDING -> {
+                syncDot.foreground = Theme.warn
+                syncText.foreground = Theme.textDim
+                syncText.text = "$name  ·  syncing rev ${sync.revision}…"
+                tip = "Waiting for the device to acknowledge revision ${sync.revision}."
+            }
+            else -> {
+                syncDot.foreground = Theme.methodColor("POST") // green
+                syncText.foreground = Theme.textDim
+                syncText.text = "$name  ·  synced rev ${device.syncedRevision}"
+                tip = buildString {
+                    append("Device acknowledged ${sync.expectedRules} rule(s) at revision ${sync.syncedRevision}")
+                    device.libVersion?.let { append(" · logpose-android $it") }
+                    append('.')
+                }
+            }
         }
+        if (device.withheldRules > 0) {
+            tip = (tip?.plus("\n") ?: "") +
+                "${device.withheldRules} rule(s) withheld — they need logpose-android ≥ " +
+                "${DeviceFeature.RICH_MATCHERS.since} on the device."
+        }
+        val html = tip?.let { "<html>${it.replace("\n", "<br/>")}</html>" }
+        syncDot.toolTipText = html
+        syncText.toolTipText = html
     }
 
-    private fun ruleRow(rule: MockRule, hits: Int): Component {
+    private fun ruleRow(rule: MockRule, hits: Int, device: MocksController.DeviceState): Component {
         val on = rule.enabled
         val toggle = ToggleSwitch(initialOn = on) { onToggle(rule.id, !on) }
+        // The controller withholds rules the device's library can't honour; the row has to say so,
+        // or a rule would sit there looking active while nothing on the device knows about it.
+        val withheld = device.helloSeen && !DeviceCapability.canPush(rule, device.libVersion)
 
         val method = JLabel(rule.method, SwingConstants.LEFT).apply {
             font = JBUI.Fonts.label(11f).asBold()
@@ -113,10 +183,29 @@ class MocksBar(
         val meta = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
-            add(outcome)
-            if (rule.latencyMillis > 0) {
+            if (withheld) {
+                add(chip("lib ≥ ${DeviceFeature.RICH_MATCHERS.since}", Theme.warn, on).apply {
+                    toolTipText = "Not sent to this device — it runs logpose-android " +
+                        "${device.libVersion ?: "an older version"}, which would ignore this " +
+                        "rule's constraints and match more broadly than it reads."
+                })
                 add(Box.createHorizontalStrut(JBUI.scale(6)))
-                add(chip("${rule.latencyMillis}ms", Theme.textMuted, on))
+            }
+            // "only when …" is the difference between a rule that reads right and one that
+            // matches right, so it gets a visible mark, not just a tooltip.
+            if (MockRuleForm.matchSummary(rule) != null) {
+                add(chip("only when", Theme.accent, on))
+                add(Box.createHorizontalStrut(JBUI.scale(6)))
+            }
+            MockRuleForm.stepsLabel(rule)?.let {
+                add(chip(it, Theme.methodColor("GET"), on))
+                add(Box.createHorizontalStrut(JBUI.scale(6)))
+            }
+            add(outcome)
+            val latency = rule.responses.firstOrNull()?.latencyMillis ?: rule.latencyMillis
+            if (latency > 0) {
+                add(Box.createHorizontalStrut(JBUI.scale(6)))
+                add(chip("${latency}ms", Theme.textMuted, on))
             }
             add(Box.createHorizontalStrut(JBUI.scale(10)))
             add(JBLabel(if (hits > 0) "${hits}×" else "").apply {
@@ -142,30 +231,56 @@ class MocksBar(
             add(toggle); add(method)
         }
 
+        val tip = rowTooltip(rule, withheld, device)
         return CardRow().apply {
             border = JBUI.Borders.empty(3, 10)
             add(west, BorderLayout.WEST)
             add(path, BorderLayout.CENTER)
             add(meta, BorderLayout.EAST)
+            toolTipText = tip
+            path.toolTipText = tip
         }
+    }
+
+    /** Everything about the rule the row can't fit: what narrows it, and how a sequence plays. */
+    private fun rowTooltip(rule: MockRule, withheld: Boolean, device: MocksController.DeviceState): String? {
+        val lines = buildList {
+            add("${rule.method} ${rule.pathPattern}")
+            MockRuleForm.matchSummary(rule)?.let { add(it) }
+            MockRuleForm.stepsSummary(rule)?.let { add(it) }
+            if (rule.serveLimit > 0) add("serves ${rule.serveLimit} time(s), then deactivates")
+            if (withheld) {
+                add(
+                    "NOT on the device — needs logpose-android ≥ " +
+                        "${DeviceCapability.requiredVersion(rule) ?: DeviceFeature.RICH_MATCHERS.since}" +
+                        (device.libVersion?.let { ", which reports $it" } ?: "")
+                )
+            }
+        }
+        return if (lines.size == 1 && !withheld) null
+        else "<html>" + lines.joinToString("<br/>") + "</html>"
     }
 
     private fun outcomePill(rule: MockRule, on: Boolean): TagLabel = TagLabel().apply {
         font = JBUI.Fonts.label(11f).asBold()
         border = JBUI.Borders.empty(2, 8)
+        // With a sequence, the pill shows the *first* response — what the next hit gets — and
+        // the "×N steps" chip beside it says the rest is coming.
+        val status = MockRuleForm.effectiveStatus(rule)
+        val behavior = MockRuleForm.effectiveBehavior(rule)
         when {
             // Patch rules keep the backend's status — the response is merged, not replaced.
             rule.mode == MockRule.MODE_PATCH -> {
                 val c = Theme.methodColor("PATCH")
                 set("MERGE", fade(c, on), tintFor(c, on))
             }
-            rule.behavior == MockRule.BEHAVIOR_TIMEOUT ->
+            behavior == MockRule.BEHAVIOR_TIMEOUT ->
                 set("TIMEOUT", fade(Theme.warn, on), tintFor(Theme.warn, on))
-            rule.behavior == MockRule.BEHAVIOR_CONNECTION_FAILURE ->
+            behavior == MockRule.BEHAVIOR_CONNECTION_FAILURE ->
                 set("FAILED", fade(Theme.danger, on), tintFor(Theme.danger, on))
             else -> {
-                val c = Theme.statusColor(rule.status, null)
-                set(rule.status.toString(), fade(c, on), if (on) Theme.statusTint(rule.status, null) else Theme.tint(c, 14))
+                val c = Theme.statusColor(status, null)
+                set(status.toString(), fade(c, on), if (on) Theme.statusTint(status, null) else Theme.tint(c, 14))
             }
         }
     }

@@ -2,9 +2,17 @@ package io.github.siddharthjaswal.logpose.mcp
 
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
+import io.github.siddharthjaswal.logpose.mock.DeviceCapability
+import io.github.siddharthjaswal.logpose.mock.DeviceFeature
+import io.github.siddharthjaswal.logpose.mock.PushReplay
+import io.github.siddharthjaswal.logpose.mock.ScenarioStore
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockRule
+import io.github.siddharthjaswal.logpose.model.MockStep
+import io.github.siddharthjaswal.logpose.model.PushAck
+import io.github.siddharthjaswal.logpose.model.PushInject
+import io.github.siddharthjaswal.logpose.model.PushMessage
 import io.github.siddharthjaswal.logpose.model.Section
 import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.model.Transaction
@@ -21,6 +29,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The read side of LogPose's MCP server: turning a live capture into answers an agent can act
@@ -53,6 +63,35 @@ object McpTools {
         Envelope.KIND_EVENT,
     )
 
+    private val BEHAVIORS = setOf(
+        MockRule.BEHAVIOR_NORMAL,
+        MockRule.BEHAVIOR_TIMEOUT,
+        MockRule.BEHAVIOR_CONNECTION_FAILURE,
+    )
+
+    /** Every key a `responses` step accepts. Anything else is a typo, and is refused as one. */
+    private val STEP_KEYS = setOf("status", "body", "headers", "content_type", "latency_ms", "behavior")
+
+    private const val FROM_RULES = "rules"
+    private const val FROM_SESSION = "session"
+
+    /** The oldest device library that understands the narrowing matchers and response steps. */
+    private val MIN_RICH_MATCHER_LIB = DeviceFeature.RICH_MATCHERS.since
+
+    /**
+     * How long `await_event` waits. Bounded at both ends: a sub-second wait almost always means a
+     * caller that meant to poll, and two minutes is already longer than any flow worth waiting on
+     * synchronously.
+     */
+    private const val DEFAULT_AWAIT_MILLIS = 30_000L
+    private const val MIN_AWAIT_MILLIS = 1_000L
+    private const val MAX_AWAIT_MILLIS = 120_000L
+
+    private const val CAPTURE_STOPPED_NOTE =
+        "Capture is NOT running — nothing can arrive because logcat isn't being tailed (it can " +
+            "stop on an app reinstall or adb disconnect). Press ▶ in the LogPose window to " +
+            "reattach, then wait again."
+
     /**
      * The write surface, kept as an interface so this file stays free of IntelliJ types and
      * unit-testable. Implemented over `MocksController` by the tool window.
@@ -68,9 +107,99 @@ object McpTools {
         fun deviceHint(): String
         /** True when a device is attached and synced, so a new rule takes effect immediately. */
         fun deviceReady(): Boolean
+        /**
+         * The library version the device announced, or null before the handshake. A rule using
+         * fields that version predates is **withheld** from the push rather than downgraded (see
+         * [io.github.siddharthjaswal.logpose.mock.DeviceCapability]), so a caller has to be told
+         * when it just wrote one.
+         */
+        fun deviceLibVersion(): String? = null
         fun create(rule: MockRule, baseBody: String?)
         fun setEnabled(id: String, enabled: Boolean)
         fun delete(id: String)
+    }
+
+    /**
+     * Push injection: the other half of the loop mocking opened. A mock changes what the app gets
+     * when it asks; an injected push starts a flow the app never asked for — which is how most
+     * mobile flows actually begin (order assigned, payment confirmed).
+     *
+     * Callback-shaped because delivery is answered by the device, not by the call: implementations
+     * MUST invoke the callback exactly once, with the device's answer or with null when nothing
+     * came back at all.
+     */
+    interface Push {
+        /** Device state as one phrase, e.g. "com.acme · lib 1.7.0". */
+        fun deviceHint(): String
+        /** Null when a push can be delivered right now; otherwise why it can't, in plain words. */
+        fun notReady(): String?
+        fun inject(inject: PushInject, onAck: (Ack?) -> Unit)
+
+        /** What the device reported about an injected push. */
+        data class Ack(val delivered: String, val error: String? = null)
+    }
+
+    /**
+     * Named, committable rule sets (`.logpose/scenarios/<name>.json`) — "make this whole app work
+     * offline" as one action.
+     *
+     * Callback-shaped for a different reason than [Push]: the implementation touches the
+     * filesystem, and this layer is called from the MCP transport's IO thread, so the work belongs
+     * on a pooled one.
+     */
+    interface Scenarios {
+        data class Info(val name: String, val rules: Int, val createdAt: Long, val note: String?)
+
+        /** What a load did. [found] false means there's no such scenario on disk. */
+        data class LoadReport(
+            val name: String,
+            val found: Boolean,
+            val rules: Int = 0,
+            val replaced: Boolean = false,
+            /** Rules active after the load (a merge keeps the ones it didn't replace). */
+            val activeRules: Int = 0,
+            val deviceHint: String = "",
+            /** True when capture is live, so the load was actually pushed to a device. */
+            val live: Boolean = false,
+            /** Loaded rules the device's library is too old to receive (they were withheld). */
+            val withheld: Int = 0,
+        )
+
+        data class SaveReport(
+            val name: String,
+            val rules: Int = 0,
+            /** Project-relative path written, when it was. */
+            val path: String? = null,
+            /** What the snapshot refused to guess at, e.g. "skipped 3 in-flight/bodyless". */
+            val detail: String? = null,
+            val error: String? = null,
+        ) {
+            val saved: Boolean get() = error == null
+        }
+
+        fun list(onResult: (List<Info>) -> Unit)
+        fun load(name: String, replace: Boolean, onResult: (LoadReport) -> Unit)
+        /** [fromSession] false = bottle the active rules; true = snapshot the capture. */
+        fun save(
+            name: String,
+            note: String?,
+            fromSession: Boolean,
+            successOnly: Boolean,
+            onResult: (SaveReport) -> Unit,
+        )
+    }
+
+    /**
+     * The capture's "tell me when" side, injected so this file stays testable without a store or a
+     * clock. Implemented over [EventStore.addWaiter].
+     */
+    fun interface Waits {
+        /**
+         * Parks [predicate] for up to [timeoutMillis]. The future completes with the matching
+         * event or with null on timeout; a null **return** means too many waits are already
+         * outstanding on this capture.
+         */
+        fun await(timeoutMillis: Long, predicate: (LogEvent) -> Boolean): CompletableFuture<LogEvent?>?
     }
 
     /** The tool catalogue, in MCP's `tools/list` shape. */
@@ -115,6 +244,28 @@ object McpTools {
                     "triggered. Use it to answer 'what led to this?'.",
             ) {
                 put("trace_id", stringProp("Trace id.", required = true))
+            },
+        )
+        add(
+            tool(
+                "await_event",
+                "Wait for the next event matching a filter, instead of polling list_events. This " +
+                    "is what closes the loop: create_mock / inject_fcm to trigger something, " +
+                    "await_event to catch what it caused, then assert. Only matches events that " +
+                    "arrive AFTER this call starts — if the thing you're waiting for may already " +
+                    "have happened, use list_events. A timeout is a normal result " +
+                    "(matched: false), not an error.",
+            ) {
+                put("kind", stringProp("Only this kind: 'http', 'fcm', 'db', 'worker', 'config', 'event', or an app-defined kind."))
+                put("method", stringProp("HTTP method, e.g. 'POST'."))
+                put("status_class", intProp("HTTP status class: 2, 3, 4 or 5."))
+                put("contains", stringProp("Substring of the URL, title or subtitle — same matching as list_events."))
+                put("trace_id", stringProp(
+                    "Only events carrying this trace id. Pair it with inject_fcm's returned " +
+                        "trace_id to wait for what that push set off.",
+                ))
+                put("failed_only", boolProp("Only failures: non-2xx responses and errors."))
+                put("timeout_ms", intProp("How long to wait (default 30000, clamped to 1000–120000)."))
             },
         )
         add(
@@ -232,6 +383,29 @@ object McpTools {
                     "connection_failure throws. Leave a failure at 0 to test the failure path; raise " +
                     "it above your race window to hold the request in flight and reproduce a race."))
                 put("serve_limit", intProp("Serve this many times then deactivate; 0 (default) = always."))
+                put("match_query", objectProp(
+                    "Narrow the match to requests carrying these query parameters, e.g. " +
+                        "{\"debug\":\"1\"}. Every entry must match; '*' as a value means 'present, " +
+                        "any value'. Needs device library ≥ 1.7.0.",
+                ))
+                put("match_headers", objectProp(
+                    "Narrow the match to requests carrying these headers (name case-insensitive), " +
+                        "e.g. {\"X-Tenant\":\"acme\"}. '*' as a value means 'present, any value'. " +
+                        "Needs device library ≥ 1.7.0.",
+                ))
+                put("match_body_contains", stringProp(
+                    "Only match when the request body contains this text (case-insensitive). " +
+                        "Fails closed on the device: a body it can't buffer never matches, so the " +
+                        "call goes to the network rather than being mocked on a guess. Needs " +
+                        "device library ≥ 1.7.0.",
+                ))
+                put("responses", arrayProp(
+                    "Serve a different response per hit, e.g. [{\"status\":500},{\"status\":200," +
+                        "\"body\":\"…\"}] to test retry logic in one rule. The last step sticks " +
+                        "once the list runs out. Each step takes status (required), body, " +
+                        "headers, content_type, latency_ms, behavior — the rule-level response " +
+                        "fields are ignored when this is present. Needs device library ≥ 1.7.0.",
+                ))
             },
         )
         add(
@@ -250,6 +424,89 @@ object McpTools {
                 "Remove a mock rule entirely. Use set_mock_enabled if you might want it back.",
             ) {
                 put("id", stringProp("Mock rule id.", required = true))
+            },
+        )
+        add(
+            tool(
+                "inject_fcm",
+                "Deliver a synthetic push to the running app — no Play services, no network. " +
+                    "THIS STARTS A FLOW IN THE RUNNING APP: most mobile journeys begin with a " +
+                    "push (order assigned, payment confirmed), and this is how you begin one on " +
+                    "demand. The push appears on the timeline like any other, marked INJ, so the " +
+                    "capture never passes it off as real. Pair it with await_event on the " +
+                    "returned trace_id to see what it triggered. Needs device library ≥ 1.7.0 " +
+                    "and an app that registered LogPose.onPushInject { } (or has a " +
+                    "FirebaseMessagingService in its manifest).",
+            ) {
+                put("data", objectProp(
+                    "The push's data map — the payload the app routes on, e.g. " +
+                        "{\"channel\":\"order_assigned\",\"orderId\":\"91\"}. Required unless " +
+                        "from_event_id is given. Values must be strings.",
+                ))
+                put("from_event_id", stringProp(
+                    "Re-send a captured push: copies every field of that FCM event (id from " +
+                        "list_events), with a fresh message id and send time. Anything you also " +
+                        "state below overrides the captured value.",
+                ))
+                put("notification_title", stringProp("Notification title, for a push that carries one."))
+                put("notification_body", stringProp("Notification body."))
+                put("from", stringProp("Sender, e.g. a '/topics/...' or a sender id."))
+                put("collapse_key", stringProp("Collapse key."))
+                put("trace_id", stringProp(
+                    "Deliver inside this trace, so everything the push triggers groups under it. " +
+                        "One is generated and returned when you don't supply one.",
+                ))
+                put("await", boolProp(
+                    "Wait (≤ 10s) for the device to report what consumed the push, and return " +
+                        "delivered = handler | service | none. Default false, which returns as " +
+                        "soon as the command is sent with delivered = 'pending'.",
+                ))
+            },
+        )
+        add(
+            tool(
+                "list_scenarios",
+                "Saved mock scenarios in this project (.logpose/scenarios/*.json) — named rule " +
+                    "sets a teammate can commit and you can load to put the whole app in a known " +
+                    "state offline.",
+            ) {}
+        )
+        add(
+            tool(
+                "load_scenario",
+                "Apply a saved scenario's rules and push them to the device — one action, one " +
+                    "revision. THIS CHANGES WHAT THE RUNNING APP RECEIVES for every endpoint the " +
+                    "scenario covers. The result reports the device sync state: loaded is not the " +
+                    "same as live until the device acknowledges it.",
+            ) {
+                put("name", stringProp("Scenario name, from list_scenarios.", required = true))
+                put("replace", boolProp(
+                    "True swaps the whole active rule set for this scenario; false (default) " +
+                        "merges it in, replacing only rules with the same id.",
+                ))
+            },
+        )
+        add(
+            tool(
+                "save_scenario",
+                "Bottle mock rules into a committable file under .logpose/scenarios. from='rules' " +
+                    "saves the rule set as it stands; from='session' walks the capture and builds " +
+                    "one replace-rule per endpoint from the LATEST real response, so a recorded " +
+                    "session becomes an offline demo. A snapshot never invents data: endpoints " +
+                    "with no completed response are skipped and counted, and rows LogPose itself " +
+                    "mocked are always skipped rather than laundered back in as 'what the backend " +
+                    "said'. Scenario files contain captured response bodies — say so before " +
+                    "anyone commits one.",
+            ) {
+                put("name", stringProp(
+                    "File name, lowercase letters/digits/'-'/'_', ≤ 64 chars.", required = true,
+                ))
+                put("from", stringProp("'rules' (default) or 'session'.", required = true))
+                put("note", stringProp("Optional one-line note stored with the scenario."))
+                put("success_only", boolProp(
+                    "from='session' only: keep just 2xx responses. Default false — an error state " +
+                        "is very often the thing worth bottling.",
+                ))
             },
         )
     }
@@ -294,6 +551,69 @@ object McpTools {
         this?.let(block) ?: buildJsonObject {
             put("error", "Mocking isn't available — open the LogPose tool window for this project.")
         }
+
+    // ---- deferred tools ---------------------------------------------------------------------
+
+    /**
+     * Tools whose answer can arrive later than the call: a wait that only ends when the app does
+     * something, a push whose outcome the device reports, a scenario read off disk.
+     *
+     * They are a separate entry point rather than a mode of [call] so the fourteen synchronous
+     * tools keep returning a value on the calling thread exactly as before — the transport picks
+     * the path, and only these tools ever leave a request open.
+     */
+    private val ASYNC_TOOLS = setOf(
+        "await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
+    )
+
+    fun isAsync(name: String): Boolean = name in ASYNC_TOOLS
+
+    /**
+     * Execute a deferred tool, handing the result to [onResult] — possibly on another thread, and
+     * possibly much later (an `await_event` can hold for two minutes).
+     *
+     * [onResult] is called **exactly once** on every path, including argument errors: an agent's
+     * request must never be left hanging. [now] is injectable so elapsed times are testable.
+     */
+    fun callAsync(
+        name: String,
+        args: JsonObject,
+        events: List<LogEvent>,
+        push: Push? = null,
+        waits: Waits? = null,
+        scenarios: Scenarios? = null,
+        captureRunning: () -> Boolean = { true },
+        now: () -> Long = { System.currentTimeMillis() },
+        onResult: (JsonElement) -> Unit,
+    ) {
+        // One answer per call, whichever path gets there first: a push that acks after its own
+        // deadline fired must not write a second response onto the same request.
+        val answered = AtomicBoolean(false)
+        val answer: (JsonElement) -> Unit = { if (answered.compareAndSet(false, true)) onResult(it) }
+        val fail: (String) -> Unit = { answer(buildJsonObject { put("error", it) }) }
+
+        when (name) {
+            "await_event" ->
+                if (waits == null) fail(UNAVAILABLE) else awaitEvent(args, waits, captureRunning, now, answer)
+            "inject_fcm" ->
+                if (push == null) fail(PUSH_UNAVAILABLE) else injectFcm(args, events, push, now, answer)
+            "list_scenarios" ->
+                if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else listScenarios(scenarios, answer)
+            "load_scenario" ->
+                if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else loadScenario(args, scenarios, answer)
+            "save_scenario" ->
+                if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else saveScenario(args, scenarios, answer)
+            else -> fail("Unknown tool '$name'")
+        }
+    }
+
+    private const val UNAVAILABLE =
+        "Waiting isn't available — open the LogPose tool window for this project."
+    private const val PUSH_UNAVAILABLE =
+        "Push injection isn't available — open the LogPose tool window for this project."
+    private const val SCENARIOS_UNAVAILABLE =
+        "Scenarios aren't available — open the LogPose tool window for a project with a " +
+            "directory on disk (scenarios live in .logpose/scenarios)."
 
     // ---- tools ---------------------------------------------------------------------------
 
@@ -389,6 +709,98 @@ object McpTools {
             put("count", inTrace.size)
             if (inTrace.isEmpty()) put("note", "No events carry this trace id.")
             put("events", buildJsonArray { inTrace.forEach { add(brief(it)) } })
+        }
+    }
+
+    /**
+     * Wait for the next matching event.
+     *
+     * The whole point is that it only sees what arrives *after* the wait is parked: an agent that
+     * triggers something and then asks "did it happen?" must not be answered by a stale row from
+     * before the trigger. That also means an in-place update counts — a response landing on a
+     * request that was already in flight is new information arriving, and awaiting a 5xx on it is
+     * exactly the intended use.
+     *
+     * A timeout is a result, not an error: "nothing happened" is a legitimate answer to assert on,
+     * and an error would make an agent retry the transport instead of reading the finding.
+     */
+    private fun awaitEvent(
+        args: JsonObject,
+        waits: Waits,
+        captureRunning: () -> Boolean,
+        now: () -> Long,
+        answer: (JsonElement) -> Unit,
+    ) {
+        val statusClass = args.int("status_class")
+        if (statusClass != null && statusClass !in 1..5) {
+            answer(errorObj("status_class must be 1, 2, 3, 4 or 5.")); return
+        }
+        val requested = args.int("timeout_ms")?.toLong() ?: DEFAULT_AWAIT_MILLIS
+        val timeout = requested.coerceIn(MIN_AWAIT_MILLIS, MAX_AWAIT_MILLIS)
+
+        // Nothing can arrive while logcat isn't being tailed, so waiting the full timeout would
+        // just be a slow way of saying "capture is stopped".
+        if (!captureRunning()) {
+            answer(buildJsonObject {
+                put("matched", false)
+                put("waited_ms", 0)
+                put("capture_stopped", true)
+                put("note", CAPTURE_STOPPED_NOTE)
+            })
+            return
+        }
+
+        val kind = args.str("kind")
+        val method = args.str("method")?.uppercase()
+        val contains = args.str("contains")
+        val traceId = args.str("trace_id")
+        val failedOnly = args.bool("failed_only") ?: false
+
+        val predicate: (LogEvent) -> Boolean = { event ->
+            when {
+                kind != null && !event.kind.equals(kind, ignoreCase = true) -> false
+                traceId != null && event.traceId != traceId -> false
+                failedOnly && !event.isFailure() -> false
+                method != null && (event as? LogEvent.Http)?.tx?.request?.method?.uppercase() != method -> false
+                statusClass != null &&
+                    ((event as? LogEvent.Http)?.tx?.response?.code ?: 0) / 100 != statusClass -> false
+                contains != null && !event.haystack().contains(contains, ignoreCase = true) -> false
+                else -> true
+            }
+        }
+
+        val started = now()
+        val future = waits.await(timeout, predicate)
+        if (future == null) {
+            answer(errorObj(
+                "Too many waits are already outstanding on this capture (limit " +
+                    "${EventStore.MAX_WAITERS}). Let one finish or time out before starting " +
+                    "another — a wait holds a request open until its event arrives.",
+            ))
+            return
+        }
+        future.whenComplete { event, error ->
+            val waited = now() - started
+            answer(
+                when {
+                    error != null -> errorObj("await_event failed: ${error.message ?: error::class.java.simpleName}")
+                    event == null -> buildJsonObject {
+                        put("matched", false)
+                        put("waited_ms", waited)
+                        put("timeout_ms", timeout)
+                        put("note", "Nothing matching arrived in ${timeout}ms. This only sees " +
+                            "events that arrive AFTER the wait starts — if it may have happened " +
+                            "already, check list_events. If the app should have been triggered, " +
+                            "check that capture is running and the trigger actually fired.")
+                    }
+                    else -> buildJsonObject {
+                        put("matched", true)
+                        put("waited_ms", waited)
+                        put("id", event.id)
+                        put("event", brief(event))
+                    }
+                }
+            )
         }
     }
 
@@ -806,7 +1218,17 @@ object McpTools {
         }
     }
 
-    private fun createMock(args: JsonObject, events: List<LogEvent>, mocks: Mocks): JsonElement {
+    private fun createMock(args: JsonObject, events: List<LogEvent>, mocks: Mocks): JsonElement =
+        // Bad arguments come back as a readable message rather than a transport failure — and
+        // never as a coerced value, since a mock that quietly matches something other than what
+        // was asked for is worse than no mock at all.
+        try {
+            createMockChecked(args, events, mocks)
+        } catch (e: BadArgs) {
+            errorObj(e.message ?: "Invalid arguments.")
+        }
+
+    private fun createMockChecked(args: JsonObject, events: List<LogEvent>, mocks: Mocks): JsonElement {
         // Seeding from a captured event is the path worth encouraging: the agent copies a real
         // response and states only the difference, instead of inventing a payload the app has
         // never seen.
@@ -829,16 +1251,17 @@ object McpTools {
             return buildJsonObject { put("error", "mode must be 'replace' or 'patch'.") }
         }
         val behavior = args.str("behavior") ?: MockRule.BEHAVIOR_NORMAL
-        if (behavior !in setOf(
-                MockRule.BEHAVIOR_NORMAL,
-                MockRule.BEHAVIOR_TIMEOUT,
-                MockRule.BEHAVIOR_CONNECTION_FAILURE,
-            )
-        ) {
+        if (behavior !in BEHAVIORS) {
             return buildJsonObject {
                 put("error", "behavior must be 'normal', 'timeout' or 'connection_failure'.")
             }
         }
+
+        // The narrowing matchers and the per-hit response sequence. Parsed before anything is
+        // created, so a malformed step can't leave a half-specified rule on the device.
+        val matchQuery = args.stringMap("match_query").orEmpty()
+        val matchHeaders = args.stringMap("match_headers").orEmpty()
+        val steps = args.steps("responses")
 
         // In replace mode with no body given, fall back to the captured response so the rule is
         // immediately meaningful (e.g. "same response, but status 500").
@@ -857,17 +1280,29 @@ object McpTools {
             serveLimit = args.int("serve_limit") ?: 0,
             enabled = true,
             mode = mode,
+            matchQuery = matchQuery,
+            matchHeaders = matchHeaders,
+            // An empty string would be a constraint that constrains nothing; drop it rather than
+            // store a matcher that reads like one and isn't.
+            matchBodyContains = args.str("match_body_contains")?.takeIf { it.isNotEmpty() },
+            responses = steps,
         )
         mocks.create(rule, seed?.response?.body?.text)
 
-        val active = mocks.deviceReady()
+        // A rule using fields the device's library predates is withheld from the push, not
+        // downgraded — so it is emphatically not active, however healthy the handshake is.
+        val libVersion = mocks.deviceLibVersion()
+        val withheld = !DeviceCapability.canPush(rule, libVersion)
+        val active = mocks.deviceReady() && !withheld
         return buildJsonObject {
             // Lead with whether the rule is actually serving. "created" alone read as success even
             // when no device was attached, and an agent built a flow on a mock that never fired.
             put("active", active)
             put("created", briefMock(rule, 0, 0))
             put("device", mocks.deviceHint())
-            if (!active) {
+            if (withheld) {
+                put("warning", withheldText(1, libVersion))
+            } else if (!active) {
                 put(
                     "warning",
                     "NOT SERVING YET — the app hasn't announced itself to this capture, so the " +
@@ -882,6 +1317,16 @@ object McpTools {
                     "The running app will now receive this instead of the real response for matching " +
                         "requests. Disable it with set_mock_enabled when you're done; all rules also " +
                         "clear from the device when capture stops.",
+                )
+            }
+            // Both a sequence and a single response were given. The device serves the sequence, so
+            // saying nothing would leave a caller believing in a body that never gets served.
+            if (steps.isNotEmpty() && (args.str("body") != null || args.int("status") != null)) {
+                put(
+                    "ignored",
+                    "'responses' is present, so the rule-level status/body are not served — each " +
+                        "step carries its own. Remove them, or drop 'responses' to serve one " +
+                        "response every time.",
                 )
             }
             // A timeout/failure with no latency throws almost instantly — it exercises the failure
@@ -926,13 +1371,255 @@ object McpTools {
         put("match", "${rule.method} ${rule.pathPattern}")
         put("enabled", rule.enabled)
         put("mode", rule.mode)
-        if (rule.behavior != MockRule.BEHAVIOR_NORMAL) put("behavior", rule.behavior)
-        else put("status", rule.status)
-        if (rule.latencyMillis > 0) put("latency_ms", rule.latencyMillis)
+        if (rule.responses.isNotEmpty()) {
+            // A sequence overrides the rule-level response fields, so reporting those would
+            // describe something the device will never serve.
+            put("steps", buildJsonArray {
+                rule.responses.forEach { step ->
+                    add(buildJsonObject {
+                        put("status", step.status)
+                        if (step.behavior != MockRule.BEHAVIOR_NORMAL) put("behavior", step.behavior)
+                        if (step.latencyMillis > 0) put("latency_ms", step.latencyMillis)
+                        if (step.body != null) put("has_body", true)
+                    })
+                }
+            })
+            put("steps_note", "Hit N serves step N; the last step sticks once the list runs out.")
+        } else if (rule.behavior != MockRule.BEHAVIOR_NORMAL) {
+            put("behavior", rule.behavior)
+        } else {
+            put("status", rule.status)
+        }
+        if (rule.latencyMillis > 0 && rule.responses.isEmpty()) put("latency_ms", rule.latencyMillis)
         if (rule.serveLimit > 0) put("serve_limit", rule.serveLimit)
+        // The narrowing constraints, so a rule that reads "mock /orders" but only fires on
+        // ?debug=1 can't be mistaken for one that fires on everything.
+        if (rule.matchQuery.isNotEmpty()) {
+            put("match_query", buildJsonObject { rule.matchQuery.forEach { (k, v) -> put(k, v) } })
+        }
+        if (rule.matchHeaders.isNotEmpty()) {
+            put("match_headers", buildJsonObject { rule.matchHeaders.forEach { (k, v) -> put(k, v) } })
+        }
+        rule.matchBodyContains?.takeIf { it.isNotEmpty() }?.let { put("match_body_contains", it) }
+        DeviceCapability.requiredVersion(rule)?.let { put("needs_device_lib", it) }
         put("served", served)
         put("device_hits", deviceHits)
     }
+
+    /** The message the tool window shows for rules a device's library is too old to receive. */
+    private fun withheldText(count: Int, libVersion: String?): String =
+        "WITHHELD FROM THE DEVICE — $count rule(s) use query/header/body matching or sequential " +
+            "responses, which need logpose-android ≥ ${MIN_RICH_MATCHER_LIB} on the device" +
+            (libVersion?.takeIf { it.isNotBlank() }?.let { " (it reports $it)" } ?: "") +
+            ". LogPose withholds them rather than send them to a library that would ignore the " +
+            "constraint and match too broadly — an old device matching every call to that path " +
+            "is exactly the trust failure this tool exists to prevent. Update the app's " +
+            "logpose-android dependency, or write the rule without the new fields."
+
+    // ---- push injection (write) --------------------------------------------------------------
+
+    /**
+     * Deliver a synthetic push, optionally rebuilt from a captured one.
+     *
+     * Replay copies the captured message through [PushReplay] rather than re-deriving the fields
+     * here, so an agent's replay and the tool window's "Re-send this push" produce the same
+     * message — two implementations of "what was in that push" is exactly how a replay starts
+     * quietly differing from the thing it replays.
+     */
+    private fun injectFcm(
+        args: JsonObject,
+        events: List<LogEvent>,
+        push: Push,
+        now: () -> Long,
+        answer: (JsonElement) -> Unit,
+    ) {
+        val seed = args.str("from_event_id")?.let { id ->
+            val captured = (events.firstOrNull { it.id == id } as? LogEvent.Fcm)?.msg
+                ?: return answer(errorObj("No captured FCM event with id '$id' to replay."))
+            if (!PushReplay.canReplay(captured)) {
+                return answer(errorObj(
+                    "Event '$id' is a token refresh, not a message — there is nothing to deliver.",
+                ))
+            }
+            captured
+        }
+
+        val data = try {
+            args.stringMap("data")
+        } catch (e: BadArgs) {
+            return answer(errorObj(e.message ?: "Invalid 'data'."))
+        }
+        if (seed == null && data == null) {
+            return answer(errorObj(
+                "Provide 'data' (the push payload the app routes on), or 'from_event_id' to " +
+                    "replay a captured push.",
+            ))
+        }
+
+        val id = PushReplay.newId()
+        val traceId = args.str("trace_id")?.takeIf { it.isNotBlank() } ?: PushReplay.newTraceId()
+        val base = seed?.let { PushReplay.toMessage(it, PushReplay.newId(), now()) } ?: PushMessage()
+        val message = base.copy(
+            messageId = base.messageId?.takeIf { it.isNotBlank() } ?: PushReplay.newId(),
+            sentTimeMillis = now(),
+            from = args.str("from") ?: base.from,
+            collapseKey = args.str("collapse_key") ?: base.collapseKey,
+            notificationTitle = args.str("notification_title") ?: base.notificationTitle,
+            notificationBody = args.str("notification_body") ?: base.notificationBody,
+            data = data ?: base.data,
+        )
+
+        // Nothing can be delivered to a device that hasn't announced itself or whose library
+        // predates injection — say so as loudly as create_mock does, rather than reporting a send
+        // that never happened.
+        push.notReady()?.let { reason ->
+            return answer(buildJsonObject {
+                put("sent", false)
+                put("id", id)
+                put("delivered", "none")
+                put("device", push.deviceHint())
+                put("warning", "NOT DELIVERED — $reason Nothing was sent, so the app has not " +
+                    "received this push and no FCM row will appear on the timeline.")
+            })
+        }
+
+        val await = args.bool("await") ?: false
+        push.inject(PushInject(id = id, traceId = traceId, message = message)) { ack ->
+            if (!await) return@inject
+            answer(buildJsonObject {
+                put("sent", true)
+                put("id", id)
+                put("trace_id", traceId)
+                put("device", push.deviceHint())
+                if (ack == null) {
+                    put("delivered", "unknown")
+                    put("warning", "The device did not report an outcome in time. The ack rides " +
+                        "back on logcat, so check capture is still running and the app is alive — " +
+                        "the push may well have been delivered. Look for the injected FCM row " +
+                        "(list_events kind='fcm') to see whether it landed.")
+                } else {
+                    put("delivered", ack.delivered)
+                    ack.error?.let { put("error", it) }
+                    if (ack.delivered == PushAck.DELIVERED_NONE) {
+                        put("warning", "The app received the injection but NOTHING CONSUMED IT. " +
+                            "Register a handler in the app's init — " +
+                            "LogPose.onPushInject { info -> MyPushRouter.handle(info.data) } — or " +
+                            "keep a FirebaseMessagingService in the manifest, which LogPose calls " +
+                            "as a fallback. The push still appears on the timeline with an INJ " +
+                            "pill, because it really was injected.")
+                    } else {
+                        put("note", "Delivered to the app's ${ack.delivered} tier, inside trace " +
+                            "$traceId. Use await_event(trace_id='$traceId') or get_trace to see " +
+                            "what it set off.")
+                    }
+                }
+            })
+        }
+        if (!await) {
+            answer(buildJsonObject {
+                put("sent", true)
+                put("id", id)
+                put("trace_id", traceId)
+                put("delivered", "pending")
+                put("device", push.deviceHint())
+                put("note", "Sent to the device; the delivery outcome was not awaited. Call with " +
+                    "await=true to have the device report handler | service | none, or " +
+                    "await_event(trace_id='$traceId') to catch what the push triggered. The push " +
+                    "appears on the timeline with an INJ pill.")
+            })
+        }
+    }
+
+    // ---- scenarios ----------------------------------------------------------------------------
+
+    private fun listScenarios(scenarios: Scenarios, answer: (JsonElement) -> Unit) =
+        scenarios.list { infos ->
+            answer(buildJsonObject {
+                put("count", infos.size)
+                put("dir", ScenarioStore.REL_DIR)
+                if (infos.isEmpty()) {
+                    put("note", "No scenarios saved yet. save_scenario(from='session') bottles the " +
+                        "endpoints in the current capture into one, which is how an app gets an " +
+                        "offline demo mode.")
+                }
+                put("scenarios", buildJsonArray {
+                    infos.forEach { info ->
+                        add(buildJsonObject {
+                            put("name", info.name)
+                            put("rules", info.rules)
+                            if (info.createdAt > 0) put("created_at", info.createdAt)
+                            info.note?.takeIf { it.isNotBlank() }?.let { put("note", it) }
+                        })
+                    }
+                })
+            })
+        }
+
+    private fun loadScenario(args: JsonObject, scenarios: Scenarios, answer: (JsonElement) -> Unit) {
+        val name = args.str("name") ?: return answer(errorObj("Missing 'name'"))
+        if (!ScenarioStore.isValidName(name)) return answer(errorObj(nameRule(name)))
+        val replace = args.bool("replace") ?: false
+
+        scenarios.load(name, replace) { report ->
+            answer(
+                if (!report.found) {
+                    errorObj("No scenario named '$name' in ${ScenarioStore.REL_DIR}. " +
+                        "Use list_scenarios to see what's saved.")
+                } else buildJsonObject {
+                    put("loaded", true)
+                    put("name", report.name)
+                    put("rules", report.rules)
+                    put("mode", if (report.replaced) "replace" else "merge")
+                    put("active_rules", report.activeRules)
+                    put("device", report.deviceHint)
+                    put("live", report.live)
+                    if (!report.live) {
+                        put("warning", "NOT SERVING YET — the rules are loaded in the IDE but " +
+                            "capture isn't running, so nothing was pushed to a device and the app " +
+                            "is still getting real responses. Press ▶ in the LogPose window.")
+                    } else if (report.withheld > 0) {
+                        put("warning", withheldText(report.withheld, null))
+                    } else {
+                        put("note", "Pushed to the device. 'Loaded' is not 'live' until the device " +
+                            "acknowledges it — the device field above reports which it is; " +
+                            "list_mocks re-reads it.")
+                    }
+                }
+            )
+        }
+    }
+
+    private fun saveScenario(args: JsonObject, scenarios: Scenarios, answer: (JsonElement) -> Unit) {
+        val name = args.str("name") ?: return answer(errorObj("Missing 'name'"))
+        if (!ScenarioStore.isValidName(name)) return answer(errorObj(nameRule(name)))
+        val from = args.str("from")
+            ?: return answer(errorObj("Missing 'from': 'rules' saves the active mock rules, " +
+                "'session' snapshots the capture into rules."))
+        if (from !in setOf(FROM_RULES, FROM_SESSION)) {
+            return answer(errorObj("from must be '$FROM_RULES' or '$FROM_SESSION'."))
+        }
+        val successOnly = args.bool("success_only") ?: false
+
+        scenarios.save(name, args.str("note"), from == FROM_SESSION, successOnly) { report ->
+            answer(
+                if (!report.saved) errorObj(report.error ?: "Could not save scenario '$name'.")
+                else buildJsonObject {
+                    put("saved", true)
+                    put("name", report.name)
+                    put("rules", report.rules)
+                    report.path?.let { put("path", it) }
+                    report.detail?.let { put("detail", it) }
+                    put("note", "Scenario files hold captured response bodies verbatim — review " +
+                        "before committing one. load_scenario puts them back on the device.")
+                }
+            )
+        }
+    }
+
+    private fun nameRule(name: String): String =
+        "'$name' isn't a usable scenario name. Use lowercase letters, digits, '-' and '_', at " +
+            "most ${ScenarioStore.MAX_NAME} characters — the name is the filename, so nothing " +
+            "that could address another directory is accepted."
 
     // ---- shared shaping -------------------------------------------------------------------
 
@@ -1034,6 +1721,80 @@ object McpTools {
 
     private fun boolProp(description: String) = buildJsonObject {
         put("type", "boolean"); put("description", description)
+    }
+
+    private fun objectProp(description: String) = buildJsonObject {
+        put("type", "object"); put("description", description)
+    }
+
+    private fun arrayProp(description: String) = buildJsonObject {
+        put("type", "array"); put("description", description)
+    }
+
+    // ---- argument parsing ------------------------------------------------------------------
+
+    /**
+     * A rejected argument. Thrown by the parsers below and turned into a plain `{error: …}`
+     * result: an agent can read a message and correct itself, where a silently coerced value
+     * produces a rule that matches something other than what was asked for.
+     */
+    private class BadArgs(message: String) : IllegalArgumentException(message)
+
+    private fun errorObj(message: String): JsonElement = buildJsonObject { put("error", message) }
+
+    /**
+     * A JSON object of string values — a query/header matcher, or a push's data map. Numbers and
+     * booleans are taken by their literal text (a query value is text on the wire anyway); an
+     * object, array or null value is refused rather than stringified into something unmatchable.
+     */
+    private fun JsonObject.stringMap(key: String): Map<String, String>? {
+        val value = this[key] ?: return null
+        if (value is kotlinx.serialization.json.JsonNull) return null
+        val obj = value as? JsonObject
+            ?: throw BadArgs("'$key' must be an object of string values, e.g. {\"debug\":\"1\"}.")
+        return obj.mapValues { (name, element) ->
+            (element as? JsonPrimitive)?.contentOrNull()
+                ?: throw BadArgs(
+                    "'$key.$name' must be a string. Nested objects, arrays and nulls have no " +
+                        "meaning here — send the value you want matched, as text.",
+                )
+        }
+    }
+
+    /** The per-hit response sequence. Every key is checked, so a typo can't vanish into a default. */
+    private fun JsonObject.steps(key: String): List<MockStep> {
+        val value = this[key] ?: return emptyList()
+        if (value is kotlinx.serialization.json.JsonNull) return emptyList()
+        val array = value as? JsonArray ?: throw BadArgs(
+            "'$key' must be an array of step objects, e.g. [{\"status\":500},{\"status\":200}].",
+        )
+        return array.mapIndexed { index, element ->
+            val step = element as? JsonObject
+                ?: throw BadArgs("$key[$index] must be an object with at least a 'status'.")
+            val unknown = step.keys - STEP_KEYS
+            if (unknown.isNotEmpty()) {
+                throw BadArgs(
+                    "$key[$index] has unknown key(s) ${unknown.joinToString()}. A step takes " +
+                        "${STEP_KEYS.joinToString()} — nothing else is applied, so an unknown key " +
+                        "is refused rather than dropped.",
+                )
+            }
+            val status = step.int("status")
+                ?: throw BadArgs("$key[$index] needs a 'status' — a step with no status serves nothing.")
+            if (status !in 100..599) throw BadArgs("$key[$index].status must be an HTTP status (100–599).")
+            val behavior = step.str("behavior") ?: MockRule.BEHAVIOR_NORMAL
+            if (behavior !in BEHAVIORS) {
+                throw BadArgs("$key[$index].behavior must be 'normal', 'timeout' or 'connection_failure'.")
+            }
+            MockStep(
+                status = status,
+                body = step.str("body"),
+                headers = step.stringMap("headers").orEmpty(),
+                contentType = step.str("content_type") ?: "application/json",
+                latencyMillis = (step.int("latency_ms") ?: 0).toLong(),
+                behavior = behavior,
+            )
+        }
     }
 
     private fun JsonObject.str(key: String): String? =

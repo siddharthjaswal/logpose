@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose.ui
 
+import com.intellij.icons.AllIcons
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.requests.SimpleDiffRequest
@@ -79,6 +80,30 @@ class MockRuleDialog(
     }
     private val path = JBTextField(initial.pathPattern)
 
+    // ---- Only when… (extra match constraints, device library 1.7.0+) -----------------------
+    // Collapsed unless the rule already narrows on something: most rules match on path alone,
+    // and an empty box for every possible constraint would bury the two fields that matter.
+    private val matchQuery = JBTextArea(MockRuleForm.formatPairs(initial.matchQuery), 2, 40).apply {
+        font = JBUI.Fonts.create("JetBrains Mono", 12)
+        emptyText.text = "debug=1"
+    }
+    private val matchHeaders = JBTextArea(MockRuleForm.formatPairs(initial.matchHeaders), 2, 40).apply {
+        font = JBUI.Fonts.create("JetBrains Mono", 12)
+        emptyText.text = "X-Env: staging"
+    }
+    private val matchBody = JBTextField(initial.matchBodyContains.orEmpty())
+    private var matchersExpanded = initial.matchQuery.isNotEmpty() ||
+        initial.matchHeaders.isNotEmpty() || !initial.matchBodyContains.isNullOrBlank()
+    private val matchersToggle = JBLabel().apply {
+        foreground = Theme.accent
+        font = JBUI.Fonts.label(11f)
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) { matchersExpanded = !matchersExpanded; updateMatchers() }
+        })
+    }
+    private lateinit var matchersFields: JComponent
+
     // ---- Then -----------------------------------------------------------------------------
     private val modeItems = linkedMapOf(
         MockRule.MODE_REPLACE to "Replace the response",
@@ -139,8 +164,20 @@ class MockRuleDialog(
     private val viewToggle = link("Edit as text") { toggleView() }
     private val diffLink = link("Compare with original") { showDiff() }
 
+    // ---- Then respond… (sequential steps, device library 1.7.0+) ---------------------------
+    // One rule, several responses: hit N serves step N and the last one sticks — "fail, then
+    // succeed" is a retry test you can write in one rule instead of racing two.
+    private val stepDrafts = MockRuleForm.draftsOf(initial).toMutableList()
+    private var stepsEnabled = initial.responses.isNotEmpty()
+    private val stepCards = mutableListOf<StepCard>()
+    private val stepsHost = JPanel(VerticalLayout(JBUI.scale(4))).apply { isOpaque = false }
+    private val stepsToggle = link("") { toggleSteps() }
+    private lateinit var stepsToggleRow: JComponent
+    private lateinit var stepsPanel: JComponent
+
     // rows/sections we show & hide
     private lateinit var behaviorRow: JComponent
+    private lateinit var limitRow: JComponent
     private lateinit var sendSeparator: JComponent
     private lateinit var replaceFields: JComponent
     private lateinit var sendBody: JComponent
@@ -156,23 +193,53 @@ class MockRuleDialog(
 
     override fun createCenterPanel(): JComponent {
         // VerticalLayout stretches every child to the full width, so labels/separators/links
-        // all align left/right cleanly (a plain vertical BoxLayout centres narrow rows).
-        val column = JPanel(VerticalLayout(JBUI.scale(3))).apply {
-            preferredSize = Dimension(JBUI.scale(700), JBUI.scale(640))
-        }
+        // all align left/right cleanly (a plain vertical BoxLayout centres narrow rows) — but
+        // only if the column itself fills the viewport it now scrolls inside, hence Scrollable.
+        val column = object : JPanel(VerticalLayout(JBUI.scale(3))), javax.swing.Scrollable {
+            override fun getPreferredScrollableViewportSize(): Dimension = preferredSize
+            override fun getScrollableUnitIncrement(r: java.awt.Rectangle, o: Int, d: Int) = JBUI.scale(16)
+            override fun getScrollableBlockIncrement(r: java.awt.Rectangle, o: Int, d: Int) = JBUI.scale(120)
+            override fun getScrollableTracksViewportWidth() = true
+            override fun getScrollableTracksViewportHeight() = false
+        }.apply { isOpaque = false }
 
         column.add(TitledSeparator("When a request matches"))
         column.add(row("Method / path", hbox(method, hgap(8), path)))
         column.add(hint("Path may use * as a wildcard, e.g. /app/v4/*/order/*"))
 
+        column.add(JPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(2, 106, 0, 0)
+            add(matchersToggle, BorderLayout.WEST)
+        })
+        matchersFields = JPanel(VerticalLayout(JBUI.scale(2))).apply {
+            isOpaque = false
+            add(row("Query", boxed(matchQuery, 46)))
+            add(hint("One per line: debug=1, or cursor=* for \"present, any value\""))
+            add(row("Headers", boxed(matchHeaders, 46)))
+            add(hint("Name matched case-insensitively; value * means \"present, any value\""))
+            add(row("Body contains", hbox(matchBody, glue())))
+            add(hint("Case-insensitive. A body the device can't buffer never matches — narrowing " +
+                "fails closed, so the call goes to the network rather than being mocked on a guess."))
+        }
+        column.add(matchersFields)
+        updateMatchers()
+
         column.add(TitledSeparator("Then"))
         column.add(row("Mode", hbox(mode, glue())))
-        behaviorRow = row("On match", hbox(behavior, hgap(12), muted("Latency"), hgap(6), latency, small("ms"),
-            hgap(12), muted("Serve limit"), hgap(6), serveLimit, small("0 = always"), glue()))
+        behaviorRow = row("On match", hbox(behavior, hgap(12), muted("Latency"), hgap(6), latency, small("ms"), glue()))
         column.add(behaviorRow)
+        limitRow = row("Serve limit", hbox(serveLimit, small("0 = always"), glue()))
+        column.add(limitRow)
 
         sendSeparator = TitledSeparator("Response")
         column.add(sendSeparator)
+        stepsToggleRow = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(0, 0, 4, 0)
+            add(stepsToggle, BorderLayout.WEST)
+        }
+        column.add(stepsToggleRow)
         replaceFields = JPanel(VerticalLayout(JBUI.scale(2))).apply {
             isOpaque = false
             add(row("Status", hbox(status, hgap(12), muted("Content-Type"), hgap(6), contentType, glue())))
@@ -197,7 +264,32 @@ class MockRuleDialog(
             add(bodyHeader); add(bodyPanel)
         }
         column.add(sendBody)
-        return column
+
+        stepsPanel = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            // No scroll pane of its own: the whole form already scrolls, and a list nested in a
+            // second scroller is the kind of thing that eats a mouse-wheel gesture.
+            add(stepsHost, BorderLayout.CENTER)
+            add(JPanel(BorderLayout()).apply {
+                isOpaque = false
+                border = JBUI.Borders.empty(6, 0, 0, 0)
+                add(link("+  Add step") { addStep() }, BorderLayout.WEST)
+            }, BorderLayout.SOUTH)
+        }
+        column.add(stepsPanel)
+        rebuildSteps()
+        updateStepsToggle()
+
+        // The form grew past a fixed frame once "Only when…" and the step list joined it; scroll
+        // rather than clip, so no field can end up unreachable on a short screen.
+        return JBScrollPane(column).apply {
+            border = JBUI.Borders.empty()
+            isOpaque = false
+            viewport.isOpaque = false
+            preferredSize = Dimension(JBUI.scale(720), JBUI.scale(660))
+            verticalScrollBar.unitIncrement = JBUI.scale(16)
+            horizontalScrollBarPolicy = javax.swing.ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+        }
     }
 
     // ---- disclosure + view switching ------------------------------------------------------
@@ -206,14 +298,106 @@ class MockRuleDialog(
         val patch = modeKey() == MockRule.MODE_PATCH
         val serves = patch || behaviorKey() == MockRule.BEHAVIOR_NORMAL
         if (::behaviorRow.isInitialized) {
-            behaviorRow.isVisible = !patch          // merge always serves the real response
-            sendSeparator.isVisible = serves
-            replaceFields.isVisible = !patch && behaviorKey() == MockRule.BEHAVIOR_NORMAL
-            sendBody.isVisible = serves
+            // Rule-level behavior/latency belong to a single response; a sequence sets them per
+            // step. Serve limit and mode stay rule-level either way.
+            behaviorRow.isVisible = !patch && !stepsEnabled
+            limitRow.isVisible = !patch
+            sendSeparator.isVisible = serves || stepsEnabled
+            stepsToggleRow.isVisible = serves || stepsEnabled
+            replaceFields.isVisible = !patch && !stepsEnabled && behaviorKey() == MockRule.BEHAVIOR_NORMAL
+            sendBody.isVisible = serves && !stepsEnabled
+            stepsPanel.isVisible = stepsEnabled
         }
         diffLink.isVisible = baseBody != null
         if (fieldsActive) seedTree()
     }
+
+    private fun updateMatchers() {
+        val count = MockRuleForm.parsePairs(matchQuery.text).size +
+            MockRuleForm.parsePairs(matchHeaders.text).size +
+            (if (matchBody.text.isBlank()) 0 else 1)
+        matchersToggle.text = (if (matchersExpanded) "▾  " else "▸  ") +
+            "Only when…" + if (count > 0) "  ($count)" else ""
+        if (::matchersFields.isInitialized) {
+            matchersFields.isVisible = matchersExpanded
+            matchersFields.parent?.let { it.revalidate(); it.repaint() }
+        }
+    }
+
+    // ---- sequential steps ------------------------------------------------------------------
+
+    private fun toggleSteps() {
+        if (!stepsEnabled) {
+            // Seed step 1 from what the form currently holds, so turning a captured mock into a
+            // sequence doesn't mean retyping the response that was already there.
+            syncDrafts()
+            if (stepDrafts.isEmpty()) stepDrafts.add(currentAsDraft())
+            else stepDrafts[0] = currentAsDraft()
+            stepsEnabled = true
+            if (stepDrafts.size == 1) stepDrafts.add(MockRuleForm.StepDraft(status = "200"))
+        } else {
+            stepsEnabled = false
+        }
+        rebuildSteps()
+        updateStepsToggle()
+        onModeOrBehaviorChanged()
+    }
+
+    private fun updateStepsToggle() {
+        stepsToggle.text = if (stepsEnabled) "◂  Back to a single response"
+        else "▸  Respond in sequence (a different response per hit)…"
+    }
+
+    private fun addStep() {
+        syncDrafts()
+        stepDrafts.add(stepDrafts.lastOrNull()?.copy(body = "") ?: MockRuleForm.StepDraft())
+        rebuildSteps()
+    }
+
+    private fun removeStep(index: Int) {
+        syncDrafts()
+        if (index in stepDrafts.indices) stepDrafts.removeAt(index)
+        if (stepDrafts.isEmpty()) stepDrafts.add(MockRuleForm.StepDraft())
+        rebuildSteps()
+    }
+
+    private fun moveStep(index: Int, delta: Int) {
+        syncDrafts()
+        val to = index + delta
+        if (index !in stepDrafts.indices || to !in stepDrafts.indices) return
+        val moved = stepDrafts.removeAt(index)
+        stepDrafts.add(to, moved)
+        rebuildSteps()
+    }
+
+    /** Pulls what the user typed back into the drafts before any structural change. */
+    private fun syncDrafts() {
+        if (stepCards.isEmpty()) return
+        val edited = stepCards.map { it.toDraft() }
+        stepDrafts.clear()
+        stepDrafts.addAll(edited)
+    }
+
+    private fun rebuildSteps() {
+        stepsHost.removeAll()
+        stepCards.clear()
+        stepDrafts.forEachIndexed { i, draft ->
+            val card = StepCard(i, draft, last = i == stepDrafts.lastIndex)
+            stepCards.add(card)
+            stepsHost.add(card)
+        }
+        stepsHost.revalidate(); stepsHost.repaint()
+    }
+
+    /** The single-response fields as a step — how step 1 gets pre-filled from the capture. */
+    private fun currentAsDraft() = MockRuleForm.StepDraft(
+        status = status.text,
+        body = currentBody(),
+        headers = MockRuleForm.formatPairs(parseHeaders(headers.text)),
+        contentType = contentType.text,
+        latency = latency.text,
+        behavior = behaviorKey(),
+    )
 
     private fun updateHeaders() {
         val count = parseHeaders(headers.text).size
@@ -279,8 +463,107 @@ class MockRuleDialog(
 
     // ---- result -----------------------------------------------------------------------------
 
+    /**
+     * One response in the sequence. Compact on purpose — a sequence is usually three variations
+     * of one response, so the card shows the fields that differ between hits and keeps the body
+     * a plain mono area rather than a second IDE editor per step.
+     */
+    private inner class StepCard(
+        index: Int,
+        draft: MockRuleForm.StepDraft,
+        last: Boolean,
+    ) : CardPanel(VerticalLayout(JBUI.scale(2))) {
+
+        private val status = JBTextField(draft.status).fixedWidth(70)
+        private val behaviorBox = ComboBox(behaviorItems.values.toTypedArray()).apply {
+            selectedItem = behaviorItems[draft.behavior] ?: behaviorItems.values.first()
+        }
+        private val latency = JBTextField(draft.latency).fixedWidth(80)
+        private val contentType = JBTextField(draft.contentType).fixedWidth(180)
+        private val headers = JBTextField(draft.headers.replace("\n", "; ")).apply {
+            emptyText.text = "X-Header: value; X-Other: value"
+        }
+        private val body = JBTextArea(draft.body, 4, 40).apply {
+            font = JBUI.Fonts.create("JetBrains Mono", 12)
+            lineWrap = false
+        }
+
+        init {
+            alignmentX = Component.LEFT_ALIGNMENT
+            border = JBUI.Borders.empty(8, 10)
+
+            val header = JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(JBLabel("Step ${index + 1}" + if (last) "   (repeats from here on)" else "").apply {
+                    foreground = Theme.textDim
+                    font = JBUI.Fonts.label(11f).asBold()
+                }, BorderLayout.WEST)
+                add(hbox(
+                    iconLabel(AllIcons.Actions.PreviousOccurence, "Move up") { moveStep(index, -1) },
+                    hgap(4),
+                    iconLabel(AllIcons.Actions.NextOccurence, "Move down") { moveStep(index, +1) },
+                    hgap(8),
+                    iconLabel(AllIcons.General.Remove, "Remove step") { removeStep(index) },
+                ), BorderLayout.EAST)
+            }
+            add(header)
+            add(row2("Status", hbox(status, hgap(12), muted("On hit"), hgap(6), behaviorBox,
+                hgap(12), muted("Latency"), hgap(6), latency, small("ms"), glue())))
+            add(row2("Content-Type", hbox(contentType, hgap(12), muted("Headers"), hgap(6), headers)))
+            add(row2("Body", JBScrollPane(body).apply {
+                border = JBUI.Borders.customLine(Theme.borderStrong, 1)
+                preferredSize = Dimension(JBUI.scale(500), JBUI.scale(84))
+            }))
+        }
+
+        override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
+
+        fun toDraft() = MockRuleForm.StepDraft(
+            status = status.text,
+            body = body.text,
+            headers = headers.text,
+            contentType = contentType.text,
+            latency = latency.text,
+            behavior = behaviorItems.entries.firstOrNull { it.value == behaviorBox.selectedItem }?.key
+                ?: MockRule.BEHAVIOR_NORMAL,
+        )
+
+        private fun row2(labelText: String, field: Component): JComponent =
+            object : JPanel(BorderLayout(JBUI.scale(8), 0)) {
+                override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
+            }.apply {
+                isOpaque = false
+                border = JBUI.Borders.empty(2, 0)
+                add(JBLabel(labelText).apply {
+                    foreground = Theme.textMuted
+                    font = JBUI.Fonts.label(11f)
+                    preferredSize = Dimension(JBUI.scale(84), preferredSize.height)
+                }, BorderLayout.WEST)
+                add(field, BorderLayout.CENTER)
+            }
+    }
+
     override fun doValidate(): ValidationInfo? {
         if (path.text.isBlank()) return ValidationInfo("Path pattern is required", path)
+        if (stepsEnabled) {
+            syncDrafts()
+            if (stepDrafts.isEmpty()) {
+                return ValidationInfo("Add at least one step, or go back to a single response", stepsHost)
+            }
+            for ((i, draft) in stepDrafts.withIndex()) {
+                val code = draft.status.trim().toIntOrNull()
+                if (code == null || code !in 100..599) {
+                    return ValidationInfo("Step ${i + 1}: status must be 100–599", stepsHost)
+                }
+                if ((draft.latency.trim().toLongOrNull() ?: -1L) < 0L) {
+                    return ValidationInfo("Step ${i + 1}: latency must be ≥ 0", stepsHost)
+                }
+            }
+            if (serveLimit.text.toIntOrNull()?.let { it < 0 } != false) {
+                return ValidationInfo("Serve limit must be ≥ 0", serveLimit)
+            }
+            return null
+        }
         if (modeKey() == MockRule.MODE_PATCH) {
             val text = currentBody().trim()
             if (text.isEmpty() || text == "{}") return ValidationInfo("Tick at least one field to override", bodyPanel)
@@ -295,6 +578,7 @@ class MockRuleDialog(
 
     fun result(): MockRule {
         val patch = modeKey() == MockRule.MODE_PATCH
+        if (stepsEnabled) syncDrafts()
         return MockRule(
             id = initial.id,
             method = (method.selectedItem as? String)?.trim()?.ifBlank { "*" }?.uppercase() ?: "*",
@@ -308,6 +592,13 @@ class MockRuleDialog(
             serveLimit = serveLimit.text.trim().toIntOrNull() ?: 0,
             enabled = initial.enabled,
             mode = modeKey(),
+            matchQuery = MockRuleForm.parsePairs(matchQuery.text),
+            matchHeaders = MockRuleForm.parsePairs(matchHeaders.text),
+            matchBodyContains = matchBody.text.trim().ifBlank { null },
+            // The single-response fields above stay populated even with a sequence: the device
+            // ignores them while `responses` is non-empty, and keeping them means switching back
+            // to a single response doesn't lose the body that was there.
+            responses = if (stepsEnabled) MockRuleForm.toSteps(stepDrafts) else emptyList(),
         )
     }
 
@@ -361,6 +652,20 @@ class MockRuleDialog(
         foreground = Theme.accent; font = JBUI.Fonts.label(11f)
         cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         addMouseListener(object : MouseAdapter() { override fun mouseClicked(e: MouseEvent) = onClick() })
+    }
+
+    private fun iconLabel(icon: javax.swing.Icon, tip: String, onClick: () -> Unit) =
+        JBLabel(icon).apply {
+            toolTipText = tip
+            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            addMouseListener(object : MouseAdapter() { override fun mouseClicked(e: MouseEvent) = onClick() })
+        }
+
+    /** A short text area in a bordered box — the matcher inputs, which are 1–3 lines each. */
+    private fun boxed(area: JBTextArea, height: Int): JComponent = JBScrollPane(area).apply {
+        border = JBUI.Borders.customLine(Theme.borderStrong, 1)
+        preferredSize = Dimension(JBUI.scale(520), JBUI.scale(height))
+        maximumSize = Dimension(Int.MAX_VALUE, JBUI.scale(height))
     }
 
     private fun JBTextField.fixedWidth(px: Int): JBTextField = apply {

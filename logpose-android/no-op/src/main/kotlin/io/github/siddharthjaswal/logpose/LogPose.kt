@@ -66,4 +66,11 @@ object LogPose {
     fun logFcmMessage(info: FcmMessageInfo, config: LogPoseConfig = LogPoseConfig()) = Unit
 
     fun logFcmToken(token: String, config: LogPoseConfig = LogPoseConfig()) = Unit
+
+    /**
+     * No-op: the handler is dropped and never called. Push injection is a debug-only channel —
+     * the receiver that would deliver one ships in the real artifact alone, so a release build
+     * has nothing that could invoke this even if something tried.
+     */
+    fun onPushInject(handler: (FcmMessageInfo) -> Unit) = Unit
 }

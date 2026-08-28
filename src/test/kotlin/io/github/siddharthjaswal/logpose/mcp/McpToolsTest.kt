@@ -5,6 +5,8 @@ import io.github.siddharthjaswal.logpose.model.ConfigChange
 import io.github.siddharthjaswal.logpose.model.ConfigUpdate
 import io.github.siddharthjaswal.logpose.model.DbQuery
 import io.github.siddharthjaswal.logpose.model.Envelope
+import io.github.siddharthjaswal.logpose.model.FcmMessage
+import io.github.siddharthjaswal.logpose.model.FcmNotification
 import io.github.siddharthjaswal.logpose.model.GenericEvent
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.MockRule
@@ -17,6 +19,9 @@ import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import io.github.siddharthjaswal.logpose.store.EventStore
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonArray
@@ -25,8 +30,10 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.concurrent.CompletableFuture
 
 /**
  * Covers what an agent actually receives from the MCP read tools. The transport is a thin
@@ -437,7 +444,10 @@ class McpToolsTest {
         override fun hits() = mapOf<String, Int>()
         override fun deviceHint() = if (ready) "test-device · synced rev 1" else "waiting for device"
         var ready = true
+        /** What the device announced; the matcher/step gating reads this. */
+        var libVersion: String? = "1.7.0"
         override fun deviceReady() = ready
+        override fun deviceLibVersion() = libVersion
         override fun create(rule: MockRule, baseBody: String?) { rules += rule; lastBaseBody = baseBody }
         override fun setEnabled(id: String, enabled: Boolean) {
             rules.replaceAll { if (it.id == id) it.copy(enabled = enabled) else it }
@@ -624,11 +634,19 @@ class McpToolsTest {
         val names = McpTools.catalogue().map { it.jsonObject["name"]!!.jsonPrimitive.content }
         assertEquals(
             listOf(
-                "list_events", "get_event", "get_trace", "find_failures", "session_summary",
-                "query_hotspots", "worker_history", "config_changes", "analytics_events", "clear_capture",
+                "list_events", "get_event", "get_trace", "await_event", "find_failures",
+                "session_summary", "query_hotspots", "worker_history", "config_changes",
+                "analytics_events", "clear_capture",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
+                "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
             ),
             names,
+        )
+        // The deferred tools must be routed to callAsync by the transport; a sync call to one
+        // would return "unknown tool" to an agent that did nothing wrong.
+        assertEquals(
+            setOf("await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario"),
+            names.filter { McpTools.isAsync(it) }.toSet(),
         )
         McpTools.catalogue().forEach { tool ->
             val schema = tool.jsonObject["inputSchema"]!!.jsonObject
@@ -760,5 +778,669 @@ class McpToolsTest {
         assertTrue(out["traces"]!!.jsonArray.isEmpty())
         // A bare [] reads as "no problems" when it really means the app never set a trace id.
         assertTrue(out["traces_note"]!!.jsonPrimitive.content.contains("opts in"))
+    }
+
+    // ---- deferred tools ----------------------------------------------------------------------
+    //
+    // The async tools are driven through fakes rather than real threads: a test that slept would
+    // be both slow and flaky, and the thing worth pinning is the decision (what completes the
+    // wait, what the answer says), not the scheduler.
+
+    /** Captures the single answer a deferred tool produces, and refuses a second one. */
+    private class Answer {
+        private var value: JsonObject? = null
+        var answers = 0; private set
+        fun accept(element: kotlinx.serialization.json.JsonElement) { answers++; value = element.jsonObject }
+        val answered: Boolean get() = value != null
+        fun get(): JsonObject = value ?: error("the tool has not answered yet")
+    }
+
+    /** Stand-in for EventStore's waiter registry, driven by the test rather than a reader thread. */
+    private class FakeWaits(private val limit: Int = 8) : McpTools.Waits {
+        class Parked(val timeoutMillis: Long, val predicate: (LogEvent) -> Boolean) {
+            val future = CompletableFuture<LogEvent?>()
+        }
+
+        val parked = mutableListOf<Parked>()
+
+        override fun await(timeoutMillis: Long, predicate: (LogEvent) -> Boolean): CompletableFuture<LogEvent?>? {
+            if (parked.size >= limit) return null
+            return Parked(timeoutMillis, predicate).also { parked += it }.future
+        }
+
+        /** What EventStore.add does: complete every waiter this event satisfies. */
+        fun deliver(event: LogEvent) {
+            parked.filter { it.predicate(event) }.forEach { waiter ->
+                parked -= waiter
+                waiter.future.complete(event)
+            }
+        }
+
+        fun expire() = parked.toList().forEach { waiter ->
+            parked -= waiter
+            waiter.future.complete(null)
+        }
+    }
+
+    private class FakePush : McpTools.Push {
+        var reason: String? = null
+        var hint = "com.acme · logpose-android 1.7.0"
+        var sent: io.github.siddharthjaswal.logpose.model.PushInject? = null
+        private var pending: ((McpTools.Push.Ack?) -> Unit)? = null
+
+        override fun deviceHint() = hint
+        override fun notReady() = reason
+        override fun inject(
+            inject: io.github.siddharthjaswal.logpose.model.PushInject,
+            onAck: (McpTools.Push.Ack?) -> Unit,
+        ) {
+            sent = inject; pending = onAck
+        }
+
+        fun ack(delivered: String, error: String? = null) = pending!!(McpTools.Push.Ack(delivered, error))
+        fun neverAnswers() = pending!!(null)
+    }
+
+    private class FakeScenarios : McpTools.Scenarios {
+        val saved = mutableListOf<McpTools.Scenarios.Info>()
+        var loadReport: McpTools.Scenarios.LoadReport? = null
+        var saveReport: McpTools.Scenarios.SaveReport? = null
+        var lastSave: Triple<String, Boolean, Boolean>? = null
+        var lastLoad: Pair<String, Boolean>? = null
+
+        override fun list(onResult: (List<McpTools.Scenarios.Info>) -> Unit) = onResult(saved)
+
+        override fun load(
+            name: String,
+            replace: Boolean,
+            onResult: (McpTools.Scenarios.LoadReport) -> Unit,
+        ) {
+            lastLoad = name to replace
+            onResult(loadReport ?: McpTools.Scenarios.LoadReport(name, found = false))
+        }
+
+        override fun save(
+            name: String,
+            note: String?,
+            fromSession: Boolean,
+            successOnly: Boolean,
+            onResult: (McpTools.Scenarios.SaveReport) -> Unit,
+        ) {
+            lastSave = Triple(name, fromSession, successOnly)
+            onResult(
+                saveReport ?: McpTools.Scenarios.SaveReport(
+                    name, rules = 3, path = ".logpose/scenarios/$name.json",
+                )
+            )
+        }
+    }
+
+    private var clock = 0L
+
+    private fun callAsync(
+        name: String,
+        args: JsonObject = JsonObject(emptyMap()),
+        events: List<LogEvent> = emptyList(),
+        push: McpTools.Push? = null,
+        waits: McpTools.Waits? = null,
+        scenarios: McpTools.Scenarios? = null,
+        capturing: Boolean = true,
+    ): Answer = Answer().also { answer ->
+        McpTools.callAsync(
+            name, args, events, push, waits, scenarios,
+            captureRunning = { capturing }, now = { clock }, onResult = answer::accept,
+        )
+    }
+
+    // ---- await_event ---------------------------------------------------------------------------
+
+    @Test fun `await_event answers with the event that arrives after the call`() {
+        val waits = FakeWaits()
+        clock = 1_000
+        val out = callAsync("await_event", buildJsonObject { put("method", "POST") }, waits = waits)
+        assertFalse(out.answered, "the call must stay open until something arrives")
+
+        // Events that don't match keep the wait open — that's the whole difference from polling.
+        waits.deliver(http("noise", method = "GET", path = "/feed"))
+        assertFalse(out.answered)
+
+        clock = 1_250
+        waits.deliver(http("hit", method = "POST", path = "/orders", code = 201))
+
+        val answer = out.get()
+        assertTrue(answer["matched"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("hit", answer["id"]!!.jsonPrimitive.content)
+        assertEquals(250, answer["waited_ms"]!!.jsonPrimitive.int())
+        assertEquals("POST /orders → 201", answer["event"]!!.jsonObject["summary"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `await_event filters the same way list_events does`() {
+        val waits = FakeWaits()
+        callAsync(
+            "await_event",
+            buildJsonObject { put("kind", "http"); put("status_class", 5); put("contains", "orders"); put("failed_only", true) },
+            waits = waits,
+        )
+        val predicate = waits.parked.single().predicate
+
+        assertFalse(predicate(http("a", path = "/orders", code = 200)), "a 200 is not a 5xx")
+        assertFalse(predicate(http("b", path = "/feed", code = 503)), "the substring must match too")
+        assertFalse(predicate(app("c", "orders")), "kind is honoured")
+        assertTrue(predicate(http("d", path = "/orders", code = 503)))
+    }
+
+    @Test fun `await_event matches on trace id, which is how a push is followed`() {
+        val waits = FakeWaits()
+        val out = callAsync("await_event", buildJsonObject { put("trace_id", "trc-1") }, waits = waits)
+        waits.deliver(http("other", traceId = "trc-2"))
+        assertFalse(out.answered)
+        waits.deliver(http("mine", traceId = "trc-1"))
+        assertEquals("mine", out.get()["id"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `a timeout is a result, not an error`() {
+        // An error would make an agent retry the transport; "nothing happened" is a finding it
+        // can assert on.
+        val waits = FakeWaits()
+        clock = 0
+        val out = callAsync("await_event", buildJsonObject { put("timeout_ms", 2_000) }, waits = waits)
+        clock = 2_000
+        waits.expire()
+
+        val answer = out.get()
+        assertFalse(answer["matched"]!!.jsonPrimitive.content.toBoolean())
+        assertFalse(answer.containsKey("error"))
+        assertEquals(2_000, answer["waited_ms"]!!.jsonPrimitive.int())
+        assertTrue(answer["note"]!!.jsonPrimitive.content.contains("list_events"), "point at where a past event would be")
+    }
+
+    @Test fun `await_event clamps the timeout instead of trusting it`() {
+        val waits = FakeWaits()
+        callAsync("await_event", buildJsonObject { put("timeout_ms", 5) }, waits = waits)
+        callAsync("await_event", buildJsonObject { put("timeout_ms", 9_999_999) }, waits = waits)
+        callAsync("await_event", JsonObject(emptyMap()), waits = waits)
+        assertEquals(listOf(1_000L, 120_000L, 30_000L), waits.parked.map { it.timeoutMillis })
+    }
+
+    @Test fun `await_event says so when the waiter cap is reached`() {
+        val waits = FakeWaits(limit = 1)
+        callAsync("await_event", JsonObject(emptyMap()), waits = waits)
+        val out = callAsync("await_event", JsonObject(emptyMap()), waits = waits)
+        assertTrue(out.get()["error"]!!.jsonPrimitive.content.contains("Too many waits"))
+    }
+
+    @Test fun `await_event returns immediately when capture is stopped`() {
+        // Nothing can arrive while logcat isn't tailed, so waiting 30s would just be a slow way
+        // of saying the capture is dead.
+        val waits = FakeWaits()
+        val out = callAsync("await_event", JsonObject(emptyMap()), waits = waits, capturing = false)
+        assertTrue(out.answered)
+        assertTrue(out.get()["capture_stopped"]!!.jsonPrimitive.content.toBoolean())
+        assertTrue(waits.parked.isEmpty(), "no waiter is parked on a dead capture")
+    }
+
+    @Test fun `await_event rejects a nonsense status class`() {
+        val out = callAsync("await_event", buildJsonObject { put("status_class", 42) }, waits = FakeWaits())
+        assertTrue(out.get().containsKey("error"))
+    }
+
+    @Test fun `deferred tools answer even when their surface is missing`() {
+        // A request must never be left hanging: with no tool window there is no push or scenario
+        // surface, and the agent has to be told that rather than time out.
+        assertTrue(callAsync("await_event").get().containsKey("error"))
+        assertTrue(callAsync("inject_fcm").get().containsKey("error"))
+        assertTrue(callAsync("list_scenarios").get().containsKey("error"))
+        assertTrue(callAsync("load_scenario").get().containsKey("error"))
+        assertTrue(callAsync("save_scenario").get().containsKey("error"))
+    }
+
+    // ---- inject_fcm ----------------------------------------------------------------------------
+
+    private fun fcm(
+        id: String,
+        title: String? = "Order assigned",
+        data: Map<String, String> = mapOf("channel" to "order_assigned", "orderId" to "91"),
+        event: String = "message",
+        at: Long = 1_000,
+    ): LogEvent.Fcm {
+        val msg = FcmMessage(
+            id = id, event = event, from = "/topics/riders", collapseKey = "orders",
+            notification = title?.let { FcmNotification(title = it, body = "Pick up at 7") },
+            data = data,
+        )
+        return LogEvent.Fcm(
+            msg,
+            Envelope(kind = Envelope.KIND_FCM, id = id, at = at, endedAt = at, payload = json.encodeToJsonElement(msg)),
+        )
+    }
+
+    @Test fun `inject_fcm needs a payload or a captured push to replay`() {
+        val push = FakePush()
+        assertTrue(callAsync("inject_fcm", push = push).get().containsKey("error"))
+        assertEquals(null, push.sent, "a rejected call must not reach the device")
+    }
+
+    @Test fun `inject_fcm sends the data map it was given`() {
+        val push = FakePush()
+        clock = 7_000
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject {
+                put("data", buildJsonObject { put("channel", "order_assigned"); put("orderId", "91") })
+                put("notification_title", "Order assigned")
+                put("collapse_key", "orders")
+            },
+            push = push,
+        )
+
+        val message = push.sent!!.message
+        assertEquals(mapOf("channel" to "order_assigned", "orderId" to "91"), message.data)
+        assertEquals("Order assigned", message.notificationTitle)
+        assertEquals("orders", message.collapseKey)
+        assertEquals(7_000, message.sentTimeMillis, "the send stamps 'now', not the caller's guess")
+
+        val answer = out.get()
+        assertTrue(answer["sent"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("pending", answer["delivered"]!!.jsonPrimitive.content, "await defaults to off")
+        // The trace is the handle for await_event — it has to come back, generated or not.
+        assertEquals(push.sent!!.traceId, answer["trace_id"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `inject_fcm replays a captured push field for field`() {
+        val push = FakePush()
+        val captured = fcm("fcm-1")
+        val out = callAsync("inject_fcm", buildJsonObject { put("from_event_id", "fcm-1") }, listOf(captured), push = push)
+
+        val message = push.sent!!.message
+        assertEquals(mapOf("channel" to "order_assigned", "orderId" to "91"), message.data)
+        assertEquals("Order assigned", message.notificationTitle)
+        assertEquals("/topics/riders", message.from)
+        // A replay is a new message: reusing the captured id would defeat the app's own dedup.
+        assertNotEquals("fcm-1", message.messageId)
+        assertTrue(out.get()["sent"]!!.jsonPrimitive.content.toBoolean())
+    }
+
+    @Test fun `a replay can be overridden field by field`() {
+        val push = FakePush()
+        callAsync(
+            "inject_fcm",
+            buildJsonObject { put("from_event_id", "fcm-1"); put("notification_title", "Order cancelled") },
+            listOf(fcm("fcm-1")),
+            push = push,
+        )
+        val message = push.sent!!.message
+        assertEquals("Order cancelled", message.notificationTitle)
+        assertEquals("Pick up at 7", message.notificationBody, "what wasn't stated still comes from the capture")
+    }
+
+    @Test fun `inject_fcm refuses an unknown id and a token refresh`() {
+        val push = FakePush()
+        assertTrue(
+            callAsync("inject_fcm", buildJsonObject { put("from_event_id", "nope") }, push = push)
+                .get().containsKey("error"),
+        )
+        val token = fcm("tok-1", title = null, data = emptyMap(), event = "token")
+        assertTrue(
+            callAsync("inject_fcm", buildJsonObject { put("from_event_id", "tok-1") }, listOf(token), push = push)
+                .get().containsKey("error"),
+            "a token refresh isn't a message — there's nothing to deliver",
+        )
+        assertEquals(null, push.sent)
+    }
+
+    @Test fun `inject_fcm warns loudly when the device can't take a push`() {
+        val push = FakePush().apply { reason = "the device's library is too old." }
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("data", buildJsonObject { put("k", "v") }) },
+            push = push,
+        )
+        val answer = out.get()
+        assertFalse(answer["sent"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("none", answer["delivered"]!!.jsonPrimitive.content)
+        assertTrue(answer["warning"]!!.jsonPrimitive.content.contains("NOT DELIVERED"))
+        assertEquals(null, push.sent, "nothing is sent to a device that can't take it")
+    }
+
+    @Test fun `inject_fcm with await reports which tier consumed the push`() {
+        val push = FakePush()
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("data", buildJsonObject { put("k", "v") }); put("await", true) },
+            push = push,
+        )
+        assertFalse(out.answered, "await holds the call until the device answers")
+
+        push.ack("handler")
+        val answer = out.get()
+        assertEquals("handler", answer["delivered"]!!.jsonPrimitive.content)
+        assertTrue(answer["note"]!!.jsonPrimitive.content.contains("await_event"))
+    }
+
+    @Test fun `an injected push nothing consumed comes back with the handler guidance`() {
+        val push = FakePush()
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("data", buildJsonObject { put("k", "v") }); put("await", true) },
+            push = push,
+        )
+        push.ack("none", error = "no service in manifest")
+        val answer = out.get()
+        assertEquals("none", answer["delivered"]!!.jsonPrimitive.content)
+        assertTrue(answer["warning"]!!.jsonPrimitive.content.contains("onPushInject"))
+        assertEquals("no service in manifest", answer["error"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `an unacknowledged push says so rather than claiming delivery`() {
+        val push = FakePush()
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("data", buildJsonObject { put("k", "v") }); put("await", true) },
+            push = push,
+        )
+        push.neverAnswers()
+        val answer = out.get()
+        assertEquals("unknown", answer["delivered"]!!.jsonPrimitive.content)
+        assertTrue(answer["warning"]!!.jsonPrimitive.content.contains("did not report"))
+    }
+
+    @Test fun `a late ack cannot write a second answer`() {
+        // The transport turns one call into one HTTP response; a push that acks after we've
+        // already answered must not produce another.
+        val push = FakePush()
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("data", buildJsonObject { put("k", "v") }) },
+            push = push,
+        )
+        assertEquals(1, out.answers)
+        push.ack("handler")
+        assertEquals(1, out.answers)
+    }
+
+    @Test fun `inject_fcm refuses a data map that isn't strings`() {
+        val push = FakePush()
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("data", buildJsonObject { put("nested", buildJsonObject { put("a", "b") }) }) },
+            push = push,
+        )
+        assertTrue(out.get().containsKey("error"))
+        assertEquals(null, push.sent)
+    }
+
+    // ---- scenarios -----------------------------------------------------------------------------
+
+    @Test fun `list_scenarios reports names, counts and where they live`() {
+        val scenarios = FakeScenarios().apply {
+            saved += McpTools.Scenarios.Info("offline-demo", 12, 1_700_000_000_000, "full happy path")
+        }
+        val out = callAsync("list_scenarios", scenarios = scenarios).get()
+        assertEquals(1, out["count"]!!.jsonPrimitive.int())
+        assertEquals(".logpose/scenarios", out["dir"]!!.jsonPrimitive.content)
+        val entry = out["scenarios"]!!.jsonArray.single().jsonObject
+        assertEquals("offline-demo", entry["name"]!!.jsonPrimitive.content)
+        assertEquals(12, entry["rules"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `an empty scenario list explains how to make one`() {
+        val out = callAsync("list_scenarios", scenarios = FakeScenarios()).get()
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("save_scenario"))
+    }
+
+    @Test fun `load_scenario reports the device state it ended in`() {
+        val scenarios = FakeScenarios().apply {
+            loadReport = McpTools.Scenarios.LoadReport(
+                "offline-demo", found = true, rules = 12, replaced = true, activeRules = 12,
+                deviceHint = "com.acme · synced rev 4", live = true,
+            )
+        }
+        val out = callAsync(
+            "load_scenario",
+            buildJsonObject { put("name", "offline-demo"); put("replace", true) },
+            scenarios = scenarios,
+        ).get()
+
+        assertEquals("offline-demo" to true, scenarios.lastLoad)
+        assertEquals("replace", out["mode"]!!.jsonPrimitive.content)
+        assertEquals(12, out["rules"]!!.jsonPrimitive.int())
+        assertEquals("com.acme · synced rev 4", out["device"]!!.jsonPrimitive.content)
+        // "Loaded" is not "live" — the note has to keep the two apart.
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("acknowledges"))
+    }
+
+    @Test fun `loading with capture off warns that nothing is serving`() {
+        val scenarios = FakeScenarios().apply {
+            loadReport = McpTools.Scenarios.LoadReport("demo", found = true, rules = 3, live = false)
+        }
+        val out = callAsync("load_scenario", buildJsonObject { put("name", "demo") }, scenarios = scenarios).get()
+        assertTrue(out["warning"]!!.jsonPrimitive.content.contains("NOT SERVING YET"))
+        assertEquals("merge", out["mode"]!!.jsonPrimitive.content, "merge is the safe default")
+    }
+
+    @Test fun `loading rules an old device can't take warns rather than pretending`() {
+        val scenarios = FakeScenarios().apply {
+            loadReport = McpTools.Scenarios.LoadReport("demo", found = true, rules = 3, live = true, withheld = 2)
+        }
+        val out = callAsync("load_scenario", buildJsonObject { put("name", "demo") }, scenarios = scenarios).get()
+        assertTrue(out["warning"]!!.jsonPrimitive.content.contains("WITHHELD"))
+    }
+
+    @Test fun `load_scenario errors on an unknown or unusable name`() {
+        val scenarios = FakeScenarios()
+        assertTrue(callAsync("load_scenario", scenarios = scenarios).get().containsKey("error"))
+        assertTrue(
+            callAsync("load_scenario", buildJsonObject { put("name", "../etc/passwd") }, scenarios = scenarios)
+                .get().containsKey("error"),
+            "a name that could address another directory never reaches the store",
+        )
+        assertEquals(null, scenarios.lastLoad)
+        assertTrue(
+            callAsync("load_scenario", buildJsonObject { put("name", "ghost") }, scenarios = scenarios)
+                .get().containsKey("error"),
+        )
+    }
+
+    @Test fun `save_scenario passes the source through and reports the file`() {
+        val scenarios = FakeScenarios()
+        val out = callAsync(
+            "save_scenario",
+            buildJsonObject { put("name", "offline-demo"); put("from", "session"); put("success_only", true) },
+            scenarios = scenarios,
+        ).get()
+
+        assertEquals(Triple("offline-demo", true, true), scenarios.lastSave)
+        assertTrue(out["saved"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals(".logpose/scenarios/offline-demo.json", out["path"]!!.jsonPrimitive.content)
+        // Scenario files hold captured bodies; whoever is about to commit one must be told.
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("captured response bodies"))
+    }
+
+    @Test fun `save_scenario refuses a bad name or an unknown source`() {
+        val scenarios = FakeScenarios()
+        assertTrue(
+            callAsync("save_scenario", buildJsonObject { put("name", "Offline Demo"); put("from", "rules") }, scenarios = scenarios)
+                .get().containsKey("error"),
+        )
+        assertTrue(
+            callAsync("save_scenario", buildJsonObject { put("name", "demo"); put("from", "everything") }, scenarios = scenarios)
+                .get().containsKey("error"),
+        )
+        assertTrue(
+            callAsync("save_scenario", buildJsonObject { put("name", "demo") }, scenarios = scenarios)
+                .get().containsKey("error"),
+            "'from' is stated explicitly: saving the wrong thing silently is worse than an error",
+        )
+        assertEquals(null, scenarios.lastSave)
+    }
+
+    @Test fun `save_scenario surfaces what a snapshot refused to guess at`() {
+        val scenarios = FakeScenarios().apply {
+            saveReport = McpTools.Scenarios.SaveReport(
+                "demo", rules = 5, path = ".logpose/scenarios/demo.json",
+                detail = "5 endpoints · skipped 3 in-flight/bodyless",
+            )
+        }
+        val out = callAsync(
+            "save_scenario",
+            buildJsonObject { put("name", "demo"); put("from", "session") },
+            scenarios = scenarios,
+        ).get()
+        assertTrue(out["detail"]!!.jsonPrimitive.content.contains("skipped 3"))
+    }
+
+    @Test fun `a failed save is an error, not a cheerful success`() {
+        val scenarios = FakeScenarios().apply {
+            saveReport = McpTools.Scenarios.SaveReport("demo", error = "There are no mock rules to save.")
+        }
+        val out = callAsync(
+            "save_scenario",
+            buildJsonObject { put("name", "demo"); put("from", "rules") },
+            scenarios = scenarios,
+        ).get()
+        assertTrue(out["error"]!!.jsonPrimitive.content.contains("no mock rules"))
+    }
+
+    // ---- richer mock matching + sequential responses ---------------------------------------------
+
+    @Test fun `create_mock carries the narrowing matchers onto the rule`() {
+        val mocks = FakeMocks()
+        val out = callWrite(
+            "create_mock",
+            buildJsonObject {
+                put("path_pattern", "/orders")
+                put("match_query", buildJsonObject { put("debug", "1"); put("page", "*") })
+                put("match_headers", buildJsonObject { put("X-Tenant", "acme") })
+                put("match_body_contains", "\"force\":true")
+            },
+            mocks,
+        )
+
+        val rule = mocks.rules.single()
+        assertEquals(mapOf("debug" to "1", "page" to "*"), rule.matchQuery)
+        assertEquals(mapOf("X-Tenant" to "acme"), rule.matchHeaders)
+        assertEquals("\"force\":true", rule.matchBodyContains)
+        // The constraints must show up in what's reported back, or a rule that reads "mock
+        // /orders" looks like it fires on every call to it.
+        val created = out["created"]!!.jsonObject
+        assertEquals("1", created["match_query"]!!.jsonObject["debug"]!!.jsonPrimitive.content)
+        assertEquals("1.7.0", created["needs_device_lib"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `create_mock builds a response sequence for retry testing`() {
+        val mocks = FakeMocks()
+        val out = callWrite(
+            "create_mock",
+            buildJsonObject {
+                put("path_pattern", "/orders")
+                put("responses", buildJsonArray {
+                    add(buildJsonObject { put("status", 500) })
+                    add(buildJsonObject { put("status", 200); put("body", """{"ok":true}"""); put("latency_ms", 50) })
+                })
+            },
+            mocks,
+        )
+
+        val rule = mocks.rules.single()
+        assertEquals(listOf(500, 200), rule.responses.map { it.status })
+        assertEquals("""{"ok":true}""", rule.responses[1].body)
+        assertEquals(50, rule.responses[1].latencyMillis)
+        val created = out["created"]!!.jsonObject
+        assertEquals(2, created["steps"]!!.jsonArray.size)
+        assertFalse(created.containsKey("status"), "a sequence overrides the rule-level response")
+    }
+
+    @Test fun `a rule-level response alongside a sequence is called out, not silently dropped`() {
+        val mocks = FakeMocks()
+        val out = callWrite(
+            "create_mock",
+            buildJsonObject {
+                put("path_pattern", "/orders")
+                put("status", 418)
+                put("responses", buildJsonArray { add(buildJsonObject { put("status", 200) }) })
+            },
+            mocks,
+        )
+        assertTrue(out["ignored"]!!.jsonPrimitive.content.contains("not served"))
+    }
+
+    @Test fun `a malformed step is rejected loudly, never coerced`() {
+        val mocks = FakeMocks()
+        fun step(build: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit) = buildJsonObject {
+            put("path_pattern", "/x")
+            put("responses", buildJsonArray { add(buildJsonObject(build)) })
+        }
+
+        // An unknown key would silently do nothing — exactly the kind of quiet mismatch a mock
+        // must never have.
+        assertTrue(callWrite("create_mock", step { put("status", 200); put("statuz", 500) }, mocks).containsKey("error"))
+        assertTrue(callWrite("create_mock", step { put("body", "{}") }, mocks).containsKey("error"), "a step needs a status")
+        assertTrue(callWrite("create_mock", step { put("status", 200); put("behavior", "explode") }, mocks).containsKey("error"))
+        assertTrue(callWrite("create_mock", step { put("status", 9) }, mocks).containsKey("error"))
+        assertTrue(
+            callWrite("create_mock", buildJsonObject { put("path_pattern", "/x"); put("responses", "500") }, mocks)
+                .containsKey("error"),
+        )
+        assertTrue(mocks.rules.isEmpty(), "no half-specified rule survives a rejected call")
+    }
+
+    @Test fun `a matcher that isn't an object of strings is rejected`() {
+        val mocks = FakeMocks()
+        assertTrue(
+            callWrite("create_mock", buildJsonObject { put("path_pattern", "/x"); put("match_query", "debug=1") }, mocks)
+                .containsKey("error"),
+        )
+        assertTrue(
+            callWrite(
+                "create_mock",
+                buildJsonObject {
+                    put("path_pattern", "/x")
+                    put("match_headers", buildJsonObject {
+                        put("X-Ids", buildJsonArray { add(JsonPrimitive("a")) })
+                    })
+                },
+                mocks,
+            ).containsKey("error"),
+        )
+        assertTrue(mocks.rules.isEmpty())
+    }
+
+    @Test fun `a rule an old device can't serve is reported as withheld, not active`() {
+        // Excluding beats sending: an old library ignores the constraint and would mock every
+        // call to the path — a mock matching more broadly than it reads.
+        val mocks = FakeMocks().apply { libVersion = "1.6.0" }
+        val out = callWrite(
+            "create_mock",
+            buildJsonObject {
+                put("path_pattern", "/orders")
+                put("match_query", buildJsonObject { put("debug", "1") })
+            },
+            mocks,
+        )
+        assertFalse(out["active"]!!.jsonPrimitive.content.toBoolean())
+        assertTrue(out["warning"]!!.jsonPrimitive.content.contains("WITHHELD"))
+        assertTrue(out["warning"]!!.jsonPrimitive.content.contains("1.6.0"), "name the version the device reports")
+    }
+
+    @Test fun `the same rule is active on a device new enough for it`() {
+        val mocks = FakeMocks().apply { libVersion = "1.7.0" }
+        val out = callWrite(
+            "create_mock",
+            buildJsonObject {
+                put("path_pattern", "/orders")
+                put("responses", buildJsonArray { add(buildJsonObject { put("status", 500) }) })
+            },
+            mocks,
+        )
+        assertTrue(out["active"]!!.jsonPrimitive.content.toBoolean())
+        assertFalse(out.containsKey("warning"))
+    }
+
+    @Test fun `a plain rule is unaffected by the version gate`() {
+        // The fields that predate gating must never start being withheld, whatever the device says.
+        val mocks = FakeMocks().apply { libVersion = null }
+        val out = callWrite("create_mock", buildJsonObject { put("path_pattern", "/orders") }, mocks)
+        assertTrue(out["active"]!!.jsonPrimitive.content.toBoolean())
+        assertFalse(mocks.rules.single().let { it.responses.isNotEmpty() || it.matchQuery.isNotEmpty() })
     }
 }

@@ -5,6 +5,7 @@ import io.github.siddharthjaswal.logpose.wire.Envelope
 import io.github.siddharthjaswal.logpose.mock.MockRegistry
 import io.github.siddharthjaswal.logpose.wire.MockRule
 import io.github.siddharthjaswal.logpose.wire.MockRuleSet
+import io.github.siddharthjaswal.logpose.wire.MockStep
 import io.github.siddharthjaswal.logpose.wire.Transaction
 import okhttp3.Call
 import okhttp3.Connection
@@ -17,8 +18,12 @@ import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
+import okio.BufferedSink
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -185,6 +190,187 @@ class MockServeTest {
         assertTrue(proceeded)
         assertEquals(200, response.code)
         assertFalse("a real network response is not mocked", emitted.single().mocked)
+    }
+
+    // ---- match constraints + response sequences ----------------------------------------------
+
+    private fun apply(vararg rules: MockRule) =
+        MockRegistry.apply(MockRuleSet(revision = 1, rules = rules.toList()))
+
+    private fun jsonBody(text: String): RequestBody =
+        text.toRequestBody("application/json".toMediaTypeOrNull())
+
+    /** A body OkHttp may only read once — writing it here would corrupt the real request. */
+    private fun oneShotBody(text: String): RequestBody = object : RequestBody() {
+        override fun contentType() = "application/json".toMediaTypeOrNull()
+        override fun isOneShot(): Boolean = true
+        override fun writeTo(sink: BufferedSink) { sink.writeUtf8(text) }
+    }
+
+    private fun post(body: RequestBody, url: String = "https://ex.com/app/v1/x"): Request =
+        Request.Builder().url(url).post(body).build()
+
+    @Test fun `a sequence serves each step in turn and then sticks on the last`() {
+        // The retry test in one rule: fail, fail, then succeed for good.
+        apply(
+            MockRule(
+                id = "seq", method = "*", pathPattern = "/app/v1/x",
+                responses = listOf(
+                    MockStep(status = 500),
+                    MockStep(status = 503, body = """{"retry":true}"""),
+                    MockStep(status = 200, body = """{"ok":true}"""),
+                ),
+            )
+        )
+        val codes = (1..4).map {
+            interceptor.intercept(FakeChain(request()) { fail("network must not be hit"); error("") }).code
+        }
+        assertEquals(listOf(500, 503, 200, 200), codes)
+        assertEquals("""{"retry":true}""", emitted[1].response?.body?.text)
+        assertTrue("every step is still a mocked serve", emitted.all { it.mocked })
+    }
+
+    @Test fun `a step's own latency and behavior apply, not the rule's`() {
+        apply(
+            MockRule(
+                id = "seq", method = "*", pathPattern = "/app/v1/x",
+                status = 200, body = """{"ignored":true}""",
+                responses = listOf(
+                    MockStep(status = 599, behavior = MockRule.BEHAVIOR_TIMEOUT),
+                    MockStep(status = 201, body = """{"created":true}""", contentType = "application/json"),
+                ),
+            )
+        )
+
+        try {
+            interceptor.intercept(FakeChain(request()) { fail("network must not be hit"); error("") })
+            fail("expected the first step to time out")
+        } catch (_: SocketTimeoutException) {
+            // expected
+        }
+        val second = interceptor.intercept(FakeChain(request()) { fail("network must not be hit"); error("") })
+
+        assertEquals(201, second.code)
+        assertEquals("""{"created":true}""", second.body?.string())
+        assertEquals("the rule-level response is ignored once a sequence exists", 2, emitted.size)
+    }
+
+    @Test fun `patch mode applies each step's body as that call's patch`() {
+        apply(
+            MockRule(
+                id = "p", method = "GET", pathPattern = "/app/v1/x", mode = MockRule.MODE_PATCH,
+                responses = listOf(
+                    MockStep(body = """{"status":5}"""),
+                    MockStep(body = """{"status":9,"note":"second"}"""),
+                ),
+            )
+        )
+        val real = { ->
+            Response.Builder()
+                .request(request()).protocol(okhttp3.Protocol.HTTP_1_1).code(200).message("OK")
+                .body("""{"status":1,"name":"Vikram"}""".toResponseBody("application/json".toMediaTypeOrNull()))
+                .build()
+        }
+
+        val first = Json.parseToJsonElement(
+            interceptor.intercept(FakeChain(request()) { real() }).body!!.string()
+        ).jsonObject
+        val second = Json.parseToJsonElement(
+            interceptor.intercept(FakeChain(request()) { real() }).body!!.string()
+        ).jsonObject
+
+        assertEquals(5, first["status"]!!.jsonPrimitive.int)
+        assertNull("the first patch adds nothing it wasn't given", first["note"])
+        assertEquals(9, second["status"]!!.jsonPrimitive.int)
+        assertEquals("second", second["note"]!!.jsonPrimitive.content)
+        assertEquals("the backend's own fields survive both patches", "Vikram", second["name"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `a body matcher serves only the request that carries the text`() {
+        apply(
+            MockRule(
+                id = "b", method = "POST", pathPattern = "/app/v1/x",
+                status = 409, body = """{"error":"expired"}""",
+                matchBodyContains = "\"reason\":\"EXPIRED\"",
+            )
+        )
+
+        val matched = interceptor.intercept(
+            FakeChain(post(jsonBody("""{"reason":"EXPIRED"}"""))) { fail("network must not be hit"); error("") }
+        )
+        assertEquals(409, matched.code)
+
+        var proceeded = false
+        val other = post(jsonBody("""{"reason":"CANCELLED"}"""))
+        interceptor.intercept(FakeChain(other) { proceeded = true; ok(other) })
+        assertTrue("a request the rule doesn't describe must reach the network", proceeded)
+    }
+
+    @Test fun `a streaming body is never read twice - body matching fails closed`() {
+        // Reading a one-shot body to match it would corrupt the request OkHttp is about to send.
+        // So it isn't read, the rule can't match, and the call goes to the network as written.
+        apply(
+            MockRule(
+                id = "b", method = "POST", pathPattern = "/app/v1/x",
+                matchBodyContains = "reason",
+            )
+        )
+        val streaming = post(oneShotBody("""{"reason":"EXPIRED"}"""))
+
+        var sent: Request? = null
+        interceptor.intercept(FakeChain(streaming) { sent = it; ok(streaming) })
+
+        assertEquals("the request must reach the network untouched", streaming, sent)
+        assertFalse("nothing may be served off an unread body", emitted.single().mocked)
+        // And the body OkHttp will write is still there to write.
+        assertEquals(
+            """{"reason":"EXPIRED"}""",
+            Buffer().also { streaming.body!!.writeTo(it) }.readUtf8(),
+        )
+    }
+
+    @Test fun `query and header matchers narrow a rule to one call`() {
+        apply(
+            MockRule(
+                id = "q", method = "GET", pathPattern = "/app/v1/x", status = 402,
+                matchQuery = mapOf("city_id" to "79096"),
+                matchHeaders = mapOf("X-App-Version" to MockRule.MATCH_ANY),
+            )
+        )
+
+        val matching = Request.Builder()
+            .url("https://ex.com/app/v1/x?city_id=79096&debug=1")
+            .header("x-app-version", "9.1.0")
+            .build()
+        assertEquals(402, interceptor.intercept(FakeChain(matching) { fail("network"); error("") }).code)
+
+        val wrongCity = Request.Builder()
+            .url("https://ex.com/app/v1/x?city_id=12")
+            .header("X-App-Version", "9.1.0")
+            .build()
+        var proceeded = false
+        interceptor.intercept(FakeChain(wrongCity) { proceeded = true; ok(wrongCity) })
+        assertTrue(proceeded)
+
+        val noHeader = Request.Builder().url("https://ex.com/app/v1/x?city_id=79096").build()
+        var proceededAgain = false
+        interceptor.intercept(FakeChain(noHeader) { proceededAgain = true; ok(noHeader) })
+        assertTrue(proceededAgain)
+    }
+
+    @Test fun `a header matcher sees the real value, not the redacted one`() {
+        // Emission redacts Authorization; matching must not, or no rule could ever key on a token.
+        apply(
+            MockRule(
+                id = "h", method = "GET", pathPattern = "/app/v1/x", status = 401,
+                matchHeaders = mapOf("Authorization" to "Bearer test-token"),
+            )
+        )
+        val authed = Request.Builder()
+            .url("https://ex.com/app/v1/x").header("Authorization", "Bearer test-token").build()
+
+        assertEquals(401, interceptor.intercept(FakeChain(authed) { fail("network"); error("") }).code)
+        assertEquals("…and the emitted row still hides it", "██", emitted.single().request.headers["Authorization"])
     }
 
     // ---- trace resolution -------------------------------------------------------------------

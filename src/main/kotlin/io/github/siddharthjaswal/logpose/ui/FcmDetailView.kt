@@ -6,6 +6,7 @@ import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -31,6 +32,9 @@ import javax.swing.JPanel
  */
 class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
 
+    /** Opens the trace waterfall for the flow this push belongs to. */
+    var onOpenTrace: (String) -> Unit = {}
+
     private val kindPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
     private val eventLabel = JBLabel().apply {
         foreground = Theme.text; font = JBUI.Fonts.label(13f).asBold()
@@ -44,6 +48,13 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
     private val chips = JPanel().apply {
         isOpaque = false
         layout = BoxLayout(this, BoxLayout.X_AXIS)
+    }
+    /** Says out loud that LogPose delivered this push — the detail half of the row's INJ pill. */
+    private val injectedBanner = JBLabel("⚡  Injected by LogPose — delivered into the app on your " +
+        "behalf, not by Firebase").apply {
+        foreground = Theme.typeColor(Envelope.KIND_FCM)
+        font = JBUI.Fonts.label(11.5f).asBold()
+        isVisible = false
     }
     private val overview = CardPanel(null).apply {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
@@ -61,7 +72,9 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
         border = JBUI.Borders.empty(8)
 
         overview.add(row(hbox(kindPill, Box.createHorizontalStrut(JBUI.scale(8)), eventLabel), fill = false))
-        overview.add(vGap(8))
+        overview.add(vGap(6))
+        overview.add(row(injectedBanner, fill = false))
+        overview.add(vGap(6))
         overview.add(row(summary, fill = true))
         overview.add(vGap(8))
         overview.add(row(chips, fill = false))
@@ -80,12 +93,18 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
         add(outer, BorderLayout.CENTER)
     }
 
-    fun show(msg: FcmMessage?) {
+    /**
+     * Shows [msg]. [envelope] is the transport it arrived in — the only place the trace, parent
+     * and (for an injected push, which has no device receive-time of its own) the timestamp live,
+     * so an FCM row gets the same at/trace/parent/id chips a structured row has.
+     */
+    fun show(msg: FcmMessage?, envelope: Envelope? = null) {
         current = msg
         if (msg == null) {
             kindPill.set("—", Theme.textDim, Theme.bg2)
             eventLabel.text = ""
             summary.text = "Select an event"
+            injectedBanner.isVisible = false
             chips.removeAll(); chips.revalidate(); chips.repaint()
             payload.setElement(null); payload.setStatus(null)
             return
@@ -95,11 +114,13 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
         kindPill.set(kind, color, Theme.tint(color, 30))
         eventLabel.text = if (msg.event == "token") "Token refresh" else "Push message"
         summary.text = summaryOf(msg)
+        injectedBanner.isVisible = msg.injected
 
         chips.removeAll()
+        val receivedAt = msg.receivedAtMillis.takeIf { it > 0 } ?: envelope?.at ?: 0
         val items = buildList {
             fcmChannel(msg)?.let { add(StatChip("channel", ellipsize(it), tip = it)) }
-            if (msg.receivedAtMillis > 0) add(StatChip("received", timeFmt.format(Date(msg.receivedAtMillis))))
+            if (receivedAt > 0) add(StatChip("at", timeFmt.format(Date(receivedAt))))
             if (msg.sentTimeMillis != null && msg.sentTimeMillis > 0)
                 add(StatChip("sent", timeFmt.format(Date(msg.sentTimeMillis))))
             msg.from?.takeIf { it.isNotBlank() }?.let { add(StatChip("from", ellipsize(it), tip = it)) }
@@ -107,6 +128,14 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
             msg.ttlSeconds?.let { add(StatChip("ttl", "${it}s")) }
             msg.collapseKey?.takeIf { it.isNotBlank() }?.let { add(StatChip("collapse", ellipsize(it), tip = it)) }
             if (msg.data.isNotEmpty()) add(StatChip("data", "${msg.data.size}"))
+            // The trace chip is also the way into the flow this push started.
+            envelope?.traceId?.takeIf { it.isNotBlank() }?.let { trace ->
+                add(
+                    StatChip("trace", ellipsize(trace))
+                        .clickable("$trace — open the waterfall for this flow") { onOpenTrace(trace) },
+                )
+            }
+            envelope?.parentId?.takeIf { it.isNotBlank() }?.let { add(StatChip("parent", ellipsize(it), tip = it)) }
             val idShown = msg.messageId?.takeIf { it.isNotBlank() } ?: msg.id
             add(StatChip("id", ellipsize(idShown), tip = idShown))
         }

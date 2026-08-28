@@ -127,6 +127,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     private val fcmLabel = JLabel("", SwingConstants.LEFT).fixed(JBUI.scale(46), JBUI.scale(20)) // empty method slot
     private val fcmTag = TagLabel().fixed(JBUI.scale(46), JBUI.scale(20))
     private val fcmText = JLabel()
+    private val injTag = TagLabel()
     private val fcmCount = JLabel("", SwingConstants.RIGHT)
     private val fcmTime = JLabel("", SwingConstants.RIGHT)
 
@@ -134,6 +135,8 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         border = JBUI.Borders.empty(0, 14)
 
         fcmTag.font = JBUI.Fonts.label(10f).asBold()
+        injTag.font = JBUI.Fonts.label(10f).asBold()
+        injTag.border = JBUI.Borders.empty(2, 7)
 
         val badges = JPanel().apply {
             isOpaque = false
@@ -157,8 +160,16 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
             add(fcmTime.fixed(JBUI.scale(56), JBUI.scale(20)))
         }
 
+        // Same geometry as the HTTP row: the summary fills the centre and the INJ pill tucks in
+        // at its right end, so it reads as a property of the row rather than a new column.
+        val center = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(fcmText, BorderLayout.CENTER)
+            add(injTag, BorderLayout.EAST)
+        }
+
         add(badges, BorderLayout.WEST)
-        add(fcmText, BorderLayout.CENTER)
+        add(center, BorderLayout.CENTER)
         add(meta, BorderLayout.EAST)
     }
 
@@ -211,7 +222,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         cellHasFocus: Boolean,
     ): Component = when (value) {
         is LogEvent.Http -> httpRow(value.tx, index, isSelected)
-        is LogEvent.Fcm -> fcmRow(value.msg, index, isSelected)
+        is LogEvent.Fcm -> fcmRow(value, index, isSelected)
         // Everything else — db, worker, config, and app-defined kinds — shares one row, driven
         // by KindPresenter. Their differences are presentational, so they don't warrant
         // separate layouts; the column geometry stays identical to HTTP and FCM.
@@ -347,7 +358,8 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         return row
     }
 
-    private fun fcmRow(msg: FcmMessage, index: Int, isSelected: Boolean): Component {
+    private fun fcmRow(event: LogEvent.Fcm, index: Int, isSelected: Boolean): Component {
+        val msg = event.msg
         fcmRow.selected = isSelected
         fcmRow.hovered = index == hoveredIndex && !isSelected
         fcmRow.rowHeight = 34
@@ -363,11 +375,25 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         fcmText.text = fcmSummary(msg)
         fcmText.foreground = Theme.text
 
+        // A push LogPose itself delivered is marked, always — the same trust rule as the purple
+        // MOCK pill, in the FCM hue: the timeline never passes an injected push off as a real one.
+        if (msg.injected) {
+            val c = Theme.typeColor(Envelope.KIND_FCM)
+            injTag.isVisible = true
+            injTag.set("INJ", c, Theme.tint(c, 30))
+        } else {
+            injTag.isVisible = false
+            injTag.set("", Theme.text, null)
+        }
+
         // "size" column: number of data keys (data messages carry the payload of interest).
         fcmCount.text = msg.data.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "key" else "keys"}" } ?: ""
         fcmCount.foreground = Theme.textMuted
 
-        fcmTime.text = msg.receivedAtMillis.takeIf { it > 0 }?.let { timeFmt.format(Date(it)) } ?: ""
+        // An injected push has no device receive-time of its own, so fall back to the envelope's
+        // clock rather than leaving the column blank.
+        val at = msg.receivedAtMillis.takeIf { it > 0 } ?: event.timestampMillis
+        fcmTime.text = at.takeIf { it > 0 }?.let { timeFmt.format(Date(it)) } ?: ""
         fcmTime.foreground = Theme.textMuted
 
         return fcmRow
