@@ -77,6 +77,9 @@ every flow used to be the one thing that couldn't be reproduced. See
   same skip-mocked rule the UI applies.
 - **`create_mock` extended** with `match_query`, `match_headers`, `match_body_contains` and
   `responses`. Unknown keys and bad enums are rejected loudly rather than coerced.
+- **`contains` now searches FCM `data` keys and values** (MCP and the filter bar both) — a
+  data-only push carries its meaning in the payload (`"channel": "order-assigned"`), and the
+  first live agent run missed one because only title/body/from were searched.
 - `scripts/agent-flow-check.sh` walks the whole loop (create_mock → inject_fcm → await_event →
   assert) with curl, as a readable reference for wiring an agent or a pipeline up by hand.
 

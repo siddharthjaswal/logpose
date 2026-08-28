@@ -1668,7 +1668,12 @@ object McpTools {
 
     private fun LogEvent.haystack(): String = when (this) {
         is LogEvent.Http -> tx.request.url
-        is LogEvent.Fcm -> listOfNotNull(msg.notification?.title, msg.notification?.body, msg.from).joinToString(" ")
+        // Data-message pushes often carry their meaning only in the data map ("channel":
+        // "order-assigned"), so the payload is part of the haystack — keys and values both.
+        is LogEvent.Fcm -> (
+            listOfNotNull(msg.notification?.title, msg.notification?.body, msg.from) +
+                msg.data.flatMap { listOf(it.key, it.value) }
+            ).joinToString(" ")
         // Searching the SQL itself matters here — "contains: orders" should find the query that
         // touches that table even when the row shows only the table name.
         is LogEvent.Db -> listOfNotNull(query.sql, query.database, query.table).joinToString(" ")

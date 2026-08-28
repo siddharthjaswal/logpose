@@ -147,6 +147,23 @@ class McpToolsTest {
         )
     }
 
+    @Test fun `contains searches FCM data keys and values, not just the notification`() {
+        val events = listOf(
+            fcm("push1", title = null, data = mapOf("channel" to "order-assigned", "orderId" to "91")),
+            fcm("push2", title = "Promo", data = mapOf("channel" to "marketing")),
+        )
+        assertEquals(
+            listOf("push1"),
+            call("list_events", events, buildJsonObject { put("contains", "order-assigned") }).ids(),
+            "a data-only push is findable by its payload",
+        )
+        assertEquals(
+            listOf("push1"),
+            call("list_events", events, buildJsonObject { put("contains", "orderId") }).ids(),
+            "data keys are searchable too",
+        )
+    }
+
     @Test fun `failures cover both error responses and transport errors`() {
         val events = listOf(
             http("ok", code = 200),

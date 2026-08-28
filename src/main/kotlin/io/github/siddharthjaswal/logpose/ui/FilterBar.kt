@@ -92,7 +92,7 @@ data class FilterState(
             val haystack = listOfNotNull(
                 m.notification?.title, m.notification?.body, m.from, m.messageId,
                 m.collapseKey, m.token,
-            )
+            ) + m.data.flatMap { listOf(it.key, it.value) }
             if (haystack.none { it.contains(urlQuery, ignoreCase = true) }) return false
         }
         return true
