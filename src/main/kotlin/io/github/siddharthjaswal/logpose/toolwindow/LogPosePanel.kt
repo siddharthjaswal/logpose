@@ -321,8 +321,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             if (tx.isPending()) store.elapsedMillis(tx.id) else null
         }
         // The running worker's count-up. Same clock as the pending-HTTP timer, so the two read the
-        // same way; it measures the envelope's open span, which for a worker includes queue time
-        // (the detail's own `timing` line says so).
+        // same way; it measures the envelope's open span, which for a worker is queue + run. The
+        // renderer subtracts the queue the device reported (RowContent.TimeCell.LiveCountUp's
+        // offset), leaving the run — and where the device reported none, the whole span stands and
+        // the detail's `timing` line says what it includes.
         renderer.eventElapsedProvider = { id -> store.elapsedMillis(id).takeIf { it > 0 } }
         // Cache-only, by contract: this is called for every painted row.
         renderer.groupingProvider = { event -> correlation.hasCachedKeyValue(event) }

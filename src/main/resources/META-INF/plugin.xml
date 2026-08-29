@@ -121,6 +121,12 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Worker rows tell waiting apart from running</b> (needs
+                <code>logpose-android</code> 1.7.2). The fact column shows <i>queued 6.2s</i> and the
+                time column is now the run duration rather than queue + run. The library remembers
+                the enqueue and run-start instants itself, so upgrading the dependency is the whole
+                integration — and when it never observed a queue phase (attached mid-flight, process
+                restarted, row replayed from WorkManager) it shows nothing rather than guessing.</li>
             <li><b>Each kind's row says the useful thing.</b> A wall of repeated polling collapses
                 to one line with an <b>×N</b> pill, the median duration and an
                 <i>occurrence ‹ n/N ›</i> stepper in the detail (it breaks on any non-2xx — a failed

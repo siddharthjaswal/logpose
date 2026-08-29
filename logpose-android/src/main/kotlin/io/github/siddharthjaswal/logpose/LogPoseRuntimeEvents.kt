@@ -64,8 +64,12 @@ data class DbQueryInfo(
  * }
  * ```
  *
- * Note that timings derived this way include queue time — `WorkInfo` reports state, not
- * execution duration.
+ * `WorkInfo` reports state, not execution duration, so the row's span is queue *plus* run. From
+ * library 1.7.2 LogPose times the transitions it observes and puts the split on the wire itself
+ * ([io.github.siddharthjaswal.logpose.wire.WorkerEvent.enqueuedAtMillis] /
+ * `runStartedAtMillis`) — no extra field here, and nothing to change at this call site. Work that
+ * was already queued or running when the observer attached has no observed transition, so it
+ * reports no split rather than a guessed one.
  */
 data class WorkerEventInfo(
     val worker: String,

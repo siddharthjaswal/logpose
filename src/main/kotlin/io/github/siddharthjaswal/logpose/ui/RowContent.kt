@@ -44,8 +44,13 @@ object RowContent {
         /** A finished span. */
         data class Duration(val millis: Long) : TimeCell
 
-        /** Still open: the painter counts up from the store's first-seen clock, in `accent`. */
-        data object LiveCountUp : TimeCell
+        /**
+         * Still open: the painter counts up from the store's first-seen clock, in `accent`, less
+         * [offsetMillis] — the part of that age the device reported as queue wait, so a running
+         * worker's cell counts its *run* rather than its whole life. Zero when the device did not
+         * say, which is the pre-1.7.2 behaviour exactly.
+         */
+        data class LiveCountUp(val offsetMillis: Long = 0) : TimeCell
 
         /** Nothing to measure — show when it happened. */
         data class Timestamp(val atMillis: Long) : TimeCell
@@ -119,29 +124,71 @@ object RowContent {
     }?.trim()
 
     /**
-     * §6 asks for `queued 6.2s` here. **That number is not on the wire**: the envelope's `at` is
-     * the library's first sighting of the `workId`, not WorkManager's enqueue time, and the instant
-     * the request went `running` is overwritten when the terminal state lands on the same envelope
-     * id. Approximating it from arrival times would be wrong for every worker enqueued before the
-     * observer attached, for every replayed row, and whenever the observer coalesced two states —
-     * so the cell stays blank instead. A blank cell is honest; `queued 0s` is not.
+     * How long the current attempt waited before it started running, or null when the device did
+     * not report both ends of that wait.
+     *
+     * **Null is an answer, not a gap to fill.** The two instants are stamped by the library only
+     * for transitions it actually observed, so a request that was already queued when capture
+     * attached — or one emitted by a library older than 1.7.2 — reports nothing here, and every
+     * caller must degrade to what it printed before rather than approximate from arrival times.
+     * A backwards device clock (an NTP correction between the two reads) is treated the same way:
+     * unknown, never a negative duration.
      */
-    fun workerFact(work: WorkerEvent): String =
-        if (work.replayedAtAttach) "replayed" else ""
+    fun workerQueueMillis(work: WorkerEvent): Long? {
+        val enqueued = work.enqueuedAtMillis ?: return null
+        val started = work.runStartedAtMillis ?: return null
+        return (started - enqueued).takeIf { it >= 0 }
+    }
 
     /**
-     * Terminal rows show their span, which — for the same reason [workerFact] is blank — is queue
-     * *plus* run, not run alone. The detail pane already says so in its `timing` line.
+     * The current attempt's **run** duration — from the observed run start to the closed span —
+     * as opposed to [LogEvent.durationMillis], which is the whole row and so is queue + run.
+     * Null while the run is open or whenever the start was never observed.
+     */
+    fun workerRunMillis(event: LogEvent.Worker): Long? {
+        val started = event.work.runStartedAtMillis ?: return null
+        val ended = event.envelope.endedAt ?: return null
+        return (ended - started).takeIf { it > 0 }
+    }
+
+    /**
+     * §6's `queued 6.2s`, from the queue wait the device measured for this attempt.
+     *
+     * Gated on the data alone — never on a library version. Three cases stay blank on purpose:
+     * a row still *in* the queue (the wait has not ended, and a number here would read as a
+     * finished one), a row whose transitions were never observed, and anything from a library
+     * that predates the fields. A blank cell is honest; `queued 0s` is not.
+     */
+    fun workerFact(work: WorkerEvent): String = when {
+        work.replayedAtAttach -> "replayed"
+        work.state.lowercase() in QUEUE_PHASE -> ""
+        else -> workerQueueMillis(work)?.let { "queued ${shortDuration(it)}" }.orEmpty()
+    }
+
+    /**
+     * The run, once the device reports where it began: a terminal row shows `endedAt - runStart`
+     * and a running one counts up from the run start, so neither number carries the queue any more.
+     * Without that instant every branch falls back to exactly what it returned before — the whole
+     * span for a terminal row, an un-offset count-up for a running one.
      */
     fun workerTime(event: LogEvent.Worker): TimeCell {
-        val terminal = event.work.state.lowercase() in WorkerEvent.TERMINAL
-        val duration = event.durationMillis
+        val state = event.work.state.lowercase()
+        val terminal = state in WorkerEvent.TERMINAL
+        val duration = workerRunMillis(event) ?: event.durationMillis
         return when {
             terminal && duration != null -> TimeCell.Duration(duration)
-            event.work.state.lowercase() == WorkerEvent.STATE_RUNNING -> TimeCell.LiveCountUp
+            state == WorkerEvent.STATE_RUNNING -> TimeCell.LiveCountUp(
+                // The painter's age is host-clock; this offset is a device-clock *interval*. Both
+                // tick at the same rate, so subtracting is sound — but a device clock adjusted
+                // mid-run can outrun the host age, hence the painter's floor at zero.
+                event.work.runStartedAtMillis?.minus(event.timestampMillis)?.coerceAtLeast(0) ?: 0,
+            )
             else -> TimeCell.Timestamp(event.timestampMillis)
         }
     }
+
+    /** States in which the request is waiting rather than running, so its wait is still open. */
+    private val QUEUE_PHASE = setOf(WorkerEvent.STATE_ENQUEUED, WorkerEvent.STATE_BLOCKED)
 
     // ---- db -------------------------------------------------------------------------------------
 
@@ -266,6 +313,27 @@ object RowContent {
         // Index into the *filtered* badges: an app event whose first badge echoes its kind used to
         // have its real fact silently shifted out of this cell.
         else -> badges.getOrNull(1)?.text.orEmpty()
+    }
+
+    // ---- formatting ------------------------------------------------------------------------------
+
+    /**
+     * The one duration format the timeline speaks: `40ms` · `6.2s` · `4m 0s` · `3h 0m`.
+     *
+     * It lives here rather than in the painter because two cells of the *same row* now print
+     * durations — the fact cell's queue wait and the time cell's run — and a row that says
+     * `queued 6.20s` beside `6.2s` reads as two different measurements. One decimal is §6's own
+     * sample. The hours arm exists because a periodic worker's queue wait is exactly where hours
+     * turn up, and `180m 0s` is not a readable answer.
+     *
+     * (`WaterfallPresentation.humanMillis` stays the waterfall's own formatter: it never sits
+     * beside a row cell, and its two decimals suit an axis.)
+     */
+    fun shortDuration(millis: Long): String = when {
+        millis < 1_000 -> "${millis}ms"
+        millis < 60_000 -> "%.1fs".format(millis / 1000.0)
+        millis < 3_600_000 -> "${millis / 60_000}m ${(millis % 60_000) / 1000}s"
+        else -> "${millis / 3_600_000}h ${(millis % 3_600_000) / 60_000}m"
     }
 
     /** One-line preview; the untruncated statement is always in the detail section. */

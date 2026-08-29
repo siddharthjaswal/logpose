@@ -370,8 +370,25 @@ class TraceWaterfallPanel(
             else -> "<br/>took ${WaterfallPresentation.humanMillis(lane.durationMillis)}"
         }
         return "<html><b>${escape(KindPresenter.rowLabel(lane.event))}</b><br/>" +
-            "${KindPresenter.kindLabel(lane.event)}  ·  $offset$length" +
+            "${KindPresenter.kindLabel(lane.event)}  ·  $offset$length${workerSplit(lane)}" +
             "<br/><i>click to open this row</i></html>"
+    }
+
+    /**
+     * A worker lane's queue/run split, said in words rather than drawn.
+     *
+     * **The bar deliberately keeps spanning queue + run.** A lane's job is to place the event on
+     * the trace's shared wall clock, and a worker that held eight seconds of it did hold them —
+     * shrinking the bar to the run would move its left edge away from the row's own start time and
+     * stop the lanes adding up against their axis. So the split is stated here, where it costs no
+     * geometry, no `Lane` field and no second mark shape.
+     */
+    private fun workerSplit(lane: WaterfallLayout.Lane): String {
+        val event = lane.event as? LogEvent.Worker ?: return ""
+        val queued = RowContent.workerQueueMillis(event.work) ?: return ""
+        val ran = RowContent.workerRunMillis(event) ?: return ""
+        return "<br/>queued ${WaterfallPresentation.humanMillis(queued)} · " +
+            "ran ${WaterfallPresentation.humanMillis(ran)}"
     }
 
     // ---- glyphs ---------------------------------------------------------------------------------

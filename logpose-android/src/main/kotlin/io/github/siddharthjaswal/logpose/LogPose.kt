@@ -254,26 +254,71 @@ object LogPose {
      * Emitted under the request's own [WorkerEventInfo.workId], so enqueued → running →
      * succeeded collapse into **one row that updates in place** instead of three. The span opens
      * when the request is first seen and closes on a terminal state.
+     *
+     * Because that one row is overwritten by each new state, the instants the UI needs — when the
+     * request started waiting, when it started running — would be gone by the time the terminal
+     * state lands. So LogPose remembers them itself (see [WorkerSpan]) and stamps them onto
+     * **every** emission for the workId as [WorkerEvent.enqueuedAtMillis] /
+     * [WorkerEvent.runStartedAtMillis]. That is derived from transitions LogPose actually
+     * observed; anything it did not see stays null rather than being approximated. The app-facing
+     * [WorkerEventInfo] is unchanged — this arrives by upgrading the dependency, with no code
+     * change at the call site.
      */
     fun logWorker(info: WorkerEventInfo, config: LogPoseConfig = LogPoseConfig()) {
         if (!config.enabled || !config.workersEnabled) return
         val id = info.workId ?: newId()
         val now = System.currentTimeMillis()
-        val terminal = info.state.lowercase() in WorkerEvent.TERMINAL
+        val state = info.state.lowercase()
+        val terminal = state in WorkerEvent.TERMINAL
 
         // First sighting starts the span; a terminal state closes it and forgets the request so
-        // a long session can't leak entries.
+        // a long session can't leak entries. The whole read-modify-write is one critical section:
+        // this map is process-wide and reached from whatever threads the app observes work on.
         var replayedAtAttach = false
-        val startedAt = synchronized(workerStarts) {
-            val firstSighting = id !in workerStarts
-            val started = workerStarts.getOrPut(id) { now }
-            if (terminal) workerStarts.remove(id)
+        var enqueuedAt: Long? = null
+        var runStartedAt: Long? = null
+        val startedAt = synchronized(workerSpans) {
+            // The observer's first delivery replays WorkManager's persisted store, so a request
+            // first seen inside that window has been in its state for an unknown time — possibly
+            // hours. Timing it from now would report a wait LogPose never measured, so first
+            // sightings in the burst record no instants at all; later transitions of the same
+            // request are observed live and stamp normally.
+            val attachedAt = workerObservationStartedAt ?: now.also { workerObservationStartedAt = it }
+            val duringAttachBurst = now - attachedAt <= ATTACH_WINDOW_MILLIS
+
+            val existing = workerSpans[id]
+            val firstSighting = existing == null
+            val span = existing ?: WorkerSpan(now).also { workerSpans[id] = it }
+
+            if (!firstSighting || !duringAttachBurst) {
+                val queueing = state == WorkerEvent.STATE_ENQUEUED || state == WorkerEvent.STATE_BLOCKED
+                val wasQueueing = span.lastState == WorkerEvent.STATE_ENQUEUED ||
+                    span.lastState == WorkerEvent.STATE_BLOCKED
+                when {
+                    // Entering the queue phase — the original enqueue, or a retry's backoff, which
+                    // resets both so the row always describes the attempt it is reporting.
+                    queueing && !wasQueueing -> {
+                        span.enqueuedAt = now
+                        span.runStartedAt = null
+                    }
+                    // Only a *transition* into running starts the run: the recommended WorkManager
+                    // integration re-delivers every WorkInfo on every change, so the same state
+                    // arrives repeatedly and must be inert.
+                    state == WorkerEvent.STATE_RUNNING && span.lastState != WorkerEvent.STATE_RUNNING ->
+                        span.runStartedAt = now
+                }
+            }
+            span.lastState = state
+            enqueuedAt = span.enqueuedAt
+            runStartedAt = span.runStartedAt
+
+            if (terminal) workerSpans.remove(id)
             // A workId we've never seen that's already terminal ran before we attached: WorkManager
             // replays its persisted store to a fresh observer. Live work passes through
             // enqueued/running first, so we'd have seen it. (A worker that finishes between two
             // emissions is the rare false positive — acceptable versus counting replays as runs.)
             replayedAtAttach = firstSighting && terminal
-            started
+            span.startedAt
         }
 
         emit(
@@ -285,7 +330,7 @@ object LogPose {
                 payload = json.encodeToJsonElement(
                     WorkerEvent(
                         worker = info.worker,
-                        state = info.state.lowercase(),
+                        state = state,
                         workId = info.workId,
                         uniqueName = info.uniqueName,
                         runAttempt = info.runAttempt,
@@ -293,6 +338,8 @@ object LogPose {
                         inputData = info.inputData,
                         outputData = info.outputData,
                         error = info.error,
+                        enqueuedAtMillis = enqueuedAt,
+                        runStartedAtMillis = runStartedAt,
                         replayedAtAttach = replayedAtAttach,
                     )
                 ),
@@ -457,8 +504,59 @@ object LogPose {
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
 
-    /** workId → when the request was first seen, so a worker row spans its whole life. */
-    private val workerStarts = mutableMapOf<String, Long>()
+    /**
+     * What LogPose remembers about one in-flight work request: when it was first seen (so the
+     * row spans its whole life), the last state it reported (so a re-delivery of the same state
+     * is not mistaken for a transition), and the instants of the transitions that matter.
+     *
+     * Only ever read and written under `synchronized(workerSpans)`.
+     */
+    private class WorkerSpan(val startedAt: Long) {
+        var lastState: String? = null
+        var enqueuedAt: Long? = null
+        var runStartedAt: Long? = null
+    }
+
+    /**
+     * workId → [WorkerSpan]. Entries normally leave on the terminal state, but plenty never reach
+     * one — periodic work cycles enqueued → running → enqueued forever, and an observer can be
+     * removed, filtered by state, or simply outlived by the request — so the map is also bounded
+     * by insertion pressure. Access-ordered, so the eviction victim is the least recently *touched*
+     * request and an actively-updating periodic worker survives.
+     *
+     * An evicted request that later arrives terminal looks like a first sighting and would be
+     * flagged [WorkerEvent.replayedAtAttach] — the same rare false positive already documented on
+     * that flag, and it takes [MAX_TRACKED_WORKERS] distinct live requests to reach.
+     */
+    private val workerSpans = object : LinkedHashMap<String, WorkerSpan>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, WorkerSpan>): Boolean =
+            size > MAX_TRACKED_WORKERS
+    }
+
+    private const val MAX_TRACKED_WORKERS = 256
+
+    /**
+     * When this process first heard about background work — i.e. when the app's observer attached
+     * and WorkManager replayed its persisted store at it. Requests first seen inside
+     * [ATTACH_WINDOW_MILLIS] of it have an unknown history, so no instants are recorded for them.
+     */
+    private var workerObservationStartedAt: Long? = null
+
+    /** How long after the first [logWorker] call a first sighting still counts as replayed state
+     *  rather than an observed transition. One observer delivery, generously. */
+    private const val ATTACH_WINDOW_MILLIS = 1_000L
+
+    /** Test hook: how many work requests are being tracked (see [MAX_TRACKED_WORKERS]). */
+    internal fun trackedWorkerCount(): Int = synchronized(workerSpans) { workerSpans.size }
+
+    /**
+     * Test hook: forget every tracked request and pretend the observer attached at
+     * [attachedAtMillis] — null to start a fresh attach window on the next [logWorker] call.
+     */
+    internal fun resetWorkerTracking(attachedAtMillis: Long? = null) = synchronized(workerSpans) {
+        workerSpans.clear()
+        workerObservationStartedAt = attachedAtMillis
+    }
 
     /** Last config snapshot seen, so an activation can be reported as a diff. */
     private val configSnapshot = mutableMapOf<String, String>()

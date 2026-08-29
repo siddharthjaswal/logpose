@@ -6,6 +6,46 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-08-29
+
+Plugin **1.9.1**, library **v1.7.2**. A worker row can finally say how long it *waited* as opposed
+to how long it *ran*.
+
+1.9.0 shipped the worker row with a blank fact column and an approximate time column, because the
+numbers weren't on the wire: `logWorker` reuses `workId` as the envelope id so a worker is one row
+that mutates in place, and each state's payload overwrote the last — by the time the terminal state
+arrived, the enqueue and run-start instants were gone.
+
+### Added (library — v1.7.2)
+- **`enqueuedAtMillis` and `runStartedAtMillis` on the worker payload.** The library already watches
+  every state transition, so it now remembers those two instants per `workId` and stamps them onto
+  every later emission for that id. **No app-facing API change**: `WorkerEventInfo` is untouched and
+  the no-op needs nothing, so upgrading the dependency is the whole integration.
+- Absolute instants rather than a precomputed duration, for three reasons: the spec needs *two*
+  derived values (queue wait and run duration) and one number can't give both; a `running` row can
+  now count up **run** time instead of time-since-first-sighting; and an agent can line a worker's
+  execution up against the HTTP and db rows in that window, which a bare duration can't express.
+- **Null means "not observed", never a guess.** Attach mid-flight, restart the process, or replay a
+  row from WorkManager's store and the fields stay null — the UI shows nothing rather than a
+  plausible-looking `queued 4h`.
+- The transition bookkeeping now tracks the last observed **state**, not just a first sighting. The
+  recommended `getWorkInfosLiveData` integration re-delivers every request on every emission, so
+  "first time I see RUNNING" had to mean a real transition — otherwise an unrelated LiveData tick
+  would reset the run start and collapse run duration toward zero. It is also properly bounded now;
+  previously it only evicted on a terminal state, so periodic and never-finishing work leaked.
+
+### Changed (plugin)
+- Worker rows show **`queued 6.2s`** in the fact column, and the time column is **run duration**
+  rather than queue + run. Both gate on the data being present, never on a version string, so an
+  older library degrades to exactly 1.9.0's behaviour.
+- The detail pane's `timing: includes queue time` note — true in 1.9.0, wrong now — is replaced by
+  the real split, and `worker_history` over MCP reports the queue and run phases separately, so an
+  agent asking "why was this slow" can tell waiting from running.
+
+### Note
+Plugin 1.9.0 was already submitted to the JetBrains Marketplace when this landed, so this ships as
+1.9.1 rather than changing what 1.9.0 means.
+
 ## [1.9.0] - 2026-08-29
 
 Plugin **1.9.0**, library **v1.7.1**. Group a flow by the id a human actually knows —

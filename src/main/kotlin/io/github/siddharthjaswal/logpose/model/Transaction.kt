@@ -81,8 +81,31 @@ data class WorkerEvent(
     val inputData: Map<String, String> = emptyMap(),
     val outputData: Map<String, String> = emptyMap(),
     val error: String? = null,
+    /**
+     * Device epoch millis the library **observed** this request enter its current queue phase —
+     * the enqueue before attempt 1, the backoff before a retry. Same clock as [Envelope.at], and
+     * re-stamped onto every later emission for this `workId`, which is what makes it survive the
+     * in-place row update that would otherwise overwrite it.
+     *
+     * Null means the transition was never observed (capture attached while the request was
+     * already queued, the process restarted, the row was replayed) — and null must be rendered as
+     * *nothing*, never approximated from arrival times. With [runStartedAtMillis] it gives the
+     * queue wait; a library older than 1.7.2 never sends either, so both stay null there.
+     */
+    val enqueuedAtMillis: Long? = null,
+    /**
+     * Device epoch millis the current attempt was **observed** to start running. Null until it
+     * runs, and null when the start was never observed — again, never to be guessed at.
+     *
+     * With the envelope's `endedAt` this gives the *run* duration, as opposed to the whole span
+     * (which is queue + run). Both instants always describe the **current attempt**: a retry
+     * re-enters the queue, resetting [enqueuedAtMillis] to the backoff and clearing this — so
+     * report them alongside [runAttempt].
+     */
+    val runStartedAtMillis: Long? = null,
     /** True when replayed from WorkManager's persisted store on observer-attach rather than
-     *  observed running this session — the UI marks it and it's kept out of run counts. */
+     *  observed running this session — the UI marks it and it's kept out of run counts. Such a
+     *  row carries neither instant above, by construction: no transition was observed for it. */
     val replayedAtAttach: Boolean = false,
 ) {
     companion object {

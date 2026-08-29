@@ -10,6 +10,8 @@ import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -19,9 +21,12 @@ import org.junit.jupiter.api.Test
 /**
  * The per-kind row rules from §6, pinned away from Swing.
  *
- * Two of these assertions are really honesty tests rather than layout tests: a worker's fact cell
- * must stay **blank** rather than print a queue wait the wire cannot support, and an analytics
- * event's wire subtitle must survive unchanged, because MCP and search read it.
+ * Several of these assertions are really honesty tests rather than layout tests: a worker's fact
+ * cell must print a queue wait **only** when the device measured one and stay blank otherwise, and
+ * an analytics event's wire subtitle must survive unchanged, because MCP and search read it.
+ *
+ * The worker fixture defaults both timing instants to null on purpose — that is a pre-1.7.2
+ * library's payload, and every cell must render for it exactly as it did before the fields existed.
  */
 class RowContentTest {
 
@@ -35,10 +40,13 @@ class RowContentTest {
         replayed: Boolean = false,
         at: Long = 1_000,
         endedAt: Long? = null,
+        enqueuedAt: Long? = null,
+        runStartedAt: Long? = null,
     ): LogEvent.Worker {
         val work = WorkerEvent(
             worker = worker, state = state, workId = "w-1", runAttempt = runAttempt,
             tags = tags, replayedAtAttach = replayed,
+            enqueuedAtMillis = enqueuedAt, runStartedAtMillis = runStartedAt,
         )
         return LogEvent.Worker(
             work,
@@ -130,30 +138,148 @@ class RowContentTest {
         assertNull(RowContent.workerTag(WorkerEvent("SyncWorker", "running")))
     }
 
-    @Test fun `the worker fact cell never fabricates a queue wait`() {
-        // §6 asks for `queued 6.2s`; the wire does not carry the enqueued-to-running instant, so
-        // the honest answer is nothing at all.
-        assertEquals("", RowContent.workerFact(worker("running").work))
-        assertEquals("", RowContent.workerFact(worker("succeeded").work))
-        assertEquals("replayed", RowContent.workerFact(worker("succeeded", replayed = true).work))
+    @Test fun `the queue wait is read off the wire or not reported at all`() {
+        val both = worker("running", enqueuedAt = 1_000, runStartedAt = 7_200).work
+        assertEquals(6_200, RowContent.workerQueueMillis(both))
+        // Either instant missing means the transition was never observed — not that it took zero.
+        assertNull(RowContent.workerQueueMillis(worker("running", enqueuedAt = 1_000).work))
+        assertNull(RowContent.workerQueueMillis(worker("running", runStartedAt = 7_200).work))
+        assertNull(RowContent.workerQueueMillis(worker("running").work))
+        // A device clock corrected between the two reads is unknown, never a negative duration.
+        assertNull(RowContent.workerQueueMillis(worker("running", enqueuedAt = 7_200, runStartedAt = 1_000).work))
+        assertEquals(0, RowContent.workerQueueMillis(worker("running", enqueuedAt = 500, runStartedAt = 500).work))
     }
 
-    @Test fun `the worker time cell counts up while running and reports a span when terminal`() {
-        assertEquals(RowContent.TimeCell.LiveCountUp, RowContent.workerTime(worker("running")))
+    @Test fun `the worker fact cell prints the measured queue wait and nothing else`() {
+        // §6's own sample, now that the device reports both ends of the wait.
+        assertEquals(
+            "queued 6.2s",
+            RowContent.workerFact(worker("running", enqueuedAt = 1_000, runStartedAt = 7_200).work),
+        )
+        assertEquals(
+            "queued 6.2s",
+            RowContent.workerFact(worker("succeeded", enqueuedAt = 1_000, runStartedAt = 7_200).work),
+        )
+        // A row still *in* the queue has an open wait; a finished-looking number would be a lie.
+        assertEquals(
+            "",
+            RowContent.workerFact(worker("enqueued", enqueuedAt = 1_000, runStartedAt = 7_200).work),
+        )
+        assertEquals(
+            "",
+            RowContent.workerFact(worker("blocked", enqueuedAt = 1_000, runStartedAt = 7_200).work),
+        )
+        // Pre-1.7.2 payload: exactly the old blank cell, gated on the data and never on a version.
+        assertEquals("", RowContent.workerFact(worker("running").work))
+        assertEquals("", RowContent.workerFact(worker("succeeded").work))
+        // Attached mid-run: the start is known but the wait was never seen, so it stays unsaid.
+        assertEquals("", RowContent.workerFact(worker("succeeded", runStartedAt = 7_200).work))
+        // Replayed wins over any timing — such a row carries none anyway.
+        assertEquals("replayed", RowContent.workerFact(worker("succeeded", replayed = true).work))
+        assertEquals(
+            "replayed",
+            RowContent.workerFact(
+                worker("succeeded", replayed = true, enqueuedAt = 1_000, runStartedAt = 7_200).work
+            ),
+        )
+    }
+
+    @Test fun `the worker time cell reports the run, not the queue plus the run`() {
+        // §6 asked for run duration: 1_000 → 7_200 queued, 7_200 → 7_640 run. The cell shows 440.
+        assertEquals(
+            RowContent.TimeCell.Duration(440),
+            RowContent.workerTime(
+                worker("succeeded", at = 1_000, endedAt = 7_640, enqueuedAt = 1_000, runStartedAt = 7_200)
+            ),
+        )
+        // Same fixture without the instants — the old queue+run span, byte for byte. This pairing
+        // is the regression guard for the compat gate.
+        assertEquals(
+            RowContent.TimeCell.Duration(6_640),
+            RowContent.workerTime(worker("succeeded", at = 1_000, endedAt = 7_640)),
+        )
+        // A run that closed on the same millisecond it started is not a measurement of zero — the
+        // whole-span fallback answers instead of a `0ms` that would read as an instant worker.
         assertEquals(
             RowContent.TimeCell.Duration(430),
-            RowContent.workerTime(worker("succeeded", at = 1_000, endedAt = 1_430)),
+            RowContent.workerTime(
+                worker("succeeded", at = 1_000, endedAt = 1_430, enqueuedAt = 1_000, runStartedAt = 1_430)
+            ),
         )
         assertEquals(
             RowContent.TimeCell.Timestamp(1_000),
-            RowContent.workerTime(worker("enqueued", at = 1_000)),
+            RowContent.workerTime(worker("enqueued", at = 1_000, enqueuedAt = 1_000)),
         )
         // A terminal state with no closed span still has to say something honest.
         assertEquals(
             RowContent.TimeCell.Timestamp(1_000),
             RowContent.workerTime(worker("cancelled", at = 1_000)),
         )
+        // Cancelled before it ever ran: no run start, so the fallback span is all there is.
+        assertEquals(
+            RowContent.TimeCell.Duration(400),
+            RowContent.workerTime(worker("cancelled", at = 1_000, endedAt = 1_400, enqueuedAt = 1_000)),
+        )
     }
+
+    @Test fun `a running worker counts up from its run start when the device reported one`() {
+        assertEquals(
+            RowContent.TimeCell.LiveCountUp(6_200),
+            RowContent.workerTime(worker("running", at = 1_000, enqueuedAt = 1_000, runStartedAt = 7_200)),
+        )
+        // No run start: an un-offset count-up, which is what the painter did before 1.7.2.
+        assertEquals(RowContent.TimeCell.LiveCountUp(0), RowContent.workerTime(worker("running", at = 1_000)))
+        // A run start earlier than the row's own start (a corrected device clock) cannot mean a
+        // negative offset — the painter would subtract time the count-up never had.
+        assertEquals(
+            RowContent.TimeCell.LiveCountUp(0),
+            RowContent.workerTime(worker("running", at = 5_000, runStartedAt = 1_000)),
+        )
+    }
+
+    @Test fun `the row's durations all read in one format`() {
+        assertEquals("0ms", RowContent.shortDuration(0))
+        assertEquals("40ms", RowContent.shortDuration(40))
+        assertEquals("6.2s", RowContent.shortDuration(6_200))
+        assertEquals("4m 0s", RowContent.shortDuration(240_000))
+        // A periodic worker's queue wait is exactly where hours turn up; "180m 0s" is not an answer.
+        assertEquals("3h 0m", RowContent.shortDuration(10_800_000))
+    }
+
+    @Test fun `the worker card breaks the span down only when the device measured it`() {
+        val split = kv(worker("succeeded", at = 1_000, endedAt = 7_640, enqueuedAt = 1_000, runStartedAt = 7_200), "Timing")!!
+        assertEquals("6.2s", split["queued"])
+        assertEquals("440ms", split["ran"])
+        assertEquals("6.6s", split["total"], "the whole span stays visible beside its parts")
+        // The old blanket disclaimer is now false — the time column no longer includes the queue.
+        assertNull(kv(worker("succeeded", at = 1_000, endedAt = 7_640, enqueuedAt = 1_000, runStartedAt = 7_200), "Request")!!["timing"])
+
+        // Pre-1.7.2 capture: no breakdown to give, and the disclaimer stands verbatim so an old
+        // capture still explains its own number.
+        val old = worker("succeeded", at = 1_000, endedAt = 7_640)
+        assertNull(kv(old, "Timing"))
+        assertEquals("includes queue time (from WorkInfo state changes)", kv(old, "Request")!!["timing"])
+    }
+
+    @Test fun `the worker card says which attempt it is describing, and what it never saw`() {
+        // A retry's numbers are the backoff and the attempt after it — not the original enqueue.
+        val retried = kv(
+            worker("succeeded", runAttempt = 3, at = 1_000, endedAt = 7_640, enqueuedAt = 1_000, runStartedAt = 7_200),
+            "Timing",
+        )!!
+        assertTrue(retried["note"]!!.contains("attempt 3"))
+
+        // Attached mid-flight: the run is known, the wait never was — so it is absent and said so.
+        val partial = kv(worker("running", at = 1_000, runStartedAt = 1_400), "Timing")!!
+        assertNull(partial["queued"])
+        assertEquals("still running", partial["ran"])
+        assertTrue(partial["note"]!!.contains("not observed"))
+    }
+
+    /** A worker card's named KV section, flattened to strings — null when it has no such section. */
+    private fun kv(event: LogEvent.Worker, label: String): Map<String, String>? =
+        KindPresenter.present(event)?.sections?.firstOrNull { it.label == label }
+            ?.body?.jsonObject?.mapValues { (_, v) -> v.jsonPrimitive.content }
 
     // ---- db -----------------------------------------------------------------------------------
 

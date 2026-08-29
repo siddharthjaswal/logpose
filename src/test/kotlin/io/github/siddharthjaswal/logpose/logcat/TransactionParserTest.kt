@@ -223,6 +223,55 @@ class TransactionParserTest {
         assertEquals(40, event.durationMillis)
     }
 
+    @Test
+    fun `a worker payload carries the queue and run instants the library stamps on it`() {
+        // Captured verbatim from library v1.7.2 — one workId through enqueued → running →
+        // succeeded, terminal line. It is the emission that used to lose both instants to the
+        // in-place row update, so it is the one worth pinning against a literal string.
+        val event = parser.accept(
+            """{"v":1,"kind":"worker","id":"3f2b9c14-work","at":1788019859821,"endedAt":1788019860080,""" +
+                """"payload":{"worker":"SyncWorker","state":"succeeded","workId":"3f2b9c14-work",""" +
+                """"uniqueName":"nightly-sync","runAttempt":0,"tags":["com.app.sync.SyncWorker","nightly"],""" +
+                """"inputData":{"since":"2026-08-28"},"outputData":{"synced":"42"},""" +
+                """"enqueuedAtMillis":1788019859821,"runStartedAtMillis":1788019859994,"replayedAtAttach":false}}"""
+        )!!
+        val work = (event as LogEvent.Worker).work
+        assertEquals(1788019859821, work.enqueuedAtMillis)
+        assertEquals(1788019859994, work.runStartedAtMillis)
+        // Queue 173ms + run 86ms, and the span the row already showed is unchanged at 259ms.
+        assertEquals(173, work.runStartedAtMillis!! - work.enqueuedAtMillis!!)
+        assertEquals(86, event.envelope.endedAt!! - work.runStartedAtMillis!!)
+        assertEquals(259, event.durationMillis)
+    }
+
+    @Test
+    fun `a worker payload from an older library decodes to null rather than zero`() {
+        // `explicitNulls = false` means the library omits the keys entirely when it observed no
+        // transition — and every library before 1.7.2 omits them always. Null must survive as
+        // null: a 0 here would render as `queued 0ms`, the exact fabrication §6 refused.
+        val event = parser.accept(
+            """{"v":1,"kind":"worker","id":"w9","at":1000,"endedAt":1400,""" +
+                """"payload":{"worker":"SyncWorker","state":"succeeded","workId":"w9","runAttempt":1}}"""
+        )!!
+        val work = (event as LogEvent.Worker).work
+        assertNull(work.enqueuedAtMillis)
+        assertNull(work.runStartedAtMillis)
+    }
+
+    @Test
+    fun `an unknown key in a worker payload does not lose the row`() {
+        // The forward half of the compat rule: a newer library may add fields this plugin has
+        // never heard of, and the row must still decode.
+        val event = parser.accept(
+            """{"v":1,"kind":"worker","id":"w10","at":1000,""" +
+                """"payload":{"worker":"SyncWorker","state":"running","runStartedAtMillis":1200,""" +
+                """"somethingNewerShipped":{"nested":true}}}"""
+        )!!
+        val work = (event as LogEvent.Worker).work
+        assertEquals("SyncWorker", work.worker)
+        assertEquals(1200, work.runStartedAtMillis)
+    }
+
     private fun quote(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
     private companion object {

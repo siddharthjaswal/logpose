@@ -93,9 +93,34 @@ data class WorkerEvent(
     val outputData: Map<String, String> = emptyMap(),
     val error: String? = null,
     /**
+     * Device epoch millis LogPose **observed** this request enter its current queue phase — the
+     * enqueue before attempt 1, the backoff before a retry. Same clock as [Envelope.at], and
+     * stamped onto every later emission for this `workId`, so it survives the in-place row
+     * update that would otherwise overwrite it.
+     *
+     * Null means *LogPose never observed that transition*: it attached while the request was
+     * already queued or running, the process restarted mid-request, or the row was replayed from
+     * WorkManager's store ([replayedAtAttach]). A consumer **must never guess a value for null** —
+     * render nothing rather than an approximation. With [runStartedAtMillis] it gives the queue
+     * wait; without both, there is no queue wait to report.
+     */
+    val enqueuedAtMillis: Long? = null,
+    /**
+     * Device epoch millis LogPose **observed** the current attempt transition into
+     * [STATE_RUNNING]. Null until it runs, and null when the start was never observed (attach
+     * mid-run, process restart, replay) — again, never to be guessed at.
+     *
+     * With the envelope's `endedAt` this gives the *run* duration, as distinct from the whole
+     * span (which is queue + run). Both this and [enqueuedAtMillis] always describe the **current
+     * attempt**: a retry re-enters the queue, which resets [enqueuedAtMillis] to the backoff and
+     * clears this until the new attempt starts. Pair them with [runAttempt] when reporting.
+     */
+    val runStartedAtMillis: Long? = null,
+    /**
      * True when this event was replayed from WorkManager's persisted store as the observer
      * attached — i.e. the work ran before capture was watching — rather than observed live this
-     * session. Lets the UI mark it and keeps it out of "ran this session" counts.
+     * session. Lets the UI mark it and keeps it out of "ran this session" counts. Such a row
+     * carries neither timestamp above, by construction: no transition was ever observed for it.
      */
     val replayedAtAttach: Boolean = false,
 ) {

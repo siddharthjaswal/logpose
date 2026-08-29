@@ -506,7 +506,12 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
             // row's timer does; the flow action stays reachable from the context menu.
             content.time is RowContent.TimeCell.LiveCountUp ->
                 workTime.meta(
-                    eventElapsedProvider(event.id)?.let { formatDuration(it) } ?: "…",
+                    // The provider's age runs from the row's first sighting, which for a worker
+                    // includes the queue. Subtracting the device-reported queue leaves the run —
+                    // floored at zero, because a device clock adjusted mid-run can overshoot.
+                    eventElapsedProvider(event.id)
+                        ?.let { formatDuration((it - content.time.offsetMillis).coerceAtLeast(0)) }
+                        ?: "…",
                     Theme.accent,
                 )
             armed && canGroup(event) -> workTime.action(FLOW)
@@ -522,16 +527,16 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         // Deliberately no spinner, unlike HTTP. A foreign producer that never sets endedAt is far
         // more likely than a genuinely long-running span, and a row that spins forever reads as a
         // hang. A running worker is the one exception, and it is handled by its own painter.
-        RowContent.TimeCell.LiveCountUp -> "…"
+        is RowContent.TimeCell.LiveCountUp -> "…"
         RowContent.TimeCell.Empty -> ""
     }
 
-    /** Workers run for minutes; "94210ms" in a 56px column is unreadable. */
-    private fun formatDuration(millis: Long): String = when {
-        millis < 1_000 -> "${millis}ms"
-        millis < 60_000 -> String.format("%.1fs", millis / 1000.0)
-        else -> "${millis / 60_000}m ${(millis % 60_000) / 1000}s"
-    }
+    /**
+     * Workers run for minutes; "94210ms" in a 56px column is unreadable. The rule itself lives in
+     * [RowContent.shortDuration], beside the cells that use it — the fact and time cells of one row
+     * must not disagree about what a duration looks like.
+     */
+    private fun formatDuration(millis: Long): String = RowContent.shortDuration(millis)
 
     private fun httpRow(
         event: LogEvent.Http,

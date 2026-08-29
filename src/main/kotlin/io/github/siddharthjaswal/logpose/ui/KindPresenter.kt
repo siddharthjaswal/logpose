@@ -92,7 +92,7 @@ object KindPresenter {
      */
     fun present(event: LogEvent): GenericEvent? = when (event) {
         is LogEvent.Db -> db(event.query)
-        is LogEvent.Worker -> worker(event.work)
+        is LogEvent.Worker -> worker(event)
         is LogEvent.Config -> config(event.update)
         is LogEvent.Generic -> event.event
         else -> null
@@ -145,42 +145,82 @@ object KindPresenter {
 
     // ---- worker -----------------------------------------------------------------------------
 
-    private fun worker(work: WorkerEvent): GenericEvent = GenericEvent(
-        title = work.worker,
-        subtitle = work.uniqueName ?: work.error ?: work.state,
-        badges = buildList {
-            add(Badge(work.state.uppercase(), workerTone(work.state)))
-            // Attempt 1 is just "it ran"; anything above is a retry and worth flagging.
-            if (work.runAttempt > 1) add(Badge("attempt ${work.runAttempt}", Badge.TONE_WARN))
-            // Replayed history from WorkManager's store on attach — not a run this session. Muted
-            // so it reads as "prior", and it's the answer to "why did this worker 'run' 20 times?".
-            if (work.replayedAtAttach) add(Badge("replayed", Badge.TONE_MUTED))
-        },
-        sections = buildList {
-            if (work.inputData.isNotEmpty()) {
-                add(Section("Input", Section.TYPE_KV, jsonOf(work.inputData)))
-            }
-            if (work.outputData.isNotEmpty()) {
-                add(Section("Output", Section.TYPE_KV, jsonOf(work.outputData)))
-            }
-            work.error?.let { add(Section("Error", Section.TYPE_TEXT, JsonPrimitive(it))) }
-            if (work.tags.isNotEmpty()) {
-                add(Section("Tags", Section.TYPE_TEXT, JsonPrimitive(work.tags.joinToString("\n"))))
-            }
-            add(
-                Section(
-                    "Request", Section.TYPE_KV,
-                    buildJsonObject {
-                        work.workId?.let { put("workId", it) }
-                        work.uniqueName?.let { put("unique", it) }
-                        put("attempt", work.runAttempt.toString())
-                        // WorkInfo reports state, not execution time, so say what the number is.
-                        put("timing", "includes queue time (from WorkInfo state changes)")
-                    },
+    private fun worker(event: LogEvent.Worker): GenericEvent {
+        val work = event.work
+        return GenericEvent(
+            title = work.worker,
+            subtitle = work.uniqueName ?: work.error ?: work.state,
+            badges = buildList {
+                add(Badge(work.state.uppercase(), workerTone(work.state)))
+                // Attempt 1 is just "it ran"; anything above is a retry and worth flagging.
+                if (work.runAttempt > 1) add(Badge("attempt ${work.runAttempt}", Badge.TONE_WARN))
+                // Replayed history from WorkManager's store on attach — not a run this session. Muted
+                // so it reads as "prior", and it's the answer to "why did this worker 'run' 20 times?".
+                if (work.replayedAtAttach) add(Badge("replayed", Badge.TONE_MUTED))
+            },
+            sections = buildList {
+                if (work.inputData.isNotEmpty()) {
+                    add(Section("Input", Section.TYPE_KV, jsonOf(work.inputData)))
+                }
+                if (work.outputData.isNotEmpty()) {
+                    add(Section("Output", Section.TYPE_KV, jsonOf(work.outputData)))
+                }
+                work.error?.let { add(Section("Error", Section.TYPE_TEXT, JsonPrimitive(it))) }
+                if (work.tags.isNotEmpty()) {
+                    add(Section("Tags", Section.TYPE_TEXT, JsonPrimitive(work.tags.joinToString("\n"))))
+                }
+                workerTiming(event, work)?.let { add(it) }
+                add(
+                    Section(
+                        "Request", Section.TYPE_KV,
+                        buildJsonObject {
+                            work.workId?.let { put("workId", it) }
+                            work.uniqueName?.let { put("unique", it) }
+                            put("attempt", work.runAttempt.toString())
+                            // Without an observed run start the row's duration really is queue + run,
+                            // and this line is the only thing that says so. Kept verbatim for captures
+                            // from a library that never sent the split, so an old capture still
+                            // explains its own number.
+                            if (work.runStartedAtMillis == null) {
+                                put("timing", "includes queue time (from WorkInfo state changes)")
+                            }
+                        },
+                    )
                 )
-            )
-        },
-    )
+            },
+        )
+    }
+
+    /**
+     * The queue/run split, once the device reports where the run began — which is exactly when the
+     * `timing` line above stops being true, since the row's duration is no longer queue + run.
+     *
+     * Null (so the old line stands) whenever the run start was never observed: a library older than
+     * 1.7.2, a request already running when capture attached, a replayed row. Nothing here is
+     * derived from arrival times, so an unobserved wait is simply absent rather than approximated.
+     */
+    private fun workerTiming(event: LogEvent.Worker, work: WorkerEvent): Section? {
+        work.runStartedAtMillis ?: return null
+        val queue = RowContent.workerQueueMillis(work)
+        val run = RowContent.workerRunMillis(event)
+        val notes = buildList {
+            // A retry re-enters the queue, so both numbers describe the backoff and the attempt it
+            // preceded — not the original enqueue. A reader who isn't told will misread a 30s
+            // backoff as a 30s queue.
+            if (work.runAttempt > 1) add("queued/ran describe attempt ${work.runAttempt}")
+            if (queue == null) add("queue wait not observed (capture attached mid-flight)")
+        }
+        return Section(
+            "Timing", Section.TYPE_KV,
+            buildJsonObject {
+                queue?.let { put("queued", RowContent.shortDuration(it)) }
+                put("ran", run?.let { RowContent.shortDuration(it) } ?: "still running")
+                event.durationMillis?.let { put("total", RowContent.shortDuration(it)) }
+                put("source", "observed WorkInfo state changes")
+                if (notes.isNotEmpty()) put("note", notes.joinToString(" · "))
+            },
+        )
+    }
 
     private fun workerTone(state: String): String = when (state.lowercase()) {
         WorkerEvent.STATE_FAILED -> Badge.TONE_ERROR

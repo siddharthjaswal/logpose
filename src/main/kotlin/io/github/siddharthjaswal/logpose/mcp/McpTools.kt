@@ -25,6 +25,7 @@ import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import io.github.siddharthjaswal.logpose.ui.KindPresenter
+import io.github.siddharthjaswal.logpose.ui.RowContent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -385,7 +386,9 @@ object McpTools {
                 "worker_history",
                 "Background work requests and how they ended, with attempt counts — the answer " +
                     "to 'did SyncWorker run, and did it retry?'. Each request appears once, in " +
-                    "its latest known state.",
+                    "its latest known state. When the device reported the transitions, each entry " +
+                    "also splits how long the request waited in the queue (queued_ms) from how " +
+                    "long it actually ran (run_ms), so 'slow' can be told apart from 'waiting'.",
             ) {
                 put("worker", stringProp("Filter by worker name, e.g. 'SyncWorker'."))
                 put("state", stringProp("Filter by state: enqueued, running, succeeded, failed, cancelled."))
@@ -1175,6 +1178,17 @@ object McpTools {
             put("replayed_at_attach", replayed)
             put("retried", matched.count { it.work.runAttempt > 1 })
             put("failed", matched.count { it.work.state == WorkerEvent.STATE_FAILED })
+            // "Is my background work slow, or just waiting?" in one number. Counted only over
+            // requests where the device reported both legs — a request that reported neither is
+            // not evidence either way, so it is absent from the count rather than assumed fast.
+            put(
+                "queue_bound",
+                matched.count { event ->
+                    val queued = RowContent.workerQueueMillis(event.work)
+                    val ran = RowContent.workerRunMillis(event)
+                    queued != null && ran != null && queued > ran
+                },
+            )
             put("workers", buildJsonArray {
                 matched.takeLast(limit).forEach { event ->
                     add(buildJsonObject {
@@ -1184,9 +1198,23 @@ object McpTools {
                         put("attempt", event.work.runAttempt)
                         if (event.work.replayedAtAttach) put("replayed_at_attach", true)
                         event.work.uniqueName?.let { put("unique_name", it) }
+                        val queued = RowContent.workerQueueMillis(event.work)
+                        val ran = RowContent.workerRunMillis(event)
+                        // Both are absent unless the device observed the transitions bounding them
+                        // (an old library, or capture attaching mid-flight, reports neither) — an
+                        // agent must read their absence as "not measured", never as zero.
+                        queued?.let { put("queued_ms", it) }
+                        ran?.let { put("run_ms", it) }
+                        // Unchanged meaning on purpose: the whole span, queue included. Saved
+                        // scenarios and agents already read it, and silently redefining a key is
+                        // worse than adding two beside it.
                         event.durationMillis?.let {
                             put("duration_ms", it)
-                            put("duration_note", "includes queue time; WorkInfo reports state, not execution")
+                            put(
+                                "duration_note",
+                                if (ran != null) "duration_ms is queue + run; see queued_ms and run_ms"
+                                else "includes queue time; WorkInfo reports state, not execution",
+                            )
                         }
                         event.work.error?.let { put("error", it) }
                         if (event.work.outputData.isNotEmpty()) {

@@ -175,7 +175,11 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         chips.removeAll()
         val items = buildList {
             if (event.timestampMillis > 0) add(StatChip("at", timeFmt.format(Date(event.timestampMillis))))
-            event.durationMillis?.let { add(StatChip("took", "${it}ms")) }
+            // Kind-agnostic on purpose: this is still the whole span (a worker's queue + run), and
+            // the worker card's own Timing section is what breaks that down. Formatted, though —
+            // "124300ms" is a number nobody reads. No new chip: worker knowledge stays in
+            // KindPresenter rather than leaking into the shared card.
+            event.durationMillis?.let { add(StatChip("took", RowContent.shortDuration(it))) }
             if (event.isOpen) add(StatChip("state", "running"))
             event.traceId?.takeIf { it.isNotBlank() }?.let { trace ->
                 add(

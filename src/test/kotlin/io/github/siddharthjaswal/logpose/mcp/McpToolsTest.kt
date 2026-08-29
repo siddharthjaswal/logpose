@@ -274,8 +274,15 @@ class McpToolsTest {
         at: Long = 1_000,
         durationMillis: Long? = 500,
         replayedAtAttach: Boolean = false,
+        enqueuedAt: Long? = null,
+        runStartedAt: Long? = null,
     ): LogEvent.Worker {
-        val work = WorkerEvent(worker = name, state = state, workId = id, runAttempt = attempt, replayedAtAttach = replayedAtAttach)
+        val work = WorkerEvent(
+            worker = name, state = state, workId = id, runAttempt = attempt,
+            replayedAtAttach = replayedAtAttach,
+            // Null by default: a pre-1.7.2 capture, which every existing assertion here describes.
+            enqueuedAtMillis = enqueuedAt, runStartedAtMillis = runStartedAt,
+        )
         return LogEvent.Worker(
             work,
             Envelope(
@@ -388,11 +395,45 @@ class McpToolsTest {
     }
 
     @Test fun `worker durations say what they include`() {
-        // WorkInfo reports state, not execution time, so a duration covers queue time too.
+        // Pre-1.7.2 capture: the device never reported the split, so a duration covers queue time
+        // too and the entry still says so — unchanged, key for key.
         val out = call("worker_history", listOf(worker("w1", durationMillis = 1_500)))
         val entry = out["workers"]!!.jsonArray.single().jsonObject
         assertEquals(1_500, entry["duration_ms"]!!.jsonPrimitive.int())
         assertTrue(entry["duration_note"]!!.jsonPrimitive.content.contains("queue time"))
+        assertFalse(entry.containsKey("queued_ms"), "never a queue wait the device did not measure")
+        assertFalse(entry.containsKey("run_ms"))
+        assertEquals(0, out["queue_bound"]!!.jsonPrimitive.int(), "unmeasured is not evidence of fast")
+    }
+
+    @Test fun `worker_history separates waiting from running when the device measured both`() {
+        // at 1_000, enqueued 1_000, ran from 7_200, ended 7_640: 6.2s waiting, 440ms working.
+        val out = call(
+            "worker_history",
+            listOf(
+                worker("w1", at = 1_000, durationMillis = 6_640, enqueuedAt = 1_000, runStartedAt = 7_200)
+            ),
+        )
+        val entry = out["workers"]!!.jsonArray.single().jsonObject
+        assertEquals(6_200, entry["queued_ms"]!!.jsonPrimitive.int())
+        assertEquals(440, entry["run_ms"]!!.jsonPrimitive.int())
+        // duration_ms keeps its old meaning — agents and saved scenarios already read it.
+        assertEquals(6_640, entry["duration_ms"]!!.jsonPrimitive.int())
+        assertTrue(entry["duration_note"]!!.jsonPrimitive.content.contains("queued_ms"))
+        // The whole answer to "is my work slow, or just waiting?".
+        assertEquals(1, out["queue_bound"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `worker_history reports half a measurement as half a measurement`() {
+        // Capture attached mid-flight: the run start was observed, the wait never was.
+        val out = call(
+            "worker_history",
+            listOf(worker("w1", at = 1_000, durationMillis = 900, runStartedAt = 1_400)),
+        )
+        val entry = out["workers"]!!.jsonArray.single().jsonObject
+        assertFalse(entry.containsKey("queued_ms"))
+        assertEquals(500, entry["run_ms"]!!.jsonPrimitive.int())
+        assertEquals(0, out["queue_bound"]!!.jsonPrimitive.int(), "no wait measured, so no verdict")
     }
 
     @Test fun `config_changes flattens activations into individual flags`() {
