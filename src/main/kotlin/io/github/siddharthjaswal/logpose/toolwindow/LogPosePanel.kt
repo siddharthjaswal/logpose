@@ -55,9 +55,13 @@ import io.github.siddharthjaswal.logpose.ui.ComposePushDialog
 import io.github.siddharthjaswal.logpose.ui.CorrelationKeysDialog
 import io.github.siddharthjaswal.logpose.ui.CorrelationSettings
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
+import io.github.siddharthjaswal.logpose.ui.EventType
 import io.github.siddharthjaswal.logpose.ui.FindByValueDialog
 import io.github.siddharthjaswal.logpose.ui.FcmDetailView
 import io.github.siddharthjaswal.logpose.ui.FilterBar
+import io.github.siddharthjaswal.logpose.ui.FilterPresentation
+import io.github.siddharthjaswal.logpose.ui.FilterState
+import io.github.siddharthjaswal.logpose.ui.FilteredToNothingPanel
 import io.github.siddharthjaswal.logpose.ui.GenericDetailView
 import io.github.siddharthjaswal.logpose.ui.KindPresenter
 import io.github.siddharthjaswal.logpose.ui.isPending
@@ -155,6 +159,19 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     /** The other groupings the row that opened the waterfall belongs to, for the header switcher. */
     private var waterfallAlternatives: List<Grouping> = emptyList()
     private val filterBar = FilterBar()
+
+    /**
+     * The list half of the splitter, and the one state that replaces it: `events > 0 && matches
+     * == 0`. Both buttons act through the bar, so "Clear filters" and a contextual loosening are
+     * the same operations the chips are, not a second path into the filter state.
+     */
+    private val filteredToNothing = FilteredToNothingPanel(
+        onClearFilters = { filterBar.clearAllFilters() },
+        onLoosen = { id -> filterBar.loosen(id) },
+    )
+    private val listCards = CardLayout()
+    private val listPane = JPanel(listCards).apply { isOpaque = true; background = Theme.bg0 }
+
     private val statusDot = StatusDot()
 
     private val pluginVersion: String? =
@@ -303,22 +320,33 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         // Enable per-row tooltips (our JBList overrides getToolTipText for duplicate rows).
         javax.swing.ToolTipManager.sharedInstance().registerComponent(list)
         list.addListSelectionListener {
-            if (!suppressSelectionEvents && !it.valueIsAdjusting) showDetail(list.selectedValue)
+            if (it.valueIsAdjusting) return@addListSelectionListener
+            // List and waterfall are one selection model: the lane whose row is selected wears the
+            // row's own accent tint and rail. Kept in step even when the selection was *restored*
+            // under a refresh (which is suppressed below), since the waterfall survives those.
+            waterfall.setSelectedId(list.selectedValue?.id)
+            if (!suppressSelectionEvents) showDetail(list.selectedValue)
         }
         val mouse = ListMouse()
         list.addMouseListener(mouse)
         list.addMouseMotionListener(mouse)
 
         filterBar.onChange = { refreshList() }
-        filterBar.onOverflow = { near -> showFilterOverflow(near) }
+        filterBar.onFindByValue = { findByValue() }
+        filterBar.onCorrelationKeys = { editCorrelationKeys() }
 
         val listScroll = JBScrollPane(list).apply {
             border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0
-            minimumSize = Dimension(JBUI.scale(220), 0)
         }
+        // Two states share the list's half of the splitter: the timeline, and — when the capture is
+        // full but the filter has emptied it — the state that says so. The list's own empty text is
+        // then free to mean the one thing it should: nothing has been captured at all.
+        listPane.add(listScroll, "list")
+        listPane.add(filteredToNothing, "empty")
+        listPane.minimumSize = Dimension(JBUI.scale(220), 0)
         detailPane.minimumSize = Dimension(JBUI.scale(320), 0)
         val splitter = OnePixelSplitter(false, 0.44f).apply {
-            firstComponent = listScroll
+            firstComponent = listPane
             secondComponent = detailPane
             setHonorComponentsMinimumSize(true)
         }
@@ -511,12 +539,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         // Like "duplicates only", the correlation chip can't live in FilterState: a value hides in
         // bodies the row never shows, so it's matched against the cached haystack instead.
         val grouping = filterBar.correlationFilter()
-        val filtered = all.filter {
-            state.matches(it) &&
-                (!state.duplicatesOnly || duplicateMarks.containsKey(it.id)) &&
-                (grouping == null || Correlation.containsValue(correlation.textOf(it), grouping.value))
-        }
+        val filtered = all.filter { passes(it, state, grouping) }
         filterBar.setCount(filtered.size, all.size)
+        // Derived filter-bar state, computed here — on a filter change — and never during a paint:
+        // whether the search would have matched db events the DB opt-in is hiding (the echo row's
+        // "db hidden by default · show"), and, when nothing matches at all, what to say about it.
+        val hiddenDb = FilterPresentation.wouldMatchHiddenDb(state, all)
+        filterBar.setHiddenDbMatch(hiddenDb)
+        showListState(all, filtered, state, grouping, hiddenDb)
 
         val model = javax.swing.DefaultListModel<LogEvent>()
         filtered.forEach { model.addElement(it) }
@@ -538,11 +568,109 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         if (shown != null) {
             // The waterfall is a view over a whole flow, not over the selection, so a refresh
             // re-snapshots it instead of letting the selected row's detail take the card back.
-            waterfall.show(shown, membersOf(shown, all), waterfallAlternatives)
+            waterfall.show(shown, membersOf(shown, all), waterfallAlternatives, sel?.id)
         } else if (sel != lastShown) {
             // If the selected transaction's data changed (e.g. pending → completed), re-render
             // the detail even though the selection index didn't change.
             showDetail(sel)
+        }
+    }
+
+    /**
+     * Whether one event survives the whole filter — the structured [FilterState] plus the two
+     * narrowings that need the rest of the capture to decide (duplicate membership, and a
+     * correlation value that can hide in a body no row shows).
+     *
+     * One predicate, used by the list, by the "what would this filter show" counts behind the
+     * empty state's loosener, so a button can't offer rows the list would then reject.
+     */
+    private fun passes(event: LogEvent, state: FilterState, grouping: Grouping?): Boolean =
+        state.matches(event) &&
+            (!state.duplicatesOnly || duplicateMarks.containsKey(event.id)) &&
+            (grouping == null || Correlation.containsValue(correlation.textOf(event), grouping.value))
+
+    /**
+     * Picks which of the list half's two cards is showing.
+     *
+     * The setup guide (the list's own empty text) is right for exactly one situation — nothing has
+     * been captured — and was wrong for the far more common one, where 218 events exist and a
+     * filter is hiding all of them. That case gets its own state, and the counting it needs runs
+     * only here: one re-filter per active narrowing, in the branch where the list is already empty.
+     */
+    private fun showListState(
+        all: List<LogEvent>,
+        filtered: List<LogEvent>,
+        state: FilterState,
+        grouping: Grouping?,
+        hiddenDb: Boolean,
+    ) {
+        if (all.isEmpty() || filtered.isNotEmpty()) {
+            listCards.show(listPane, "list")
+            return
+        }
+        filteredToNothing.show(
+            FilterPresentation.emptyState(
+                total = all.size,
+                kinds = all.groupingBy { it.kind }.eachCount(),
+                state = state,
+                correlationLabel = grouping?.shortLabel,
+                wouldMatchHiddenDb = hiddenDb,
+                relaxations = relaxations(all, state, grouping),
+            )
+        )
+        listCards.show(listPane, "empty")
+    }
+
+    /**
+     * How many rows each active filter is costing, measured rather than guessed: the filter is run
+     * again with that one narrowing dropped, and the count is what the loosener would show.
+     */
+    private fun relaxations(
+        all: List<LogEvent>,
+        state: FilterState,
+        grouping: Grouping?,
+    ): List<FilterPresentation.Relaxation> = buildList {
+        val label = grouping?.shortLabel
+        fun candidate(id: FilterPresentation.FilterId, relaxed: FilterState, g: Grouping?) {
+            add(
+                FilterPresentation.Relaxation(
+                    id, FilterPresentation.looseningLabel(id, label),
+                    all.count { passes(it, relaxed, g) },
+                )
+            )
+        }
+        if (state.statusClasses.isNotEmpty()) {
+            candidate(FilterPresentation.FilterId.STATUS, state.copy(statusClasses = emptySet()), grouping)
+        }
+        if (state.methods.isNotEmpty()) {
+            candidate(FilterPresentation.FilterId.METHOD, state.copy(methods = emptySet()), grouping)
+        }
+        if (grouping != null) candidate(FilterPresentation.FilterId.CORRELATION, state, null)
+        if (state.hideNoise) {
+            candidate(FilterPresentation.FilterId.HIDE_NOISE, state.copy(hideNoise = false), grouping)
+        }
+        if (state.duplicatesOnly) {
+            candidate(FilterPresentation.FilterId.DUPES, state.copy(duplicatesOnly = false), grouping)
+        }
+        if (state.urlQuery.isNotBlank()) {
+            candidate(FilterPresentation.FilterId.SEARCH, state.copy(urlQuery = ""), grouping)
+        }
+        if (state.types.isNotEmpty()) {
+            candidate(FilterPresentation.FilterId.TYPES, state.copy(types = emptySet()), grouping)
+        }
+        // The DB opt-in is the one narrowing with no chip switched on, so without this the empty
+        // state can neither name it nor offer to lift it: a capture of nothing but db events, with
+        // no filter active at all, was told "several filters are narrowing at once" and handed a
+        // "Clear filters" button that changed nothing. Offered only when granting db actually
+        // brings rows back, so a genuinely different cause (a status filter, which hides every
+        // non-HTTP kind) keeps the blame.
+        if (EventType.DB !in state.types && all.any { it is LogEvent.Db }) {
+            val withDb = state.copy(types = state.types + EventType.DB)
+            val wouldShow = all.count { passes(it, withDb, grouping) }
+            if (wouldShow > 0) {
+                val id = FilterPresentation.FilterId.DB_OPT_IN
+                add(FilterPresentation.Relaxation(id, FilterPresentation.looseningLabel(id, label), wouldShow))
+            }
         }
     }
 
@@ -555,7 +683,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         // The tabs belong to the row this was opened from, so an entry point that doesn't know
         // them (a detail card's trace chip) shows none rather than the last row's.
         waterfallAlternatives = alternatives
-        waterfall.show(grouping, membersOf(grouping, store.snapshot()), alternatives)
+        // The row this was opened from stays selected in the list, and its lane says so.
+        waterfall.show(grouping, membersOf(grouping, store.snapshot()), alternatives, list.selectedValue?.id)
         detailCards.show(detailPane, "waterfall")
     }
 
@@ -603,20 +732,6 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     }
 
     // ---- correlation keys ---------------------------------------------------------------------
-
-    /** The filter bar's overflow: the two things that need a whole capture rather than a row. */
-    private fun showFilterOverflow(near: Component) {
-        val group = DefaultActionGroup().apply {
-            add(act("Find by value…", AllIcons.Actions.Find) { findByValue() })
-            addSeparator()
-            add(act("Correlation keys…", AllIcons.General.Settings) { editCorrelationKeys() })
-        }
-        val popup = JBPopupFactory.getInstance().createActionGroupPopup(
-            null, group, DataContext.EMPTY_CONTEXT,
-            JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
-        )
-        if (near.isShowing) popup.showUnderneathOf(near) else popup.showInFocusCenter()
-    }
 
     /**
      * Opens the keys dialog, seeded from the capture.
@@ -773,6 +888,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         mocksController.onCaptureStopped()
         pushController.reset()
         statusDot.dispose()
+        waterfall.dispose()
         // Drop the MCP session so a closed project's capture stops being readable.
         McpSessions.unregister(mcpToken)
     }
@@ -1045,24 +1161,44 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             if (e.isShiftDown || e.isMetaDown || e.isControlDown) return
             val idx = indexAt(e)
             if (idx < 0) return
+            val event = list.model.getElementAt(idx)
+            // The buttons are tested *before* anything else this click could mean. They now paint
+            // on the selected row too, and the selected row is exactly the one a waterfall click
+            // would otherwise bounce back to the detail view — so hitting a button has to be the
+            // whole click, not a prelude to one.
+            if (clickedAction(e, idx, event)) return
             // Clicking the row that's already selected fires no selection event, so a click meant
             // to leave the waterfall would otherwise do nothing at all.
-            if (waterfallGrouping != null) showDetail(list.model.getElementAt(idx))
-            // Only the hovered row paints an affordance, and a muted row paints none at all.
-            if (idx != renderer.hoveredIndex) return
-            val event = list.model.getElementAt(idx)
-            val bounds = list.getCellBounds(idx, idx) ?: return
-            val tx = (event as? LogEvent.Http)?.tx
-            if (tx != null && MutedEndpoints.isMuted(tx)) return
+            if (waterfallGrouping != null) showDetail(event)
+        }
+
+        /**
+         * Runs the action button under the pointer, if the click landed on one. Returns whether it
+         * did.
+         *
+         * A row is *armed* when it paints its buttons — the hovered one and the selected one, the
+         * same predicate the renderer paints by ([TransactionListRenderer.actionsArmed]) — and each
+         * button fires only where the renderer would have drawn it
+         * ([TransactionListRenderer.paintsCurl] / [TransactionListRenderer.paintsFlow]) inside the
+         * cell it would have drawn it in ([io.github.siddharthjaswal.logpose.ui.RowGeometry]).
+         * Nothing here re-derives a coordinate, so a button can't drift away from its hit target.
+         */
+        private fun clickedAction(e: MouseEvent, idx: Int, event: LogEvent): Boolean {
+            if (!renderer.actionsArmed(idx, list.isSelectedIndex(idx))) return false
+            val bounds = list.getCellBounds(idx, idx) ?: return false
             val x = e.x - bounds.x
-            when {
-                // Two disjoint bands in the same hover strip: cURL over the size column (HTTP
-                // only, as before), the flow over the duration column (any row that has one).
-                tx != null && renderer.isInCurlZone(bounds.width, x) ->
-                    copyToClipboard(CurlBuilder.build(tx), "cURL copied")
-                renderer.isInFlowZone(bounds.width, x) && renderer.paintsFlow(event) ->
-                    openBestGrouping(event)
+            // Two disjoint bands: cURL over the size cell (HTTP only, as before), the flow over the
+            // duration cell (any row that has one). A muted row paints neither, and both predicates
+            // already say so, so its clicks are still swallowed.
+            if (renderer.isInCurlZone(bounds.width, x) && renderer.paintsCurl(event)) {
+                copyToClipboard(CurlBuilder.build((event as LogEvent.Http).tx), "cURL copied")
+                return true
             }
+            if (renderer.isInFlowZone(bounds.width, x) && renderer.paintsFlow(event)) {
+                openBestGrouping(event)
+                return true
+            }
+            return false
         }
 
         override fun mousePressed(e: MouseEvent) = maybePopup(e)
@@ -1089,7 +1225,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             } else {
                 val event = list.selectedValue ?: return
                 val rowGroup = when (event) {
-                    is LogEvent.Http -> httpGroup(event.tx)
+                    is LogEvent.Http -> httpGroup(event)
                     is LogEvent.Fcm -> fcmGroup(event)
                     else -> structuredGroup(event)
                 }
@@ -1127,7 +1263,25 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             }
         }
 
-        private fun httpGroup(tx: Transaction): ActionGroup {
+        /**
+         * `Show in flow` — the row's `⇉` button as a menu item, so the action isn't reachable only
+         * by discovering a hover target.
+         *
+         * Offered on **HTTP rows only**, and there only when nothing else in the menu already opens
+         * the same view. Every configured key a row carries becomes a `Show waterfall — order_id …`
+         * item ([withKeyActions]), and FCM and generic rows turn their trace into one
+         * ([addTraceActions]) — HTTP rows do neither, so a traced HTTP call is the single place
+         * where the button has no menu equivalent at all. Two items that open the same waterfall
+         * would be a worse menu than one.
+         */
+        private fun flowAction(event: LogEvent.Http): AnAction? {
+            val groupings = groupingsFor(event)
+            if (groupings.isEmpty() || groupings.any { !it.isTrace }) return null
+            return act("Show in flow", AllIcons.Actions.ShowAsTree) { openBestGrouping(event) }
+        }
+
+        private fun httpGroup(event: LogEvent.Http): ActionGroup {
+            val tx = event.tx
             val key = MutedEndpoints.keyOf(tx)
             val muted = MutedEndpoints.isMuted(tx)
             return DefaultActionGroup().apply {
@@ -1139,6 +1293,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 tx.response?.body?.text?.let { body ->
                     add(act("Copy response body", AllIcons.Actions.Copy) { copyToClipboard(body, "Response body copied") })
                 }
+                flowAction(event)?.let { addSeparator(); add(it) }
                 addSeparator()
                 add(act("Mock this endpoint…", AllIcons.Actions.Execute) { mockTransaction(tx) })
                 addSeparator()

@@ -66,9 +66,10 @@
         <h3>Inspect</h3>
         <ul>
             <li>Collapsible JSON trees plus a real IDE JSON editor (folding, line numbers) in Raw mode</li>
-            <li>One-click filters: URL search, type toggles
-                (NET / FCM / DB / WORK / CONF / APP), Method &amp; Status toggles, hide-noise,
-                duplicates-only</li>
+            <li>One-click filters: URL search and type toggles
+                (NET / FCM / DB / WORK / CONF / ANLY / APP) always on the bar, with method, status,
+                hide-noise and duplicates-only a click away in the Filters popover — every active
+                choice echoes as a removable chip</li>
             <li>Copy as cURL, copy JSON or a response body, find within a body</li>
             <li>Multi-select rows and copy the call sequence as plain text — ideal for bug reports</li>
             <li>First-class multipart upload (S3 / GCS) metadata instead of raw bytes</li>
@@ -120,6 +121,31 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>A systematic visual pass — one axis owns hue.</b> Amber used to mean PUT, 4xx,
+                db, warning, timeout and pending-sync at once. Now <b>kind</b> keeps the seven
+                hues (row glyph, TYPE chip, detail pill, waterfall bars — nowhere else),
+                <b>status</b> carries only semantics (2xx/3xx neutral, amber = warning, red =
+                failure), <b>method</b> drops colour entirely and encodes read-vs-write by weight,
+                and anything LogPose itself caused (<b>MOCK</b>, <b>INJ</b>) is the only solid
+                accent fill in a row.</li>
+            <li><b>Rows reclaimed 46–92px each</b> — FCM and structured rows no longer reserve
+                empty method/status columns for a grid only HTTP uses. The hover
+                <i>⧉ cURL</i> and <i>⇉ flow</i> affordances became real buttons that stay visible
+                on the selected row instead of hiding until you hover.</li>
+            <li><b>The filter bar earns its space</b> — search, type chips and the count stay;
+                method, status, hide-noise and duplicates moved into a <b>Filters</b> popover with
+                a badge, and every active choice echoes as a removable chip on a second row. That
+                row is also where two previously silent behaviours finally explain themselves:
+                <i>"status filter → showing HTTP only"</i> and <i>"db hidden by default"</i>.
+                Below ~440px the type chips collapse to glyphs.</li>
+            <li><b>"Filtered to nothing" is its own state</b> — it names the count and the filter
+                actually narrowing the list, and offers a loosener picked by measuring which one
+                would reveal the most events, instead of showing the setup guide to someone who
+                already has 218 events captured.</li>
+            <li><b>The waterfall got its first design pass</b> — axis labels below the canvas,
+                durations right-aligned in a fixed column, lanes sharing the list's selection
+                model, and open spans pulsing on a smooth ease. (It also fixed a real bug: span
+                bars were painting at 27% alpha instead of 70%.)</li>
             <li><b>Group a flow by the id you actually know</b> — define your app's correlation
                 keys (<code>order_id</code>, <code>trip_id</code>) in the filter bar's
                 <b>⋯ → Correlation keys…</b>, seeded with suggestions found in the capture, and

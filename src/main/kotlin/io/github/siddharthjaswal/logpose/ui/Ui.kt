@@ -29,15 +29,27 @@ import javax.swing.JPanel
 import javax.swing.SwingConstants
 
 /**
- * "Studio" design tokens as [JBColor] light/dark pairs, so the tool window matches the
- * IDE theme (dark values are the original Studio palette; light values mirror the
- * JetBrains New UI light theme). Everything paints through these, so the whole UI adapts.
+ * The design tokens, as [JBColor] light/dark pairs, so the tool window matches the IDE theme (dark
+ * values descend from the original "Studio" palette; light values mirror the JetBrains New UI light
+ * theme). Everything paints through these, so the whole UI adapts.
+ *
+ * **One axis owns hue.** The redesign deleted seven of these tokens — five method hues, the 2xx
+ * green and the 3xx blue-cyan — and added none, because a UI in which method, status and kind all
+ * carry colour is a UI in which none of them means anything. What is left:
+ *
+ *  - **Kind** keeps its seven hues ([typeColor]), and may paint them at four sites only.
+ *  - **Status** carries semantics: 2xx/3xx neutral, 4xx [warn], 5xx/ERR [danger].
+ *  - **Method** carries no colour at all — read vs write is *weight* ([methodTextColor], [isRead]).
+ *  - **[intervention]** — what LogPose itself did — is the one solid accent fill in a row.
  */
 object Theme {
     private fun c(light: Int, dark: Int) = JBColor(light, dark)
 
     // surfaces
-    val bg0 = c(0xF7F8FA, 0x1E1F22)   // window
+    private const val BG0_LIGHT = 0xF7F8FA
+    private const val BG0_DARK = 0x1E1F22
+
+    val bg0 = c(BG0_LIGHT, BG0_DARK)   // window
     val bg1 = c(0xFFFFFF, 0x26282C)   // cards / chips
     val bg2 = c(0xF0F1F4, 0x2B2D30)   // headers / inputs
     val bg3 = c(0xE3E5EA, 0x303236)   // segments
@@ -180,13 +192,36 @@ object Theme {
         else -> statusNeutral   // 1xx / 2xx / 3xx
     }
 
-    /** The pill fill paired with [statusColor]. */
+    /**
+     * The pill fill paired with [statusColor] — **opaque**, and deliberately so.
+     *
+     * [warnTint] and [dangerTint] are 17% alpha, so painted as-is a status pill composites over
+     * whatever the *row* is painted with: a hovered row and a selected row (a 15% accent tint of
+     * their own) each pushed the pill's own text further down, and danger-on-selected fell under
+     * 4:1 in both themes. Pre-blending the same two tints onto [bg0] once gives every status pill
+     * one ground wherever it lands, so hovering a row can no longer change how legible its status
+     * is. The tint tokens themselves are unchanged — this is only where they are resolved.
+     */
     fun statusTint(code: Int?, error: String?): Color = when {
-        error != null -> dangerTint
+        error != null -> dangerPlate
         code == null -> statusNeutralBg
-        code in 400..499 -> warnTint
-        code >= 500 -> dangerTint
+        code in 400..499 -> warnPlate
+        code >= 500 -> dangerPlate
         else -> statusNeutralBg
+    }
+
+    /** [warnTint] / [dangerTint] resolved against [bg0] in each theme — see [statusTint]. */
+    private val warnPlate: JBColor = overBg0(warnTint)
+    private val dangerPlate: JBColor = overBg0(dangerTint)
+
+    /** Flattens a translucent tint onto the window background, one composite per theme. */
+    private fun overBg0(tint: Color): JBColor =
+        JBColor(blend(tint, BG0_LIGHT), blend(tint, BG0_DARK))
+
+    private fun blend(tint: Color, base: Int): Color {
+        val a = tint.alpha / 255f
+        fun mix(f: Int, shift: Int) = (f * a + ((base shr shift) and 0xFF) * (1 - a)).toInt().coerceIn(0, 255)
+        return Color(mix(tint.red, 16), mix(tint.green, 8), mix(tint.blue, 0))
     }
 
     fun tint(c: Color, alpha: Int = 38): Color = Color(c.red, c.green, c.blue, alpha)
@@ -358,6 +393,10 @@ class PillButton(text: String, private val filled: Boolean) : JButton(text) {
         isFocusPainted = false
         isBorderPainted = false
         isOpaque = false
+        // Swing only publishes rollover to the model when the button asks for it, and no LaF the
+        // plugin runs under sets `Button.rollover`, so without this the hover below is dead code —
+        // `model.isRollover` would stay false for the life of the button.
+        isRolloverEnabled = true
         cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         border = JBUI.Borders.empty(4, 12)
         foreground = if (filled) Theme.onAccent else Theme.text

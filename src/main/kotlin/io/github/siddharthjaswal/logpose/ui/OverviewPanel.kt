@@ -21,9 +21,9 @@ import javax.swing.BoxLayout
 import javax.swing.JPanel
 
 /**
- * The "hero" overview card: a header row ("Overview" + copy-JSON icon), then a
- * prominent status + method, the full URL (green mono), a row of stat chips, and
- * the primary copy actions.
+ * The "hero" overview card: a header row ("Overview" + copy-JSON icon), then the duplicate banner,
+ * the `MOCK` intervention pill, the semantic status pill and the weighted (never hued) method, the
+ * full URL in mono, a row of stat chips, and the primary copy actions.
  */
 class OverviewPanel : CardPanel(null) {
 
@@ -40,6 +40,21 @@ class OverviewPanel : CardPanel(null) {
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS")
 
     private val statusPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
+
+    /**
+     * `MOCK`, as its own solid-[Theme.intervention] pill in front of the status.
+     *
+     * It used to be a prefix — `MOCK · 200 OK` inside the neutral status pill — which made the one
+     * thing LogPose itself did to this response look like part of what the server said. The two are
+     * different facts and they get different pills: the status keeps its semantic colour, and the
+     * intervention keeps the solid accent fill it wears everywhere else in the UI.
+     */
+    private val mockPill = TagLabel().apply {
+        font = JBUI.Fonts.label(10f).asBold()
+        border = JBUI.Borders.empty(2, 7)
+        isVisible = false
+    }
+    private val mockGap = Box.createHorizontalStrut(JBUI.scale(8)).apply { isVisible = false }
     private val methodFontRegular = JBUI.Fonts.label(12f)
     private val methodFontBold = JBUI.Fonts.label(12f).asBold()
     private val methodPill = TagLabel().apply { font = methodFontBold }
@@ -160,7 +175,7 @@ class OverviewPanel : CardPanel(null) {
 
             add(bannerHolder)
             add(vGap(8))
-            add(row(hbox(statusPill, Box.createHorizontalStrut(JBUI.scale(8)), methodPill), fill = false))
+            add(row(hbox(mockPill, mockGap, statusPill, Box.createHorizontalStrut(JBUI.scale(8)), methodPill), fill = false))
             add(vGap(8))
             add(row(url, fill = true))
             errorRow = row(errorText, fill = true)
@@ -186,6 +201,7 @@ class OverviewPanel : CardPanel(null) {
         applyDuplicate(tx, dup)
         applyError(tx)
         if (tx == null) {
+            showMock(false)
             statusPill.set("—", Theme.statusNeutral, Theme.statusNeutralBg)
             methodPill.set("", Theme.textDim, null)
             url.text = "Select a request"
@@ -195,16 +211,18 @@ class OverviewPanel : CardPanel(null) {
 
         pending = tx.isPending()
         val code = tx.response?.code
+        // The intervention is stated once, by its own pill, whether the call is finished or still
+        // in flight — a mocked response that hasn't landed yet is still a mocked response.
+        showMock(tx.mocked)
         if (pending) {
             statusPill.set("${spinnerChar(0)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
         } else {
             val sColor = Theme.statusColor(code, tx.error)
-            val base = when {
+            val label = when {
                 tx.error != null -> "ERR"
                 code != null -> "$code ${tx.response?.message?.ifBlank { reason(code) } ?: reason(code)}".trim()
                 else -> "pending"
             }
-            val label = if (tx.mocked) "MOCK · $base" else base
             statusPill.set(label, sColor, Theme.statusTint(code, tx.error))
         }
         // Method carries no hue — read vs write is weight, so a POST looks heavier than a GET
@@ -246,6 +264,13 @@ class OverviewPanel : CardPanel(null) {
             chips.add(c)
         }
         chips.revalidate(); chips.repaint()
+    }
+
+    /** Shows or hides the `MOCK` pill and the gap that only exists to separate it from the status. */
+    private fun showMock(mocked: Boolean) {
+        if (mocked) mockPill.set("MOCK", Theme.onAccent, Theme.intervention) else mockPill.set("", Theme.text, null)
+        mockPill.isVisible = mocked
+        mockGap.isVisible = mocked
     }
 
     /** Live update while a request is in flight: ticking duration + spinning status. */

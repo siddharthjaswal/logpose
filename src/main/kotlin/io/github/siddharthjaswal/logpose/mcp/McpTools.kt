@@ -1861,7 +1861,8 @@ object McpTools {
             "Nothing in this capture looks like an unconfigured id key."
         } else {
             "'suggested' is INERT: those keys group nothing and this tool enabled none of them — " +
-                "a person ticks one in the LogPose window (filter bar ⋯ → Correlation keys…). You " +
+                "a person ticks one in the LogPose window (filter bar → Filters → Correlation " +
+                "keys…). You " +
                 "can group by one right now without configuring it: get_related(value=…) matches " +
                 "the value alone."
         }
@@ -2148,7 +2149,7 @@ object McpTools {
             "unrelated ids and timestamps and would group half the capture. This is not an empty " +
             "result. Use the full id, or " +
             (key?.let { "tick \"short values\" for '$it'" } ?: "tick \"short values\" for the key that holds it") +
-            " in the LogPose window (filter bar ⋯ → Correlation keys…) to accept the risk.")
+            " in the LogPose window (filter bar → Filters → Correlation keys…) to accept the risk.")
         put("events", buildJsonArray {})
     }
 
@@ -2161,7 +2162,8 @@ object McpTools {
                 "Configured: " + keys.joinToString(", ") { it.name } + "."
             }) +
             " Omit 'key' to group by the value alone (matching never uses the key), or add the " +
-            "key in the LogPose window (filter bar ⋯ → Correlation keys…); list_correlation_keys " +
+            "key in the LogPose window (filter bar → Filters → Correlation keys…); " +
+            "list_correlation_keys " +
             "also reports what the capture suggests.",
     )
 

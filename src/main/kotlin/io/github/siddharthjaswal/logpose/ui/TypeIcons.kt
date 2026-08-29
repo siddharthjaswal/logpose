@@ -10,10 +10,15 @@ import javax.swing.Icon
  * The per-kind glyph shown in the timeline's row gutter and the detail header — a single source of
  * the type, replacing the doubled type text (a kind label plus a truncated state pill).
  *
- * Each SVG ships with its type hue baked in (the same hue as that kind's TYPE filter chip), so
- * there is no runtime tinting to fail. Loading is wrapped so a missing/unparseable icon degrades
- * to an empty slot rather than taking down the whole tool window — this is built at row-render
- * time, on the EDT, where a throw would blank the panel.
+ * Each SVG ships with its type hue baked in (the same hue as that kind's TYPE filter chip), so the
+ * common path needs no runtime tinting. Two callers do re-flood a glyph through `SrcAtop` — the
+ * narrow filter bar's icon-only TYPE chip, which paints the glyph in the chip's own text colour,
+ * and a failed HTTP lane in the waterfall, which paints it in `danger` — and both cache the result
+ * on colour and device scale, so a repaint never re-renders an icon.
+ *
+ * Loading is wrapped so a missing/unparseable icon degrades to an empty slot rather than taking
+ * down the whole tool window — this is built at row-render time, on the EDT, where a throw would
+ * blank the panel.
  */
 object TypeIcons {
 

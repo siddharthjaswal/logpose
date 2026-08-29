@@ -226,27 +226,23 @@ class JsonTreePanel(
     /**
      * Adds a "Headers ▾/▸" show-hide toggle to this card's header. Configured once; the
      * detail view rebuilds the rendered JSON with or without the headers node on toggle.
+     *
+     * A [LinkLabel], like the disclosure toggles in the mock editor: it used to be a hand-rolled
+     * accent label with a hand cursor and no rollover at all, which is exactly the pattern the
+     * component exists to absorb. The open/closed state is carried by the ▾/▸ glyph, so nothing is
+     * lost by the link being accent in both states — and the hover underline is gained.
      */
     fun setHeadersToggle(initiallyOn: Boolean, onToggle: (Boolean) -> Unit) {
         if (headersToggleAdded) return
         headersToggleAdded = true
         var on = initiallyOn
-        val chip = javax.swing.JLabel().apply {
-            font = JBUI.Fonts.label(11f).asBold()
+        val chip = LinkLabel().apply {
             border = JBUI.Borders.empty(2, 8)
-            cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
             toolTipText = "Show / hide headers"
         }
-        fun render() {
-            chip.text = if (on) "Headers ▾" else "Headers ▸"
-            chip.foreground = if (on) Theme.accent else Theme.textDim
-        }
+        fun render() { chip.text = if (on) "Headers ▾" else "Headers ▸" }
         render()
-        chip.addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mouseClicked(e: java.awt.event.MouseEvent) {
-                on = !on; render(); onToggle(on)
-            }
-        })
+        chip.onClick = { on = !on; render(); onToggle(on) }
         togglesHolder.add(chip)
         togglesHolder.add(javax.swing.Box.createHorizontalStrut(JBUI.scale(8)))
         togglesHolder.revalidate()

@@ -19,7 +19,7 @@ import javax.swing.ListSelectionModel
 import javax.swing.table.AbstractTableModel
 
 /**
- * The project's correlation vocabulary: the keys that turn `Show waterfall d107086f` into
+ * The project's correlation vocabulary: the keys that turn `Show waterfall — trace d107086f` into
  * `Show waterfall — order_id 21053953` (PRD §4.1).
  *
  * Two rules give this dialog its shape:

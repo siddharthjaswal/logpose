@@ -113,6 +113,52 @@ IDE's never propagates, and an HTTP row joins a trace only when the client was b
   `Show waterfall d107086f`, which names a hash a human has never seen; beside an
   `order_id 21053953` item it has to be obvious which of the two you're picking.
 
+### Changed (visual) — one axis owns hue
+The tool window got its first systematic visual pass, against an external design spec written in
+response to `docs/design-handoff.md`. The problem it solves: amber used to mean PUT, 4xx, db,
+warning, timeout *and* pending-sync, so a single row could show three different ambers meaning
+three different things.
+
+- **Kind keeps its 7 hues; nothing else gets one.** A hue may now appear in exactly four places —
+  the row gutter glyph, the TYPE filter chip, the detail-header kind pill, and waterfall lane
+  marks. **Status carries only semantics**: 2xx and 3xx are neutral (success is the default; it
+  doesn't need green), amber means warning, red means failure, everywhere. **Method carries no
+  colour at all** — reads render dim-regular, writes bold-primary, so safety is encoded by weight
+  instead of five hues. Seven hues left the system; one (`ok`) stayed, restricted to the capture
+  dot and the mock sync dot, which report device state rather than an event's attributes.
+- **Anything LogPose itself caused is the only solid-accent fill in a row.** `MOCK`, `INJ` and
+  `MERGE` are solid accent with white text; selection stays a 15% tint, so intervention and
+  selection can never blur. `DUP ×N` went outlined — filled means a fact about the response,
+  outlined means advice about it.
+- **Rows reclaimed 46–92px each.** FCM and generic rows no longer reserve empty method and status
+  columns to align with a grid only HTTP uses; they start at the shared content edge, and the
+  generic fact column widened to 120px. The time column is identical across all three kinds, so
+  timestamps still line up.
+- **The hover affordances became real buttons.** `⧉ cURL` and `⇉ flow` paint as bordered buttons
+  and, on the selected row, stay visible instead of hiding until you happen to hover. Paint and
+  hit-testing now derive from one geometry class — the old hand-tuned pixel bands were subtly
+  wrong, with the flow band running into the row's right inset.
+- **The filter bar earns its space.** Search, the 7 type chips and the count stay; method, status,
+  hide-noise and duplicates moved into a **Filters** popover with a badge. Every active choice
+  echoes as a removable chip on a second row that exists only while filters are on — which is
+  also where the two previously-silent mode switches finally explain themselves (*"status filter →
+  showing HTTP only"*, *"db hidden by default"*). Below ~440px the type chips become glyphs.
+- **"Filtered to nothing" is its own state.** Showing the setup guide to someone with 218 captured
+  events was telling them to install a tool they were already using. It now names the count, the
+  mechanism actually narrowing the list, and offers a loosener chosen by *measuring* which filter
+  would reveal the most events.
+- **The waterfall got its first design pass**: axis labels moved below the canvas, durations
+  right-align in a fixed column instead of trailing each bar (removing a text measurement from
+  paint), lanes share the list's selection model, and open spans pulse on a smooth 1.6s ease that
+  only runs while a waterfall with in-flight work is actually on screen. It also fixed a real bug —
+  span bars were painting at 27% alpha, not the intended 70%.
+- **Two components got names**: `LinkLabel` and `IconButton` replace 7 and 5 hand-rolled copies.
+  Chips and switches gained the hover states they never had; the switch gained a disabled state.
+
+Known contrast shortfalls, all inherited from spec-pinned token values and reported upstream:
+white-on-accent (the MOCK/INJ pills) is 4.28:1 in both themes, and `textDim` clears 4.5:1 on the
+window background but not on `bg2` (4.37) or `rowHover` (4.17).
+
 ### Notes and caveats
 - A key groups **within the current capture** — there is no cross-session correlation, and a value
   that scrolled out of the buffer is gone.

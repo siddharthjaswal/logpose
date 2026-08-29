@@ -1,9 +1,19 @@
 # Design Handoff — LogPose
 
-**For:** Claude Design · **From:** Sid · **Version described:** plugin 1.9.0 / library v1.7.1 · **Date:** 2026-08-29
+**For:** Claude Design · **From:** Sid · **Version described:** the pre-redesign baseline
+(plugin 1.8.0 / library v1.7.0) · **Date:** 2026-08-29
+
+> **Superseded — keep as the historical input brief.** This was the brief that *commissioned* the
+> visual redesign, so it describes the palette and layout as they stood before it. The redesign
+> answering it (`design_handoff_logpose_redesign`) shipped in 1.9.0 and changed much of §3 and §4:
+> the method and status palettes are deleted, kind hue is restricted to four sites, the timeline
+> rows dropped their empty columns, and the filter bar moved method/status into a popover. Read
+> §7 (the problems) as the record of what was asked for; read the current code, not §3, for
+> today's values.
 
 This is a redesign brief. It documents **every element and every feature** of the LogPose tool
-window as built, with the exact values in the code, and ends with the problems worth solving.
+window as it stood before the redesign, with the exact values then in the code, and ends with the
+problems worth solving.
 Treat the values as the current baseline, not as constraints — except where §2 marks them as
 platform limits, which are real.
 

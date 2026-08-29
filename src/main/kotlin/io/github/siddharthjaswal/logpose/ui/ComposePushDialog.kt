@@ -19,12 +19,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import java.awt.BorderLayout
 import java.awt.Component
-import java.awt.Cursor
 import java.awt.Dimension
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
-import javax.swing.Box
-import javax.swing.BoxLayout
 import javax.swing.JComponent
 import javax.swing.JPanel
 
@@ -147,14 +142,6 @@ class ComposePushDialog(
         foreground = Theme.textMuted
         font = JBUI.Fonts.label(11f)
         border = JBUI.Borders.empty(0, 106, 4, 0)
-    }
-
-    @Suppress("unused")
-    private fun hbox(vararg comps: Component) = JPanel().apply {
-        isOpaque = false
-        layout = BoxLayout(this, BoxLayout.X_AXIS)
-        comps.forEach { add(it) }
-        add(Box.createHorizontalGlue())
     }
 
     companion object {

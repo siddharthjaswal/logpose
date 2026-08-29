@@ -35,6 +35,8 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
     /** Opens the trace waterfall for the flow this push belongs to. */
     var onOpenTrace: (String) -> Unit = {}
 
+    /** The FCM hue, stated once in the header — the same glyph this event's row gutter carries. */
+    private val typeIcon = JBLabel(TypeIcons.forKind(Envelope.KIND_FCM))
     private val kindPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
     private val eventLabel = JBLabel().apply {
         foreground = Theme.text; font = JBUI.Fonts.label(13f).asBold()
@@ -73,7 +75,10 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
         background = Theme.bg0
         border = JBUI.Borders.empty(8)
 
-        overview.add(row(hbox(kindPill, Box.createHorizontalStrut(JBUI.scale(8)), eventLabel), fill = false))
+        overview.add(row(hbox(
+            typeIcon, Box.createHorizontalStrut(JBUI.scale(6)),
+            kindPill, Box.createHorizontalStrut(JBUI.scale(8)), eventLabel,
+        ), fill = false))
         overview.add(vGap(6))
         overview.add(row(injectedBanner, fill = false))
         overview.add(vGap(6))
@@ -154,7 +159,7 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
     /**
      * TOKEN / NOTIF / DATA — a label, not a severity. All three render neutral (the same pill the
      * timeline row shows), because which of the three a push is says nothing about how much it
-     * matters; the FCM hue is stated once, by the header glyph.
+     * matters; the FCM hue is stated once, by the [typeIcon] glyph beside this pill.
      */
     private fun kindOf(msg: FcmMessage): String = when {
         msg.event == "token" -> "TOKEN"

@@ -76,9 +76,10 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
 - **FCM in the same timeline** — Firebase pushes and token refreshes appear inline with HTTP
   traffic, so you can read push → API call → UI as one story. Notification, metadata and data
   payload are all inspectable.
-- **Modern "Studio" tool window** — a master/detail view with color-coded method/status
-  pill badges, a hero **Overview** card (status, URL, duration/size/started/host/id stat
-  chips), and side-by-side **Request** / **Response** cards.
+- **Modern "Studio" tool window** — a master/detail view where one axis owns hue: a per-kind
+  row glyph, a semantic status pill (2xx/3xx neutral, 4xx amber, 5xx red), a method label
+  weighted rather than colored, a hero **Overview** card (status, URL, duration/size/started/
+  host/id stat chips), and side-by-side **Request** / **Response** cards.
 - **Duplicate detection** — repeated calls in a burst get a `DUP ×N` tag; overlapping
   non-idempotent calls (likely double-submits) are flagged in red.
 - **Copy the timeline** — multi-select rows (`⇧↑/↓`) and copy the call sequence as plain
