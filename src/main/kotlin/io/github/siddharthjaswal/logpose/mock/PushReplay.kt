@@ -48,11 +48,23 @@ object PushReplay {
      * Wraps [message] in the command the device receives. The trace is **always** fresh (PRD
      * FR-A4): a replay starts its own flow, so grouping it with the original push's trace would
      * merge two runs of the same journey into one.
+     *
+     * The injection id and the message id are deliberately **one value** (a message with no id of
+     * its own is stamped with [id]). The device emits the injected row under the message id and
+     * acks under the injection id, and the app's own messaging service re-logs the same push under
+     * its message id moments later — so any daylight between the two ids means an injected push
+     * shows up twice, the second time unmarked (correlation PRD §1a).
      */
-    fun inject(message: PushMessage, id: String = newId(), traceId: String = newTraceId()): PushInject =
-        PushInject(id = id, traceId = traceId, message = message)
+    fun inject(
+        message: PushMessage,
+        id: String = message.messageId?.takeIf { it.isNotBlank() } ?: newId(),
+        traceId: String = newTraceId(),
+    ): PushInject = PushInject(id = id, traceId = traceId, message = message.copy(messageId = id))
 
-    /** Envelope id for the injected row — short, like the ids the device generates. */
+    /**
+     * One id for an injection: the message id, the injected row's envelope id and the ack's
+     * correlation id are all this value. Short, like the ids the device generates.
+     */
     fun newId(): String = "inj-" + UUID.randomUUID().toString().substring(0, 8)
 
     fun newTraceId(): String = "trc-" + UUID.randomUUID().toString().substring(0, 8)

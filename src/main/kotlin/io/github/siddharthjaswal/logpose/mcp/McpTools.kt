@@ -1,7 +1,14 @@
 package io.github.siddharthjaswal.logpose.mcp
 
+import io.github.siddharthjaswal.logpose.analysis.Correlation
+import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
+import io.github.siddharthjaswal.logpose.analysis.CorrelationKeys
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.FindQuery
+import io.github.siddharthjaswal.logpose.analysis.Groupings
+import io.github.siddharthjaswal.logpose.analysis.KeyValue
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
+import io.github.siddharthjaswal.logpose.analysis.Suggestion
 import io.github.siddharthjaswal.logpose.mock.DeviceCapability
 import io.github.siddharthjaswal.logpose.mock.DeviceFeature
 import io.github.siddharthjaswal.logpose.mock.PushReplay
@@ -190,6 +197,37 @@ object McpTools {
     }
 
     /**
+     * The project's correlation vocabulary and the cache in front of it — how an agent groups a
+     * flow by the id a human knows (`order_id 21053953`) instead of a trace the app may never
+     * have propagated.
+     *
+     * Everything here is a **read**: what the user configured, what one event carries, and one
+     * event's searchable haystack. The decisions — which key wins for a row, what a too-short
+     * value means, how a bare paste is labelled — deliberately stay in this file, expressed
+     * against [Correlation], so an agent and the tool window apply the very same rules.
+     *
+     * [offThread] puts the threading contract in the type. Every read below scans a payload on a
+     * cache miss, and these tools are called from the MCP transport's IO thread, so the tools do
+     * all of their work inside it. Implementations MUST run it exactly once.
+     */
+    interface Correlations {
+        /** The configured keys, in the order the user configured them. */
+        fun keys(): List<CorrelationKey>
+
+        /** One event's searchable text — fed to [Correlation.group] so grouping never rescans. */
+        fun textOf(event: LogEvent): String
+
+        /** Every configured key this event carries, matchable or not (see [KeyValue]). */
+        fun valuesOf(event: LogEvent): List<KeyValue>
+
+        /** The configured key holding [value], for labelling a bare paste; null when none does. */
+        fun keyLabelFor(events: List<LogEvent>, value: String): String?
+
+        /** Runs [work] where a payload scan is allowed — a pooled thread, never the IO thread. */
+        fun offThread(work: () -> Unit)
+    }
+
+    /**
      * The capture's "tell me when" side, injected so this file stays testable without a store or a
      * clock. Implemented over [EventStore.addWaiter].
      */
@@ -244,6 +282,50 @@ object McpTools {
                     "triggered. Use it to answer 'what led to this?'.",
             ) {
                 put("trace_id", stringProp("Trace id.", required = true))
+            },
+        )
+        add(
+            tool(
+                "get_related",
+                "Everything carrying one business id — 'order_id 21053953' — as a timeline. This " +
+                    "is usually a better get_trace: a trace groups only what the app itself " +
+                    "propagated, while this matches the VALUE anywhere in an event (url and path, " +
+                    "request/response body, FCM data, db args, event sections), so it reaches the " +
+                    "GET /order/21053953/ that carries no trace at all, and spans the several " +
+                    "traces one flow usually fragments into. Pass key + value, or value alone (an " +
+                    "id pasted from a ticket or a backend log), or event_id to group by what that " +
+                    "row itself carries.",
+            ) {
+                put("key", stringProp(
+                    "A configured correlation key, e.g. 'order_id' — list_correlation_keys shows " +
+                        "them. Omit to match the value alone; the key is a label and a safety " +
+                        "rule, never part of the matching.",
+                ))
+                put("value", stringProp(
+                    "The id to group by, e.g. '21053953'. Accepts a pasted 'order_id=21053953' " +
+                        "too. Matching is delimiter-bounded, so '2105' never matches '21053953'.",
+                ))
+                put("event_id", stringProp(
+                    "Group by the key values this event carries (id from list_events). With " +
+                        "'key', picks which of its keys to group by.",
+                ))
+                put("limit", intProp(
+                    "Max events to return, newest last (default 200). 'count' always reports the " +
+                        "whole group.",
+                ))
+            },
+        )
+        add(
+            tool(
+                "list_correlation_keys",
+                "This project's correlation vocabulary: the keys a human configured (order_id, " +
+                    "trip_id) with the values seen most recently, plus id-ish keys found in the " +
+                    "capture that nobody has configured. The two lists are separate on purpose — " +
+                    "suggestions are INERT: this tool enables nothing, nothing groups by a " +
+                    "suggestion, and only a person ticks one. get_related needs no configured key " +
+                    "anyway; one only supplies the label and the length rule.",
+            ) {
+                put("limit", intProp("Max suggestions to return (default 12)."))
             },
         )
         add(
@@ -556,7 +638,8 @@ object McpTools {
 
     /**
      * Tools whose answer can arrive later than the call: a wait that only ends when the app does
-     * something, a push whose outcome the device reports, a scenario read off disk.
+     * something, a push whose outcome the device reports, a scenario read off disk, a correlation
+     * scan that must not happen on the transport's IO thread.
      *
      * They are a separate entry point rather than a mode of [call] so the fourteen synchronous
      * tools keep returning a value on the calling thread exactly as before — the transport picks
@@ -564,6 +647,7 @@ object McpTools {
      */
     private val ASYNC_TOOLS = setOf(
         "await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
+        "get_related", "list_correlation_keys",
     )
 
     fun isAsync(name: String): Boolean = name in ASYNC_TOOLS
@@ -582,6 +666,7 @@ object McpTools {
         push: Push? = null,
         waits: Waits? = null,
         scenarios: Scenarios? = null,
+        correlations: Correlations? = null,
         captureRunning: () -> Boolean = { true },
         now: () -> Long = { System.currentTimeMillis() },
         onResult: (JsonElement) -> Unit,
@@ -603,6 +688,12 @@ object McpTools {
                 if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else loadScenario(args, scenarios, answer)
             "save_scenario" ->
                 if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else saveScenario(args, scenarios, answer)
+            "get_related" ->
+                if (correlations == null) fail(CORRELATION_UNAVAILABLE)
+                else getRelated(args, events, correlations, answer)
+            "list_correlation_keys" ->
+                if (correlations == null) fail(CORRELATION_UNAVAILABLE)
+                else listCorrelationKeys(args, events, correlations, answer)
             else -> fail("Unknown tool '$name'")
         }
     }
@@ -614,6 +705,8 @@ object McpTools {
     private const val SCENARIOS_UNAVAILABLE =
         "Scenarios aren't available — open the LogPose tool window for a project with a " +
             "directory on disk (scenarios live in .logpose/scenarios)."
+    private const val CORRELATION_UNAVAILABLE =
+        "Correlation isn't available — open the LogPose tool window for this project."
 
     // ---- tools ---------------------------------------------------------------------------
 
@@ -707,9 +800,36 @@ object McpTools {
         return buildJsonObject {
             put("trace_id", traceId)
             put("count", inTrace.size)
-            if (inTrace.isEmpty()) put("note", "No events carry this trace id.")
+            // A trace that holds nothing, or holds only the row it was read off, is the normal
+            // shape of a flow the app never propagated a trace through — not a rare edge. Saying
+            // "0 events" and stopping sends an agent looking for a bug in the capture instead of
+            // at the grouping that does work on this app.
+            if (inTrace.isEmpty() || inTrace.size == 1) {
+                put("note", traceGapNote(inTrace.firstOrNull()))
+            }
             put("events", buildJsonArray { inTrace.forEach { add(brief(it)) } })
         }
+    }
+
+    /**
+     * What to do when a trace groups nothing. This is the failure mode the correlation work exists
+     * for: the app mints its own trace when it handles a push, and HTTP rows join a trace only via
+     * an OkHttp request tag, so a flow routinely spans several traces plus rows carrying none —
+     * while the `order_id` in all of them correlates the lot.
+     */
+    private fun traceGapNote(only: LogEvent?): String {
+        val lead = if (only == null) {
+            "No event carries this trace id."
+        } else {
+            "Only this one event carries this trace id, so the trace is not the flow."
+        }
+        val handle = only?.let { "event_id='${it.id}'" } ?: "value='<the id you know>'"
+        return "$lead A trace groups only what the app itself propagated: an app that starts its " +
+            "own trace when handling a push never joins the IDE's, and HTTP rows join a trace " +
+            "only when the client is built with LogPose.traceCalls(...). The business key is " +
+            "usually the better grouping — get_related($handle) matches an id by VALUE anywhere " +
+            "in an event, so it spans traces and reaches rows with no trace at all. " +
+            "list_correlation_keys shows which keys this capture supports."
     }
 
     /**
@@ -1456,11 +1576,9 @@ object McpTools {
             ))
         }
 
-        val id = PushReplay.newId()
         val traceId = args.str("trace_id")?.takeIf { it.isNotBlank() } ?: PushReplay.newTraceId()
         val base = seed?.let { PushReplay.toMessage(it, PushReplay.newId(), now()) } ?: PushMessage()
         val message = base.copy(
-            messageId = base.messageId?.takeIf { it.isNotBlank() } ?: PushReplay.newId(),
             sentTimeMillis = now(),
             from = args.str("from") ?: base.from,
             collapseKey = args.str("collapse_key") ?: base.collapseKey,
@@ -1468,6 +1586,13 @@ object McpTools {
             notificationBody = args.str("notification_body") ?: base.notificationBody,
             data = data ?: base.data,
         )
+        // One id for the injection, the message and the FCM row's envelope — minted by
+        // [PushReplay.inject] rather than here, so this path can't drift from the tool window's
+        // "Re-send this push". A separately generated message id was exactly the bug: the id
+        // reported back named the injection while the timeline row carried the message id, and
+        // the app's own re-log of the push then landed on a second, unmarked row.
+        val injection = PushReplay.inject(message, traceId = traceId)
+        val id = injection.id
 
         // Nothing can be delivered to a device that hasn't announced itself or whose library
         // predates injection — say so as loudly as create_mock does, rather than reporting a send
@@ -1484,7 +1609,7 @@ object McpTools {
         }
 
         val await = args.bool("await") ?: false
-        push.inject(PushInject(id = id, traceId = traceId, message = message)) { ack ->
+        push.inject(injection) { ack ->
             if (!await) return@inject
             answer(buildJsonObject {
                 put("sent", true)
@@ -1525,7 +1650,8 @@ object McpTools {
                 put("note", "Sent to the device; the delivery outcome was not awaited. Call with " +
                     "await=true to have the device report handler | service | none, or " +
                     "await_event(trace_id='$traceId') to catch what the push triggered. The push " +
-                    "appears on the timeline with an INJ pill.")
+                    "appears on the timeline with an INJ pill, as one row under this same id — " +
+                    "get_event(id='$id') reads it.")
             })
         }
     }
@@ -1620,6 +1746,452 @@ object McpTools {
         "'$name' isn't a usable scenario name. Use lowercase letters, digits, '-' and '_', at " +
             "most ${ScenarioStore.MAX_NAME} characters — the name is the filename, so nothing " +
             "that could address another directory is accepted."
+
+    // ---- correlation ---------------------------------------------------------------------------
+
+    /** Suggestions returned when a caller states no limit — the keys dialog's own default. */
+    private const val DEFAULT_SUGGESTIONS = 12
+
+    /** Events one `get_related` returns. `count` always reports the whole group regardless. */
+    private const val DEFAULT_RELATED_LIMIT = 200
+
+    /**
+     * The configured vocabulary and what the capture suggests adding to it.
+     *
+     * The two lists are separate keys in the response, and never merged, because they mean
+     * opposite things: a configured key groups, a suggestion is inert data a human has not looked
+     * at yet. Nothing here writes — this tool cannot enable a key, and an agent reading it should
+     * not pretend otherwise (PRD §4.1: suggestions are a discovery aid the human confirms).
+     */
+    private fun listCorrelationKeys(
+        args: JsonObject,
+        events: List<LogEvent>,
+        correlations: Correlations,
+        answer: (JsonElement) -> Unit,
+    ) {
+        val limit = (args.int("limit") ?: DEFAULT_SUGGESTIONS).coerceIn(1, 50)
+        correlations.offThread {
+            answer(
+                runCatching { vocabulary(limit, events, correlations) }
+                    .getOrElse { failed("list_correlation_keys", it) },
+            )
+        }
+    }
+
+    private fun vocabulary(
+        limit: Int,
+        events: List<LogEvent>,
+        correlations: Correlations,
+    ): JsonElement {
+        val keys = correlations.keys()
+
+        // Values come off the cached extractions, in arrival order, so "seen most recently"
+        // costs a map lookup per event rather than a payload scan per key.
+        val evidence = LinkedHashMap<String, KeyEvidence>()
+        keys.forEach { evidence[CorrelationKeys.canonical(it.name)] = KeyEvidence() }
+        if (keys.isNotEmpty()) {
+            for (event in events) {
+                for (value in correlations.valuesOf(event)) {
+                    evidence[CorrelationKeys.canonical(value.key)]?.record(value)
+                }
+            }
+        }
+
+        // Ask for enough headroom that dropping the already-configured ones can't silently
+        // shorten the list a caller asked for.
+        val suggestions = Correlation.suggest(events, limit + keys.size)
+            .filterNot { CorrelationKeys.contains(keys, it.key) }
+            .take(limit)
+
+        return buildJsonObject {
+            put("configured_count", keys.size)
+            put("configured", buildJsonArray {
+                keys.forEach { key ->
+                    add(configuredKey(key, evidence[CorrelationKeys.canonical(key.name)]))
+                }
+            })
+            put("suggested_count", suggestions.size)
+            put("suggested", buildJsonArray { suggestions.forEach { add(suggested(it)) } })
+            put("note", vocabularyNote(keys, suggestions))
+        }
+    }
+
+    private fun configuredKey(key: CorrelationKey, seen: KeyEvidence?): JsonObject = buildJsonObject {
+        put("key", key.name)
+        put("enabled", key.enabled)
+        put("min_length", key.minLength)
+        put("allow_short_values", key.allowShortValues)
+        put("events_carrying", seen?.carrying ?: 0)
+        put("distinct_values", seen?.distinct?.size ?: 0)
+        seen?.latest?.let { put("latest_value", it) }
+        // Three ways a configured key can be present and still group nothing. Each is invisible
+        // from the numbers alone, and each sends an agent hunting for a bug that isn't there.
+        val note = when {
+            !key.enabled ->
+                "Disabled, so no row offers it and nothing is extracted for it. get_related(key=" +
+                    "'${key.name}', value=…) still groups — matching is by value, not by key."
+            seen == null || seen.carrying == 0 ->
+                "No event in this capture names this key. Either the app doesn't emit it, or it " +
+                    "is spelled differently — key matching is case- and snake/camel-insensitive, " +
+                    "but '${key.name}' and 'orderRef' are different names."
+            seen.latestMatchable == false ->
+                "The latest value ('${seen.latest}') is shorter than min_length ${key.minLength}, " +
+                    "so it is extracted but cannot group — a short, common value would group half " +
+                    "the capture. Tick \"short values\" for this key in the LogPose window to " +
+                    "accept that risk."
+            else -> null
+        }
+        note?.let { put("note", it) }
+    }
+
+    private fun suggested(suggestion: Suggestion): JsonObject = buildJsonObject {
+        put("key", suggestion.key)
+        // The evidence, so ranking is inspectable rather than a black box: how many events this
+        // key would reach in total, and how big the single biggest group is — which is what one
+        // get_related on its latest value would actually return.
+        put("events_grouped", suggestion.eventsGrouped)
+        put("largest_group", suggestion.largestGroup)
+        put("events_carrying", suggestion.eventsCarrying)
+        put("distinct_values", suggestion.distinctValues)
+        suggestion.latestValue?.let { put("latest_value", it) }
+    }
+
+    private fun vocabularyNote(keys: List<CorrelationKey>, suggestions: List<Suggestion>): String {
+        val inert = if (suggestions.isEmpty()) {
+            "Nothing in this capture looks like an unconfigured id key."
+        } else {
+            "'suggested' is INERT: those keys group nothing and this tool enabled none of them — " +
+                "a person ticks one in the LogPose window (filter bar ⋯ → Correlation keys…). You " +
+                "can group by one right now without configuring it: get_related(value=…) matches " +
+                "the value alone."
+        }
+        val configured = if (keys.isEmpty()) {
+            "No correlation key is configured for this project — LogPose ships none, because the " +
+                "vocabulary (order_id, trip_id) belongs to the app. "
+        } else {
+            "'configured' is the vocabulary a human set for this project; only those names label " +
+                "a grouping and carry a length rule. "
+        }
+        return configured + inert
+    }
+
+    /** One configured key's footprint in the capture, accumulated over the cached extractions. */
+    private class KeyEvidence {
+        val distinct = LinkedHashSet<String>()
+        var carrying = 0
+            private set
+        var latest: String? = null
+            private set
+        /** Whether the most recent value can group, or failed its key's length rule. */
+        var latestMatchable: Boolean? = null
+            private set
+
+        fun record(value: KeyValue) {
+            carrying++
+            latest = value.value
+            latestMatchable = value.matchable
+            if (distinct.size < Correlation.MAX_TRACKED_VALUES) distinct.add(value.value)
+        }
+    }
+
+    /**
+     * The grouped timeline for one business id — `get_trace`'s shape, grouped the way that
+     * actually works on an app that doesn't propagate traces.
+     *
+     * Three ways in, one answer: `key` + `value`, a bare `value` (the id pasted from a ticket),
+     * or an `event_id` whose own key values name the grouping. Every guard is [Correlation]'s,
+     * applied through [Correlation.parseFindQuery] and the configured key's own `minLength` /
+     * `allowShortValues`, so an agent and the "Find by value…" dialog refuse exactly the same
+     * inputs — a second implementation of the rule is how the two would drift apart.
+     */
+    private fun getRelated(
+        args: JsonObject,
+        events: List<LogEvent>,
+        correlations: Correlations,
+        answer: (JsonElement) -> Unit,
+    ) {
+        val keyArg = args.str("key")?.trim()?.takeIf { it.isNotEmpty() }
+        val valueArg = args.str("value")
+        val eventId = args.str("event_id")?.trim()?.takeIf { it.isNotEmpty() }
+        val limit = (args.int("limit") ?: DEFAULT_RELATED_LIMIT).coerceIn(1, 1_000)
+
+        if (valueArg == null && eventId == null) {
+            answer(errorObj(
+                "Provide 'value' (the id to group by, e.g. '21053953'), optionally with 'key' to " +
+                    "name it, or 'event_id' to group by the keys that row carries. " +
+                    "list_correlation_keys shows the configured keys and the values seen most " +
+                    "recently.",
+            ))
+            return
+        }
+
+        // The work happens on someone else's thread, so a failure there has to be turned back into
+        // this call's answer: an exception escaping the pool would leave an agent's request open
+        // until its client gave up, which is the one outcome this layer never allows.
+        correlations.offThread {
+            answer(
+                runCatching { relatedResult(keyArg, valueArg, eventId, limit, events, correlations) }
+                    .getOrElse { failed("get_related", it) },
+            )
+        }
+    }
+
+    private fun relatedResult(
+        keyArg: String?,
+        valueArg: String?,
+        eventId: String?,
+        limit: Int,
+        events: List<LogEvent>,
+        correlations: Correlations,
+    ): JsonElement {
+        val keys = correlations.keys()
+        val configured = keyArg?.let { name -> keys.firstOrNull { sameKey(it.name, name) } }
+        if (keyArg != null && configured == null) return unknownKey(keyArg, keys)
+
+        // event_id names a row and therefore its own keys, so it wins over a value that would only
+        // have been a guess at the same thing.
+        val resolved =
+            if (eventId != null) fromEvent(eventId, configured, keys, events, correlations)
+            else fromValue(valueArg!!, configured, keys, events, correlations)
+
+        return when (resolved) {
+            is Resolution.Failed -> resolved.result
+            is Resolution.Grouped -> groupResult(resolved, events, limit, correlations)
+        }
+    }
+
+    private fun failed(tool: String, error: Throwable): JsonElement =
+        errorObj("$tool failed: ${error.message ?: error::class.java.simpleName}")
+
+    /** What resolving `get_related`'s arguments produced: something to group, or the answer why not. */
+    private sealed interface Resolution {
+        data class Grouped(
+            val key: CorrelationKey?,
+            /** The label — a configured key's own spelling, a key that merely holds the value, or null. */
+            val label: String?,
+            val value: String,
+            /** Other matchable keys the originating event carried, when it came from one. */
+            val others: List<KeyValue> = emptyList(),
+        ) : Resolution
+
+        data class Failed(val result: JsonElement) : Resolution
+    }
+
+    /**
+     * `event_id` → the key to group by.
+     *
+     * When a row carries several configured keys the **first configured one wins** — the same
+     * precedence [Groupings.best] gives the row menu and the hover glyph, so an agent and a click
+     * open the same group. The others are not dropped: they come back in `other_keys` with the
+     * call that would group by each, because "which id is this flow about" is the caller's
+     * question, not ours.
+     */
+    private fun fromEvent(
+        eventId: String,
+        configured: CorrelationKey?,
+        keys: List<CorrelationKey>,
+        events: List<LogEvent>,
+        correlations: Correlations,
+    ): Resolution {
+        val event = events.firstOrNull { it.id == eventId }
+            ?: return Resolution.Failed(errorObj("No event with id '$eventId'."))
+        val carried = correlations.valuesOf(event)
+
+        if (configured != null) {
+            val held = carried.firstOrNull { sameKey(it.key, configured.name) }
+                ?: return Resolution.Failed(errorObj(
+                    "Event '$eventId' carries no '${configured.name}'. " + carries(carried) +
+                        " Omit 'key' to group by the first key it does carry.",
+                ))
+            if (!held.matchable) return Resolution.Failed(tooShort(configured.name, held.value, configured.minLength))
+            return Resolution.Grouped(
+                key = configured,
+                label = configured.name,
+                value = held.value,
+                others = carried.filter { it.matchable && !sameKey(it.key, configured.name) },
+            )
+        }
+
+        val matchable = carried.filter { it.matchable }
+        val best = matchable.firstOrNull()
+            ?: return Resolution.Failed(noKeyOnEvent(event, carried, keys))
+        val key = keys.firstOrNull { sameKey(it.name, best.key) }
+        return Resolution.Grouped(key, best.key, best.value, matchable.drop(1))
+    }
+
+    /**
+     * A pasted `value` → the key that labels it.
+     *
+     * Parsed twice on purpose. The first pass is permissive, only to read the shape of what was
+     * pasted (`21053953` vs `order_id=21053953`, quotes and whitespace stripped); that tells us
+     * *which* key's rule applies, and the second pass applies it. Deciding the length guard here
+     * instead would be the second implementation this exists to avoid.
+     */
+    private fun fromValue(
+        value: String,
+        configured: CorrelationKey?,
+        keys: List<CorrelationKey>,
+        events: List<LogEvent>,
+        correlations: Correlations,
+    ): Resolution {
+        val probe = Correlation.parseFindQuery(value, allowShortValues = true)
+        if (probe !is FindQuery.Ready) {
+            return Resolution.Failed(errorObj("Provide a non-empty 'value' to group by."))
+        }
+        // A configured 'key' argument wins over one typed into the value: it is the more explicit
+        // statement of the two, and it has already been checked against the vocabulary.
+        val rule = configured ?: probe.key?.let { name -> keys.firstOrNull { sameKey(it.name, name) } }
+        val query = Correlation.parseFindQuery(
+            value,
+            rule?.minLength ?: Correlation.DEFAULT_MIN_LENGTH,
+            rule?.allowShortValues ?: false,
+        )
+        return when (query) {
+            is FindQuery.Empty -> Resolution.Failed(errorObj("Provide a non-empty 'value' to group by."))
+            is FindQuery.TooShort -> Resolution.Failed(
+                tooShort(rule?.name ?: query.key, query.value, query.minLength),
+            )
+            is FindQuery.Ready -> Resolution.Grouped(
+                key = rule,
+                // A bare value is labelled by whichever configured key holds it somewhere in the
+                // capture, exactly as the dialog labels a paste; unlabelled it reads 'value <v>'.
+                label = rule?.name ?: query.key ?: correlations.keyLabelFor(events, query.value),
+                value = query.value,
+            )
+        }
+    }
+
+    /** Runs the grouping over the **cached** haystacks and shapes it like `get_trace`. */
+    private fun groupResult(
+        resolved: Resolution.Grouped,
+        events: List<LogEvent>,
+        limit: Int,
+        correlations: Correlations,
+    ): JsonElement {
+        val key = resolved.key
+        val group = if (key != null) {
+            Correlation.group(events, key, resolved.value, correlations::textOf)
+        } else {
+            Correlation.group(events, resolved.label, resolved.value, textOf = correlations::textOf)
+        }
+        val page = group.takeLast(limit)
+        val grouping = Groupings.forValue(resolved.value, resolved.label)
+
+        val notes = ArrayList<String>(3)
+        if (page.size < group.size) {
+            notes.add("Showing the ${page.size} most recent of ${group.size} events; raise 'limit' for more.")
+        }
+        when {
+            group.isEmpty() -> notes.add(
+                "No event carries this value. Matching is delimiter-bounded, so a value that only " +
+                    "appears as part of a longer id (2105 inside 21053953) is not a match, and " +
+                    "headers are deliberately outside the haystack. Check list_events(contains=…) " +
+                    "for the raw text, or clear_capture and re-run the flow if the id predates " +
+                    "this capture.",
+            )
+            group.size == 1 -> notes.add(
+                "Only one event carries this value, so there is no flow around it yet — the rest " +
+                    "may not have happened, or may name the id differently.",
+            )
+        }
+        if (resolved.label == null) {
+            notes.add(
+                "No configured key holds this value, so it is grouped by the value alone. That is " +
+                    "a label difference only: matching never used the key. list_correlation_keys " +
+                    "shows what this project has configured.",
+            )
+        }
+        if (resolved.others.isNotEmpty()) {
+            notes.add(
+                "That event also carries " + resolved.others.joinToString(", ") { "${it.key} ${it.value}" } +
+                    " — grouped by ${grouping.shortLabel} because configured keys take the order " +
+                    "the user set. get_related(key='${resolved.others.first().key}', value=" +
+                    "'${resolved.others.first().value}') groups by the other instead.",
+            )
+        }
+
+        return buildJsonObject {
+            put("grouped_by", grouping.shortLabel)
+            grouping.key?.let { put("key", it) }
+            put("value", resolved.value)
+            put("count", group.size)
+            if (page.size < group.size) put("returned", page.size)
+            if (resolved.others.isNotEmpty()) {
+                put("other_keys", buildJsonArray {
+                    resolved.others.forEach {
+                        add(buildJsonObject { put("key", it.key); put("value", it.value) })
+                    }
+                })
+            }
+            if (notes.isNotEmpty()) put("note", notes.joinToString(" "))
+            put("events", buildJsonArray { page.forEach { add(brief(it)) } })
+        }
+    }
+
+    /**
+     * The short-value refusal, as a result rather than an empty group.
+     *
+     * PRD §4.2.1 is explicit that a value below the floor must say so: the usual cause is a paste
+     * that clipped, and an empty timeline reads as "this never happened" — the most expensive
+     * wrong answer this tool could give.
+     */
+    private fun tooShort(key: String?, value: String, minLength: Int): JsonElement = buildJsonObject {
+        val grouping = Groupings.forValue(value, key)
+        put("grouped_by", grouping.shortLabel)
+        grouping.key?.let { put("key", it) }
+        put("value", value)
+        put("too_short", true)
+        put("min_length", minLength)
+        put("count", 0)
+        put("note", "TOO SHORT TO MATCH SAFELY — '$value' is under $minLength characters, so it " +
+            "was not matched at all rather than matched loosely: a short value appears inside " +
+            "unrelated ids and timestamps and would group half the capture. This is not an empty " +
+            "result. Use the full id, or " +
+            (key?.let { "tick \"short values\" for '$it'" } ?: "tick \"short values\" for the key that holds it") +
+            " in the LogPose window (filter bar ⋯ → Correlation keys…) to accept the risk.")
+        put("events", buildJsonArray {})
+    }
+
+    private fun unknownKey(name: String, keys: List<CorrelationKey>): JsonElement = errorObj(
+        "'$name' is not a configured correlation key. " +
+            (if (keys.isEmpty()) {
+                "This project has none configured — LogPose ships no defaults, since the " +
+                    "vocabulary belongs to the app."
+            } else {
+                "Configured: " + keys.joinToString(", ") { it.name } + "."
+            }) +
+            " Omit 'key' to group by the value alone (matching never uses the key), or add the " +
+            "key in the LogPose window (filter bar ⋯ → Correlation keys…); list_correlation_keys " +
+            "also reports what the capture suggests.",
+    )
+
+    private fun noKeyOnEvent(
+        event: LogEvent,
+        carried: List<KeyValue>,
+        keys: List<CorrelationKey>,
+    ): JsonElement = errorObj(
+        "Event '${event.id}' carries no groupable correlation key. " +
+            (if (carried.isEmpty()) "" else carries(carried) + " ") +
+            (if (keys.isEmpty()) {
+                "No key is configured for this project — list_correlation_keys reports what the " +
+                    "capture suggests, and a person ticks one in the LogPose window. "
+            } else {
+                "Configured: " + keys.joinToString(", ") { it.name } + ". "
+            }) +
+            "Pass 'value' with an id you know from the payload instead" +
+            (event.traceId?.let { ", or get_trace(trace_id='$it') for this row's trace" } ?: "") +
+            ".",
+    )
+
+    private fun carries(carried: List<KeyValue>): String =
+        if (carried.isEmpty()) "It carries no configured key at all."
+        else "It carries: " + carried.joinToString(", ") {
+            "${it.key} ${it.value}" + if (it.matchable) "" else " (too short to match)"
+        } + "."
+
+    /** `order_id`, `orderId` and `ORDER_ID` are one key — [CorrelationKeys]' rule, not a new one. */
+    private fun sameKey(a: String, b: String): Boolean =
+        CorrelationKeys.canonical(a) == CorrelationKeys.canonical(b)
 
     // ---- shared shaping -------------------------------------------------------------------
 

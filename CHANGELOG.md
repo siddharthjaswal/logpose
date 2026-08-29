@@ -6,6 +6,128 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-08-29
+
+Plugin **1.9.0**, library **v1.7.1**. Group a flow by the id a human actually knows —
+`order_id 21053953` — instead of a trace hash the app may never have propagated. See
+[`docs/correlation-prd.md`](docs/correlation-prd.md) for the whole plan.
+
+This came out of dogfooding 1.8.0 on a real app, and the evidence is worth stating because it's
+what the design is built on. One re-sent push, one order: searching the capture for `21053953`
+returned **5 events across 4 traces — one of them null**, including the
+`GET /app/v4/79096/order/21053953/` that carried no trace at all. Traces fragment there for
+structural reasons, not sloppy ones: the app mints its own trace when it handles a push, so the
+IDE's never propagates, and an HTTP row joins a trace only when the client was built with
+`LogPose.traceCalls(...)`. The waterfall for that flow therefore showed *one event*. The
+`order_id` sitting in those payloads grouped all five, and needed nothing from the app.
+
+### Added (plugin) — correlation keys
+- **Tell LogPose the ids you think in.** Filter bar `⋯` → **Correlation keys…** (also linked from
+  the waterfall header) takes a per-project list of key names — `order_id`, `trip_id` — with
+  enable/disable and a per-key "short values" opt-in. The dialog opens **seeded with suggestions**
+  the first time: id-ish names actually present in the capture, ranked by how many events each
+  would group and shown with their evidence (`groups 5 events · largest 5 · latest 21053953`);
+  **Suggest from capture** re-offers them later, always unticked.
+  Suggestions are **inert** — nothing groups until a human ticks one — because silent
+  auto-grouping is the failure this design exists to avoid. LogPose ships **no** built-in keys:
+  `order_id` is your app's vocabulary, not LogPose's.
+- **The key names the value; the value does the matching.** That sentence is the whole mechanism,
+  and it's why this reaches what a trace can't:
+  - **Extract** — the configured key is looked up in an event's payload by name, recursively,
+    case- and snake/camel-insensitively (`order_id` = `orderId` = `ORDER_ID`), **including JSON
+    that arrives nested inside a string value**. Real payloads hide the meaningful JSON in a
+    string (an FCM `data["body"]`, an HTTP body), and a shallow scan finds nothing on exactly the
+    payloads this exists for.
+  - **Match** — from then on the *value* does the work: an event joins the group if `21053953`
+    appears anywhere in its searchable text (url and path, request/response bodies, FCM data, db
+    sql and args, worker fields, event section bodies). That's what catches
+    `/app/v4/79096/order/21053953/`, where the id is a bare path segment with no key near it.
+  - **Guard** — a value must be ≥ 4 characters and every match is **delimiter-bounded**, so
+    `2105` never matches `21053953` and `21053953` never matches `210539531`. Shorter values are
+    still extracted and shown, but they don't group unless you tick "short" for that key and
+    accept the over-grouping risk.
+  Request and response **headers are deliberately excluded** from the haystack: folding in auth
+  tokens, cookies and trace headers would add matches on values you never see on the row.
+- **Entry points read as the key, not a hash.** The row context menu leads with
+  `Show waterfall — order_id 21053953` and `Filter by order_id 21053953` (one pair per configured
+  key the row carries, in the order you configured them), with the trace actions below and now
+  explicitly labelled `Show waterfall — trace d107086f`. The hover band that reveals `⧉ cURL` on
+  an HTTP row also reveals a **`⇉ flow`** glyph on any row with a key or a trace — one click opens
+  the best grouping available, key first. Filtering by a key shows a removable chip in the filter
+  bar, the way filtering by trace has always read, except it can say what it grouped by.
+- **The waterfall groups by more than a trace.** Its header states the grouping
+  (`order_id 21053953 · 7 events · 4.2s`) and, when the originating row belongs to several, offers
+  a segmented switcher (`order_id` / `trip_id` / `trace`) so widening or narrowing doesn't mean
+  going back to the list. An empty group now says *"no events carry that value"* rather than
+  blaming the capture buffer.
+- **Find by value…** (filter bar `⋯`, and the waterfall header) needs no row at all — the common
+  case is arriving with an id from a ticket, a backend log or a QA report. Paste `21053953` or
+  `order_id=21053953`; it trims whitespace and strips surrounding quotes (ids arrive copied out of
+  JSON as often as not), labels a bare value with the configured key that holds it, and **states
+  the count before you commit** (`7 events · order_id 21053953`) so a typo is obvious rather than
+  an empty screen. A too-short value says *"too short to match safely"* out loud instead of
+  quietly returning nothing.
+- **Correlation never runs on a paint.** Both scans are O(payload), so each event's haystack and
+  key values are computed **once, on the logcat reader thread as the event arrives**, and cached
+  (bounded by entry count and total characters, invalidated when the key set changes or an event
+  updates in place). The renderer uses a cache-only read: a row whose values aren't extracted yet
+  simply doesn't paint the glyph. One frame's worth of missing affordance is the right price for
+  never scanning a body inside `getListCellRendererComponent` — the repaint-cost lesson from 1.8.0.
+- The header now shows the **plugin version, and the device library's** once a device has said
+  hello. Version skew between the two halves is what actually bites, so both are on screen.
+
+### Added (MCP — 2 new tools, 21 total)
+- **`get_related`** — everything carrying one business id, as a timeline in `get_trace`'s shape,
+  plus a `grouped_by` field naming the key. Takes `key` + `value`, or `value` alone (the pasted-id
+  case), or `event_id` to group by what that row itself carries. It reads the **same cache and the
+  same vocabulary the tool window uses**, so an agent's `get_related` and a click on the row's
+  `⇉ flow` glyph open an identical set.
+- **`list_correlation_keys`** — the configured keys with their most recent values, plus
+  suggestions from the capture, kept in two separate lists on purpose: the tool enables nothing
+  and nothing groups by a suggestion.
+- **`get_trace` now explains an empty result** instead of stating it. A trace that holds nothing —
+  or holds only the row it was read off — is the *normal* shape of a flow the app never propagated
+  a trace through, so the note names the two structural reasons and points at
+  `get_related(event_id=…)`, which is what the agent should have called.
+
+### Added (library — v1.7.1)
+- **An injected push is one row again.** Re-sending a push used to produce two: LogPose's own
+  `injected: true` row, and 24 ms later an unmarked twin from the app's `FirebaseMessagingService`
+  re-logging the same message through `logFcmMessage`. The library now emits the injected row
+  under the **message id** as its envelope id (the same trick worker events use to keep one
+  updating row) and remembers a bounded set of 32 injected message ids, so the app's re-log lands
+  on that row and **keeps `injected = true`**. The IDE cooperates by sending the injection id, the
+  ack correlation id and `PushMessage.messageId` as **one value** — any daylight between them is
+  what let the twin exist. No wire change: the fix is entirely in how ids are chosen. The no-op is
+  untouched (no public API change).
+
+### Changed
+- **The collapsed injected row carries the app's trace, not the IDE's.** The app's re-log arrives
+  second and updates the row, bringing whatever trace the app was in — usually its own, sometimes
+  none — so the `trc-…` that `inject_fcm` reports is no longer guaranteed to be the trace *on that
+  row* a moment later. This is the honest outcome (the row now reflects the app's own handling of
+  the push), and it is exactly why `get_related` is the better tool here: the push, the
+  `GET /order/<id>/` and the `PUT /order/accept/` group by `order_id` whatever the app did with
+  traces. `inject_fcm`'s returned trace still works for events the app emits inside the injection.
+- **Trace menu items say "trace" out loud** — `Show waterfall — trace d107086f`. They used to read
+  `Show waterfall d107086f`, which names a hash a human has never seen; beside an
+  `order_id 21053953` item it has to be obvious which of the two you're picking.
+
+### Notes and caveats
+- A key groups **within the current capture** — there is no cross-session correlation, and a value
+  that scrolled out of the buffer is gone.
+- An id that is constant for the whole capture (a device or install id) ranks high in suggestions
+  by design — it *would* group a lot. The human tick is the filter; that's the role suggestions
+  are given rather than a shortcoming of the ranking.
+- Grouping ignores the key when matching, so a value that legitimately appears under two different
+  keys will group both. The ≥4-character floor and the delimiter bound are the whole defence, and
+  they are deliberately blunt.
+
+### Deferred
+- README screenshots of the keys dialog, the `⇉ flow` hover glyph and the waterfall switcher —
+  they need a running device with a real multi-trace flow to be worth photographing (the 1.8.0
+  waterfall shots are still outstanding for the same reason).
+
 ## [1.8.0] - 2026-08-28
 
 Plugin **1.8.0**, library **v1.7.0**. LogPose can now *start* a flow, not only watch or mock one.

@@ -117,7 +117,9 @@ class LogPoseMcpHandler : HttpRequestHandler() {
                 "LogPose exposes the HTTP traffic, push messages, and app events captured from " +
                     "an Android device that is running right now. Start with session_summary or " +
                     "list_events to see what the app did, then get_event for full bodies. When a " +
-                    "call failed, get_trace shows what led to it. LogPose can also drive the app: " +
+                    "call failed, get_trace shows what led to it — and when the app never " +
+                    "propagated a trace (the usual case), get_related groups the whole flow by a " +
+                    "business id such as order_id instead. LogPose can also drive the app: " +
                     "create_mock changes what a request returns, inject_fcm delivers a push that " +
                     "starts a flow, and await_event waits for the result instead of polling — so " +
                     "a check reads mock → inject → await → assert. Those three change what the " +
@@ -200,6 +202,7 @@ class LogPoseMcpHandler : HttpRequestHandler() {
                 push = session.push,
                 waits = session.waits,
                 scenarios = session.scenarios,
+                correlations = session.correlations,
                 captureRunning = session.captureRunning,
             ) { payload ->
                 respond(toolResult(json.encodeToString(JsonElement.serializer(), payload), isError = false))

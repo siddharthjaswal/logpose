@@ -3,6 +3,7 @@ package io.github.siddharthjaswal.logpose.ui
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import java.awt.BorderLayout
 import java.awt.Color
@@ -21,11 +22,16 @@ import javax.swing.ScrollPaneConstants
 import javax.swing.ToolTipManager
 
 /**
- * The fourth detail card: one trace, drawn as a waterfall.
+ * The fourth detail card: one flow, drawn as a waterfall.
  *
- * A trace answers "what did this push actually set off?", and the answer is mostly about *time* —
+ * A flow answers "what did this push actually set off?", and the answer is mostly about *time* —
  * what blocked what, what overlapped, what is still running. A list can't show that, so this is a
  * custom-painted panel: one lane per event in arrival order, all sharing one time axis.
+ *
+ * What *makes* a flow is a [Grouping], not a trace id: `order_id 21053953` groups across traces
+ * and across events that carry no trace at all, which is the case a trace structurally cannot
+ * reach. The header states which grouping is on screen and offers the others the same row belongs
+ * to, so widening (`trace`) or narrowing (`trip_id`) never means going back to the list.
  *
  * Three disciplines hold it together:
  *  - **All arithmetic lives in [WaterfallLayout]**, which imports no Swing and is unit-tested.
@@ -44,15 +50,21 @@ class TraceWaterfallPanel(
     private val hostAge: (String) -> Long,
     /** Selects an event's row in the timeline list. */
     private val onSelectEvent: (String) -> Unit,
+    /** Re-opens the card for another grouping the same row belongs to. */
+    private val onSwitchGrouping: (Grouping) -> Unit = {},
+    /** Opens the keys dialog — the header is the second entry point the PRD asks for. */
+    private val onEditKeys: () -> Unit = {},
+    /** Opens "Find by value…", which is how an empty group stops being a dead end. */
+    private val onFindByValue: () -> Unit = {},
 ) : JPanel(BorderLayout()) {
 
     /**
-     * The laid-out trace. Swapped in wholesale by [relayout]; the paint path only ever reads it,
+     * The laid-out flow. Swapped in wholesale by [relayout]; the paint path only ever reads it,
      * which is what keeps painting free of both the store and any recomputation.
      */
     private var model: WaterfallLayout.Layout? = null
     private var events: List<LogEvent> = emptyList()
-    private var trace: String? = null
+    private var grouping: Grouping? = null
 
     /** Animation frame for the in-flight treatment, driven by the owner's live timer. */
     private var spinnerFrame = 0
@@ -65,6 +77,7 @@ class TraceWaterfallPanel(
         foreground = Theme.textDim
         font = JBUI.Fonts.create("JetBrains Mono", 11)
     }
+    private val switcher = Switcher { onSwitchGrouping(it) }
     private val canvas = Canvas()
 
     init {
@@ -72,11 +85,26 @@ class TraceWaterfallPanel(
         background = Theme.bg0
         border = JBUI.Borders.empty(8)
 
+        val titleRow = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(headline, BorderLayout.WEST)
+            add(
+                JPanel().apply {
+                    isOpaque = false
+                    layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
+                    add(link("Find by value…") { onFindByValue() })
+                    add(javax.swing.Box.createHorizontalStrut(JBUI.scale(12)))
+                    add(link("Correlation keys…") { onEditKeys() })
+                },
+                BorderLayout.EAST,
+            )
+        }
         val header = JPanel(BorderLayout()).apply {
             isOpaque = false
             border = JBUI.Borders.empty(0, 4, 8, 4)
-            add(headline, BorderLayout.NORTH)
-            add(subline, BorderLayout.SOUTH)
+            add(titleRow, BorderLayout.NORTH)
+            add(subline, BorderLayout.CENTER)
+            add(switcher, BorderLayout.SOUTH)
         }
         add(header, BorderLayout.NORTH)
         add(
@@ -92,19 +120,23 @@ class TraceWaterfallPanel(
         ToolTipManager.sharedInstance().registerComponent(canvas)
     }
 
-    /** The trace currently on screen, or null when the card has never been shown. */
-    fun traceId(): String? = trace
+    /** The grouping currently on screen, or null when the card has never been shown. */
+    fun grouping(): Grouping? = grouping
 
     /** True while any lane is still open — the owner's live timer only needs to tick then. */
     fun hasOpenSpans(): Boolean = model?.hasOpenSpans == true
 
     /**
-     * Shows [events] — an immutable snapshot, already filtered to [traceId], in arrival order.
+     * Shows [events] — an immutable snapshot, already grouped by [grouping], in arrival order.
      * Safe to call on every refresh tick: it recomputes the layout and repaints, nothing more.
+     *
+     * [alternatives] are the other groupings the originating row belongs to; the switcher appears
+     * only when there is more than one, since a single tab is a label, not a control.
      */
-    fun show(traceId: String, events: List<LogEvent>) {
-        this.trace = traceId
+    fun show(grouping: Grouping, events: List<LogEvent>, alternatives: List<Grouping> = emptyList()) {
+        this.grouping = grouping
         this.events = events
+        switcher.set(alternatives, grouping)
         relayout()
     }
 
@@ -119,20 +151,30 @@ class TraceWaterfallPanel(
      * which the reader thread holds while it records an event.
      */
     private fun relayout() {
-        val traceId = trace ?: return
+        val grouping = grouping ?: return
         val now = WaterfallLayout.projectedNow(events, hostAge)
-        val computed = WaterfallLayout.of(traceId, events, now)
+        // The layout is pure geometry and has no opinion about grouping — it takes the value the
+        // lanes were gathered by, and the panel owns everything about *why* they were gathered.
+        val computed = WaterfallLayout.of(grouping.value, events, now)
         model = computed
-        headline.text = "Trace  $traceId"
+        headline.text = grouping.label
+        headline.toolTipText = when (grouping.kind) {
+            Grouping.Kind.KEY -> "Grouped by the correlation key ${grouping.key} — every event carrying ${grouping.value}"
+            Grouping.Kind.VALUE -> "Every event carrying ${grouping.value}"
+            Grouping.Kind.TRACE -> "Grouped by the device's trace id"
+        }
         subline.text = summaryOf(computed)
         canvas.preferredSize = Dimension(JBUI.scale(320), canvasHeight(computed))
         canvas.revalidate()
         canvas.repaint()
     }
 
-    /** The header's second line: the facts worth stating about a whole trace. */
+    /** The header's second line: the facts worth stating about a whole flow. */
     private fun summaryOf(layout: WaterfallLayout.Layout): String {
-        if (layout.isEmpty) return "no events — the trace may have scrolled out of the capture buffer"
+        if (layout.isEmpty) {
+            return if (grouping?.isTrace == false) "no events carry that value"
+            else "no events — the trace may have scrolled out of the capture buffer"
+        }
         val count = if (layout.eventCount == 1) "1 event" else "${layout.eventCount} events"
         val span = "spanning ${humanMillis(layout.wallSpanMillis)}"
         val slowest = layout.slowest?.let {
@@ -370,6 +412,66 @@ class TraceWaterfallPanel(
             var end = text.length
             while (end > 1 && fm.stringWidth(text.take(end) + "…") > maxWidth) end--
             return text.take(end) + "…"
+        }
+    }
+
+    /** A small accent-coloured action in the header — the card's own way back out to a dialog. */
+    private fun link(text: String, action: () -> Unit) = LinkLabel(text, action)
+
+    /**
+     * The grouping switcher: `order_id` / `trip_id` / `trace`.
+     *
+     * A row usually belongs to several groupings at once, and the useful move after reading one
+     * is almost always to widen or narrow it. Doing that in place — rather than back in the list,
+     * on a row you have to find again — is the point.
+     */
+    private class Switcher(private val onPick: (Grouping) -> Unit) : JPanel() {
+
+        init {
+            isOpaque = false
+            layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
+            border = JBUI.Borders.emptyTop(6)
+            isVisible = false
+        }
+
+        fun set(options: List<Grouping>, selected: Grouping?) {
+            removeAll()
+            // One option is a statement, not a choice — the headline already says it.
+            isVisible = options.size > 1
+            if (isVisible) {
+                options.forEachIndexed { index, option ->
+                    if (index > 0) add(javax.swing.Box.createHorizontalStrut(JBUI.scale(6)))
+                    add(tab(option, option == selected))
+                }
+                // The row is stretched by its BorderLayout slot; the glue takes the slack so the
+                // tabs stay their own width instead of splitting the header between them.
+                add(javax.swing.Box.createHorizontalGlue())
+            }
+            revalidate()
+            repaint()
+        }
+
+        private fun tab(option: Grouping, selected: Boolean) = object : JBLabel(option.tab) {
+            override fun paintComponent(g: Graphics) {
+                val g2 = g.create() as Graphics2D
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = if (selected) Theme.accentTint else Theme.bg2
+                g2.fillRoundRect(0, 0, width - 1, height - 1, 8, 8)
+                g2.color = if (selected) Theme.accent else Theme.borderStrong
+                g2.drawRoundRect(0, 0, width - 1, height - 1, 8, 8)
+                g2.dispose()
+                super.paintComponent(g)
+            }
+        }.apply {
+            isOpaque = false
+            border = JBUI.Borders.empty(2, 9)
+            font = JBUI.Fonts.label(11f).asBold()
+            foreground = if (selected) Theme.accent else Theme.textDim
+            toolTipText = option.shortLabel
+            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            if (!selected) addMouseListener(object : MouseAdapter() {
+                override fun mouseClicked(e: MouseEvent) = onPick(option)
+            })
         }
     }
 

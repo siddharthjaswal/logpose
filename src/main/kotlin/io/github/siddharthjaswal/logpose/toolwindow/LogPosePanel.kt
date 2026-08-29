@@ -1,7 +1,9 @@
 package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.icons.AllIcons
+import com.intellij.ide.plugins.PluginManager
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionToolbar
@@ -22,7 +24,13 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.Alarm
 import com.intellij.util.ui.JBUI
 import org.jetbrains.ide.BuiltInServerManager
+import io.github.siddharthjaswal.logpose.analysis.Correlation
+import io.github.siddharthjaswal.logpose.analysis.CorrelationIndex
+import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.Grouping
+import io.github.siddharthjaswal.logpose.analysis.Groupings
+import io.github.siddharthjaswal.logpose.analysis.Suggestion
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
@@ -44,7 +52,10 @@ import io.github.siddharthjaswal.logpose.model.PushMessage
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.ui.ComposePushDialog
+import io.github.siddharthjaswal.logpose.ui.CorrelationKeysDialog
+import io.github.siddharthjaswal.logpose.ui.CorrelationSettings
 import io.github.siddharthjaswal.logpose.ui.CurlBuilder
+import io.github.siddharthjaswal.logpose.ui.FindByValueDialog
 import io.github.siddharthjaswal.logpose.ui.FcmDetailView
 import io.github.siddharthjaswal.logpose.ui.FilterBar
 import io.github.siddharthjaswal.logpose.ui.GenericDetailView
@@ -90,6 +101,16 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private val parser = TransactionParser()
     private val reader = LogcatReader()
 
+    /**
+     * Correlation's cache: one searchable haystack and one key extraction per event, computed on
+     * the reader thread as events arrive.
+     *
+     * Nothing about correlation may run on a paint or on the 150 ms refresh tick — the scans are
+     * O(payload) — so every read path here goes through the index, and the renderer uses its
+     * paint-safe read, which answers "not cached" instead of scanning.
+     */
+    private val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(project)) }
+
     private val renderer = TransactionListRenderer()
     // Latest duplicate-burst marks, keyed by transaction id; recomputed each refresh and read
     // by the renderer, the row tooltip, and the detail banner.
@@ -115,6 +136,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private val waterfall = TraceWaterfallPanel(
         hostAge = { id -> store.elapsedMillis(id) },
         onSelectEvent = { id -> selectEventInList(id) },
+        onSwitchGrouping = { grouping -> showWaterfall(grouping, waterfallAlternatives) },
+        onEditKeys = { editCorrelationKeys() },
+        onFindByValue = { findByValue() },
     )
     // Routes the single detail slot between the per-kind views. "generic" is the fallback for
     // every app-defined kind, so an unknown event is still inspectable.
@@ -126,10 +150,20 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         add(genericDetail, "generic")
         add(waterfall, "waterfall")
     }
-    /** Non-null while the waterfall card is showing; the trace it's showing. */
-    private var waterfallTrace: String? = null
+    /** Non-null while the waterfall card is showing; the grouping it's showing. */
+    private var waterfallGrouping: Grouping? = null
+    /** The other groupings the row that opened the waterfall belongs to, for the header switcher. */
+    private var waterfallAlternatives: List<Grouping> = emptyList()
     private val filterBar = FilterBar()
     private val statusDot = StatusDot()
+
+    private val pluginVersion: String? =
+        PluginManager.getInstance().findEnabledPlugin(PluginId.getId("io.github.siddharthjaswal.logpose"))?.version
+    private val versionLabel = JBLabel().apply {
+        foreground = Theme.textDim
+        font = JBUI.Fonts.label(11f)
+        verticalAlignment = javax.swing.SwingConstants.CENTER
+    }
 
     private val mocksController = MocksController(project)
 
@@ -200,6 +234,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 // Scenarios are files, so a project with no directory on disk simply doesn't
                 // offer them — the tools then say so rather than failing obscurely.
                 scenarios = scenarioStore?.let { McpScenarios(it) },
+                // The same vocabulary and the same cache the UI groups by, so an agent's
+                // get_related and a click on the row's waterfall glyph open the same flow.
+                correlations = McpCorrelations(),
                 // The store's own waiter registry: an agent parks a predicate and the reader
                 // thread wakes it, instead of the agent polling list_events in a loop.
                 waits = McpTools.Waits { timeout, predicate -> store.addWaiter(timeout, predicate) },
@@ -209,12 +246,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         renderer.elapsedProvider = { tx ->
             if (tx.isPending()) store.elapsedMillis(tx.id) else null
         }
+        // Cache-only, by contract: this is called for every painted row.
+        renderer.groupingProvider = { event -> correlation.hasCachedKeyValue(event) }
         liveTimer.start()
 
         // A trace id shown on any detail card is also the way into that flow's waterfall.
-        detail.onOpenTrace = { trace -> showWaterfall(trace) }
-        fcmDetail.onOpenTrace = { trace -> showWaterfall(trace) }
-        genericDetail.onOpenTrace = { trace -> showWaterfall(trace) }
+        detail.onOpenTrace = { trace -> showWaterfall(traceGrouping(trace)) }
+        fcmDetail.onOpenTrace = { trace -> showWaterfall(traceGrouping(trace)) }
+        genericDetail.onOpenTrace = { trace -> showWaterfall(traceGrouping(trace)) }
 
         list.isOpaque = true
         list.background = Theme.bg0
@@ -271,6 +310,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         list.addMouseMotionListener(mouse)
 
         filterBar.onChange = { refreshList() }
+        filterBar.onOverflow = { near -> showFilterOverflow(near) }
 
         val listScroll = JBScrollPane(list).apply {
             border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0
@@ -321,6 +361,19 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     /** The one place the mocks strip is repainted, so every caller shows the same three facts. */
     private fun refreshMocksBar() {
         mocksBar.refresh(mocksController.rules(), mocksController.deviceState(), scenarioInfos.size)
+        refreshVersionLabel()
+    }
+
+    /** Plugin version, plus the device library's once a hello has named it — skew is what bites. */
+    private fun refreshVersionLabel() {
+        val plugin = pluginVersion?.let { "v$it" }
+        val device = mocksController.deviceState().libVersion?.let { "device $it" }
+        versionLabel.text = listOfNotNull(plugin, device).joinToString(" · ")
+        versionLabel.toolTipText = when {
+            device != null -> "LogPose plugin $plugin, on-device library ${device.removePrefix("device ")}"
+            plugin != null -> "LogPose plugin $plugin — the library version appears once a device says hello"
+            else -> null
+        }
     }
 
     private fun buildHeader(): Component {
@@ -348,7 +401,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             isOpaque = true; background = Theme.bg0
             border = JBUI.Borders.empty(3, 8)
             add(actionsLeft, BorderLayout.WEST)
+            add(versionLabel, BorderLayout.EAST)
         }
+        refreshVersionLabel()
 
         val filterWrap = JPanel(BorderLayout()).apply {
             isOpaque = true; background = Theme.bg0
@@ -391,7 +446,13 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         reader.start(
             onLine = { line ->
                 reattachAttempts = 0
-                parser.accept(line)?.let { store.add(it) }
+                parser.accept(line)?.let { event ->
+                    // Correlation is computed here — on the reader thread, as the event arrives —
+                    // and never again. Warming before the store's listeners fire means the EDT's
+                    // refresh and the first paint of the row both find a cache hit.
+                    correlation.warm(event)
+                    store.add(event)
+                }
             },
             onError = { msg ->
                 refreshAlarm.addRequest({
@@ -447,8 +508,13 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         duplicateMarks = DuplicateDetector.analyze(httpTxs)
         renderer.duplicateProvider = { duplicateMarks[it.id] }
 
+        // Like "duplicates only", the correlation chip can't live in FilterState: a value hides in
+        // bodies the row never shows, so it's matched against the cached haystack instead.
+        val grouping = filterBar.correlationFilter()
         val filtered = all.filter {
-            state.matches(it) && (!state.duplicatesOnly || duplicateMarks.containsKey(it.id))
+            state.matches(it) &&
+                (!state.duplicatesOnly || duplicateMarks.containsKey(it.id)) &&
+                (grouping == null || Correlation.containsValue(correlation.textOf(it), grouping.value))
         }
         filterBar.setCount(filtered.size, all.size)
 
@@ -468,11 +534,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         }
 
         val sel = list.selectedValue
-        val trace = waterfallTrace
-        if (trace != null) {
-            // The waterfall is a view over a whole trace, not over the selection, so a refresh
+        val shown = waterfallGrouping
+        if (shown != null) {
+            // The waterfall is a view over a whole flow, not over the selection, so a refresh
             // re-snapshots it instead of letting the selected row's detail take the card back.
-            waterfall.show(trace, all.filter { it.traceId == trace })
+            waterfall.show(shown, membersOf(shown, all), waterfallAlternatives)
         } else if (sel != lastShown) {
             // If the selected transaction's data changed (e.g. pending → completed), re-render
             // the detail even though the selection index didn't change.
@@ -481,13 +547,154 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     }
 
     /**
-     * Shows one trace as a waterfall. The event list is snapshotted here, on the EDT, and handed
+     * Shows one flow as a waterfall. The event list is snapshotted here, on the EDT, and handed
      * over as an immutable list — [TraceWaterfallPanel] never reads the store itself.
      */
-    private fun showWaterfall(traceId: String) {
-        waterfallTrace = traceId
-        waterfall.show(traceId, store.snapshot().filter { it.traceId == traceId })
+    private fun showWaterfall(grouping: Grouping, alternatives: List<Grouping> = emptyList()) {
+        waterfallGrouping = grouping
+        // The tabs belong to the row this was opened from, so an entry point that doesn't know
+        // them (a detail card's trace chip) shows none rather than the last row's.
+        waterfallAlternatives = alternatives
+        waterfall.show(grouping, membersOf(grouping, store.snapshot()), alternatives)
         detailCards.show(detailPane, "waterfall")
+    }
+
+    /**
+     * The events one grouping holds.
+     *
+     * A trace groups by equality, as it always has. A key or a pasted value groups by
+     * [Correlation.group] — matched on the **value**, delimiter-bounded, over the cached
+     * haystacks, which is what reaches an event in another trace or with no trace at all. The
+     * key's own length floor and short-value opt-in travel with it when it's configured.
+     */
+    private fun membersOf(grouping: Grouping, all: List<LogEvent>): List<LogEvent> {
+        if (grouping.isTrace) return all.filter { it.traceId == grouping.value }
+        val configured = grouping.key?.let { name ->
+            correlation.keys().firstOrNull { it.name.equals(name, ignoreCase = true) }
+        }
+        return if (configured != null) {
+            Correlation.group(all, configured, grouping.value, correlation::textOf)
+        } else {
+            Correlation.group(all, grouping.key, grouping.value, textOf = correlation::textOf)
+        }
+    }
+
+    private fun traceGrouping(traceId: String) = Grouping(Grouping.Kind.TRACE, null, traceId)
+
+    /** Every grouping a row offers, best first: configured keys in order, then its trace. */
+    private fun groupingsFor(event: LogEvent): List<Grouping> =
+        Groupings.forEvent(correlation.matchable(event), event.traceId)
+
+    /** The hover glyph's one click: the row's best grouping — a key if it has one, else its trace. */
+    private fun openBestGrouping(event: LogEvent) {
+        val groupings = groupingsFor(event)
+        val best = groupings.firstOrNull() ?: return
+        showWaterfall(best, groupings)
+    }
+
+    /** Narrowing the timeline to a grouping: a removable chip for a key, the search box for a trace. */
+    private fun filterByGrouping(grouping: Grouping) {
+        if (grouping.isTrace) {
+            filterBar.setCorrelationFilter(null)
+            filterBar.setQuery(grouping.value)
+        } else {
+            filterBar.setCorrelationFilter(grouping)
+        }
+    }
+
+    // ---- correlation keys ---------------------------------------------------------------------
+
+    /** The filter bar's overflow: the two things that need a whole capture rather than a row. */
+    private fun showFilterOverflow(near: Component) {
+        val group = DefaultActionGroup().apply {
+            add(act("Find by value…", AllIcons.Actions.Find) { findByValue() })
+            addSeparator()
+            add(act("Correlation keys…", AllIcons.General.Settings) { editCorrelationKeys() })
+        }
+        val popup = JBPopupFactory.getInstance().createActionGroupPopup(
+            null, group, DataContext.EMPTY_CONTEXT,
+            JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
+        )
+        if (near.isShowing) popup.showUnderneathOf(near) else popup.showInFocusCenter()
+    }
+
+    /**
+     * Opens the keys dialog, seeded from the capture.
+     *
+     * [Correlation.suggest] walks every event's payload *and* its searchable text, which is a
+     * one-shot cost sized for opening a dialog — but not one to pay on the EDT with a full
+     * buffer, so it runs on a pooled thread and the dialog opens when it's done.
+     */
+    private fun editCorrelationKeys() {
+        val events = store.snapshot()
+        val before = correlation.keys()
+        val firstTime = !CorrelationSettings.configured(project)
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            val suggestions: List<Suggestion> = runCatching { Correlation.suggest(events) }.getOrDefault(emptyList())
+            SwingUtilities.invokeLater {
+                val dialog = CorrelationKeysDialog(project, before, suggestions, seedSuggestions = firstTime)
+                if (dialog.showAndGet()) applyCorrelationKeys(dialog.result())
+            }
+        }
+    }
+
+    /**
+     * Persists a new vocabulary and re-extracts against it.
+     *
+     * The re-extraction is the part that matters: changing keys invalidates every cached
+     * extraction, and until they're rebuilt the rows can only offer their traces. Rebuilding runs
+     * off the EDT (it's a payload scan per event) and the list is refreshed once it's done.
+     */
+    private fun applyCorrelationKeys(keys: List<CorrelationKey>) {
+        CorrelationSettings.setKeys(project, keys)
+        correlation.setKeys(keys)
+        // A grouping by a key that no longer exists would keep filtering by a value nobody can
+        // see the reason for, so it's dropped with the key.
+        filterBar.correlationFilter()?.let { active ->
+            if (active.kind == Grouping.Kind.KEY && keys.none { it.name.equals(active.key, true) && it.enabled }) {
+                filterBar.setCorrelationFilter(null)
+            }
+        }
+        val events = store.snapshot()
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            events.forEach { correlation.warmValues(it) }
+            SwingUtilities.invokeLater { refreshList(); list.repaint() }
+        }
+    }
+
+    /**
+     * "Find by value…" — the entry point that needs no row at all: paste an id from a ticket or a
+     * backend log and open everything carrying it.
+     */
+    private fun findByValue() {
+        val events = store.snapshot()
+        val dialog = FindByValueDialog(
+            project,
+            resolve = { grouping -> membersOf(grouping, events).size },
+            keyLabelFor = { value -> keyLabelFor(events, value) },
+            allowsShortValues = { key ->
+                correlation.keys().any { it.name.equals(key, true) && it.enabled && it.allowShortValues }
+            },
+        )
+        if (dialog.showAndGet()) dialog.grouping()?.let { showWaterfall(it) }
+    }
+
+    /**
+     * The configured key holding [value], for labelling a bare paste.
+     *
+     * Cached extractions answer first — newest-first, as [Correlation.keyLabelFor] does — and only
+     * the events the cache doesn't know are handed to it, so a keystroke can't turn into a full
+     * re-extraction of the capture.
+     */
+    private fun keyLabelFor(events: List<LogEvent>, value: String): String? {
+        val uncached = ArrayList<LogEvent>()
+        for (index in events.indices.reversed()) {
+            val cached = correlation.cachedValues(events[index])
+            if (cached == null) { uncached.add(events[index]); continue }
+            cached.firstOrNull { it.value.equals(value, ignoreCase = true) }?.let { return it.key }
+        }
+        if (uncached.isEmpty()) return null
+        return Correlation.keyLabelFor(uncached.asReversed(), correlation.keys(), value)
     }
 
     /**
@@ -510,7 +717,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun showDetail(event: LogEvent?) {
         lastShown = event
         // Any explicit selection leaves the waterfall — the card follows the row again.
-        waterfallTrace = null
+        waterfallGrouping = null
+        waterfallAlternatives = emptyList()
         when (event) {
             is LogEvent.Http -> {
                 detail.show(event.tx, duplicateMarks[event.id], event.envelope)
@@ -556,7 +764,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         if (sel is LogEvent.Http && sel.tx.isPending()) detail.tick(store.elapsedMillis(sel.id), renderer.spinnerFrame)
         // An open span in the waterfall grows towards "now", so the card animates on the same
         // timer as the in-flight rows rather than owning a second one.
-        if (waterfallTrace != null) waterfall.tick(renderer.spinnerFrame)
+        if (waterfallGrouping != null) waterfall.tick(renderer.spinnerFrame)
     }
 
     override fun dispose() {
@@ -839,13 +1047,21 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             if (idx < 0) return
             // Clicking the row that's already selected fires no selection event, so a click meant
             // to leave the waterfall would otherwise do nothing at all.
-            if (waterfallTrace != null) showDetail(list.model.getElementAt(idx))
-            // Only the hovered, non-muted row paints the cURL affordance (HTTP rows only).
+            if (waterfallGrouping != null) showDetail(list.model.getElementAt(idx))
+            // Only the hovered row paints an affordance, and a muted row paints none at all.
             if (idx != renderer.hoveredIndex) return
-            val tx = (list.model.getElementAt(idx) as? LogEvent.Http)?.tx ?: return
+            val event = list.model.getElementAt(idx)
             val bounds = list.getCellBounds(idx, idx) ?: return
-            if (!MutedEndpoints.isMuted(tx) && renderer.isInCurlZone(bounds.width, e.x - bounds.x)) {
-                copyToClipboard(CurlBuilder.build(tx), "cURL copied")
+            val tx = (event as? LogEvent.Http)?.tx
+            if (tx != null && MutedEndpoints.isMuted(tx)) return
+            val x = e.x - bounds.x
+            when {
+                // Two disjoint bands in the same hover strip: cURL over the size column (HTTP
+                // only, as before), the flow over the duration column (any row that has one).
+                tx != null && renderer.isInCurlZone(bounds.width, x) ->
+                    copyToClipboard(CurlBuilder.build(tx), "cURL copied")
+                renderer.isInFlowZone(bounds.width, x) && renderer.paintsFlow(event) ->
+                    openBestGrouping(event)
             }
         }
 
@@ -870,12 +1086,45 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 DefaultActionGroup().apply {
                     add(act("Copy timeline (${list.selectedIndices.size} rows)", AllIcons.Actions.Copy) { copySelectedTimeline() })
                 }
-            } else when (val ev = list.selectedValue ?: return) {
-                is LogEvent.Http -> httpGroup(ev.tx)
-                is LogEvent.Fcm -> fcmGroup(ev)
-                else -> structuredGroup(ev)
+            } else {
+                val event = list.selectedValue ?: return
+                val rowGroup = when (event) {
+                    is LogEvent.Http -> httpGroup(event.tx)
+                    is LogEvent.Fcm -> fcmGroup(event)
+                    else -> structuredGroup(event)
+                }
+                // The key leads: `order_id 21053953` is the id a human knows, and it groups what
+                // a trace structurally can't. When no configured key is on this row the menu is
+                // exactly what it always was.
+                withKeyActions(event, rowGroup)
             }
             showActionPopup(group, e)
+        }
+
+        /**
+         * Prepends one `Show waterfall` / `Filter by` pair per configured key this row carries.
+         *
+         * A row with several keys gets several pairs, in the order the keys were configured —
+         * `order_id` before `trip_id` — because that order is the user's own statement of which
+         * id they think in.
+         */
+        private fun withKeyActions(event: LogEvent, rest: ActionGroup): ActionGroup {
+            val keys = groupingsFor(event).filterNot { it.isTrace }
+            if (keys.isEmpty()) return rest
+            return DefaultActionGroup().apply {
+                keys.forEach { grouping ->
+                    add(act("Show waterfall  —  ${grouping.shortLabel}", AllIcons.Actions.ShowAsTree) {
+                        showWaterfall(grouping, groupingsFor(event))
+                    })
+                    add(act("Filter by ${grouping.shortLabel}", AllIcons.Actions.Find) {
+                        filterByGrouping(grouping)
+                    })
+                }
+                addSeparator()
+                // A non-popup child group is flattened into the same menu, so the row's own
+                // actions keep their order and separators without being copied out of it.
+                add(rest)
+            }
         }
 
         private fun httpGroup(tx: Transaction): ActionGroup {
@@ -924,7 +1173,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             // pivot from to "everything that push set off".
             event.traceId?.takeIf { it.isNotBlank() }?.let { trace ->
                 addSeparator()
-                addTraceActions(trace)
+                addTraceActions(event, trace)
             }
         }
 
@@ -943,7 +1192,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             })
             ev.traceId?.takeIf { it.isNotBlank() }?.let { trace ->
                 addSeparator()
-                addTraceActions(trace)
+                addTraceActions(ev, trace)
             }
         }
 
@@ -951,10 +1200,17 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
          * The two things to do with a trace, offered wherever one is available: read it as a
          * waterfall, or narrow the timeline to it. Events with no trace get neither — an entry
          * point that opens an empty view is worse than no entry point.
+         *
+         * Both now say *trace* out loud. They used to read `Show waterfall d107086f`, which names
+         * a hash a human has never seen and can't recognize; beside a `order_id 21053953` item it
+         * has to be obvious which of the two you're choosing.
          */
-        private fun DefaultActionGroup.addTraceActions(trace: String) {
-            add(act("Show waterfall  $trace", AllIcons.Actions.ShowAsTree) { showWaterfall(trace) })
-            add(act("Filter by trace  $trace", AllIcons.Actions.Find) { filterBar.setQuery(trace) })
+        private fun DefaultActionGroup.addTraceActions(event: LogEvent, trace: String) {
+            val grouping = traceGrouping(trace)
+            add(act("Show waterfall  —  trace $trace", AllIcons.Actions.ShowAsTree) {
+                showWaterfall(grouping, groupingsFor(event))
+            })
+            add(act("Filter by trace $trace", AllIcons.Actions.Find) { filterByGrouping(grouping) })
         }
 
         /** Shows a native, rounded, keyboard-navigable action-group popup at the click. */
@@ -1013,6 +1269,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
         override fun actionPerformed(e: AnActionEvent) {
             store.clear()
+            correlation.clear()
             reader.clearBuffer()
             showDetail(null)
             refreshList()
@@ -1101,6 +1358,29 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                     onAck(outcome?.let { McpTools.Push.Ack(it.delivered, it.error) })
                 }
             }
+        }
+    }
+
+    /**
+     * Correlation over MCP: the configured keys, and the cache that keeps grouping off a payload
+     * scan.
+     *
+     * Every read is the *same* [CorrelationIndex] the tool window uses, which is the point — an
+     * agent's `get_related(key='order_id')` and the row menu's `Show waterfall — order_id …` group
+     * an identical set, because they read one cache and one vocabulary rather than two.
+     * [offThread] is the honest part: these calls arrive on the MCP transport's IO thread, and a
+     * cache miss here is a payload scan, so the tools do their work on a pooled thread.
+     */
+    private inner class McpCorrelations : McpTools.Correlations {
+        override fun keys(): List<CorrelationKey> = correlation.keys()
+        override fun textOf(event: LogEvent): String = correlation.textOf(event)
+        override fun valuesOf(event: LogEvent) = correlation.valuesOf(event)
+        override fun keyLabelFor(events: List<LogEvent>, value: String): String? =
+            this@LogPosePanel.keyLabelFor(events, value)
+
+        override fun offThread(work: () -> Unit) {
+            com.intellij.openapi.application.ApplicationManager.getApplication()
+                .executeOnPooledThread(work)
         }
     }
 

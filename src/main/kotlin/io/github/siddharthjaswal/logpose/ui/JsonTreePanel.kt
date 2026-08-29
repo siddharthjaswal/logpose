@@ -64,7 +64,6 @@ import javax.swing.tree.TreeSelectionModel
 class JsonTreePanel(
     private val title: String,
     private val project: Project,
-    private val titleColor: () -> JBColor? = { null },
 ) : JPanel(BorderLayout()) {
 
     private val arc = JBUI.scale(10)
@@ -200,10 +199,10 @@ class JsonTreePanel(
             isOpaque = false
             add(toggle)
             add(togglesHolder)
-            add(iconButton(AllIcons.Actions.Find, "Find (⌘F)") { showFind() })
-            add(iconButton(AllIcons.Actions.Expandall, "Expand all") { expandAll() })
-            add(iconButton(AllIcons.Actions.Collapseall, "Collapse all") { collapseAll() })
-            add(iconButton(AllIcons.Actions.Copy, "Copy as JSON") { copyJson() })
+            add(IconButton(AllIcons.Actions.Find, "Find (⌘F)") { showFind() })
+            add(IconButton(AllIcons.Actions.Expandall, "Expand all") { expandAll() })
+            add(IconButton(AllIcons.Actions.Collapseall, "Collapse all") { collapseAll() })
+            add(IconButton(AllIcons.Actions.Copy, "Copy as JSON") { copyJson() })
         }
 
         return JPanel(BorderLayout()).apply {
@@ -217,19 +216,11 @@ class JsonTreePanel(
         }
     }
 
-    private fun iconButton(icon: javax.swing.Icon, tip: String, onClick: () -> Unit) =
-        javax.swing.JLabel(icon).apply {
-            toolTipText = tip
-            cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
-            border = JBUI.Borders.empty(2, 4)
-            addMouseListener(object : java.awt.event.MouseAdapter() {
-                override fun mouseClicked(e: java.awt.event.MouseEvent) = onClick()
-            })
-        }
-
     fun setStatus(text: String?) {
         statusLabel.text = text ?: ""
-        titleColor()?.let { titleLabel.foreground = it }
+        // The card title is a label, not a signal: it used to be tinted by the request's method
+        // hue, which is exactly the collision the redesign removes. Plain `text`, always.
+        titleLabel.foreground = Theme.text
     }
 
     /**
@@ -389,9 +380,9 @@ class JsonTreePanel(
             isOpaque = false
             layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
             add(findCount)
-            add(iconButton(AllIcons.Actions.PreviousOccurence, "Previous (Shift+Enter)") { moveMatch(-1) })
-            add(iconButton(AllIcons.Actions.NextOccurence, "Next (Enter)") { moveMatch(1) })
-            add(iconButton(AllIcons.Actions.Close, "Close (Esc)") { hideFind() })
+            add(IconButton(AllIcons.Actions.PreviousOccurence, "Previous (Shift+Enter)") { moveMatch(-1) })
+            add(IconButton(AllIcons.Actions.NextOccurence, "Next (Enter)") { moveMatch(1) })
+            add(IconButton(AllIcons.Actions.Close, "Close (Esc)") { hideFind() })
         }
         return JPanel(BorderLayout()).apply {
             isOpaque = true
@@ -522,9 +513,18 @@ class JsonTreePanel(
         val suffix: String? = null, val preview: String? = null,
     )
 
-    /** Two-segment rounded toggle (Tree / Raw). */
+    /**
+     * Two-segment rounded toggle (Tree / Raw): `bg3` track radius 8, `bg0` thumb radius 6,
+     * padding 2; the selected label is 11 bold `text`, the others 11 `textDim`.
+     *
+     * Hovering an unselected label lifts it to `text` — the thumb doesn't move until the click,
+     * so the rollover has to say "this half is live" on its own.
+     */
     private class Segmented(items: List<String>, private val onChange: (Int) -> Unit) : JPanel() {
         private var sel = 0
+        private var hovered = -1
+        private val plainFont = JBUI.Fonts.label(11f)
+        private val boldFont = JBUI.Fonts.label(11f).asBold()
         private val labels = items.mapIndexed { i, t ->
             javax.swing.JLabel(t, javax.swing.JLabel.CENTER).apply {
                 font = JBUI.Fonts.label(11f)
@@ -532,6 +532,8 @@ class JsonTreePanel(
                 cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
                 addMouseListener(object : java.awt.event.MouseAdapter() {
                     override fun mouseClicked(e: java.awt.event.MouseEvent) = select(i)
+                    override fun mouseEntered(e: java.awt.event.MouseEvent) { hovered = i; update() }
+                    override fun mouseExited(e: java.awt.event.MouseEvent) { hovered = -1; update() }
                 })
             }
         }
@@ -552,7 +554,10 @@ class JsonTreePanel(
         }
 
         private fun update() {
-            labels.forEachIndexed { i, l -> l.foreground = if (i == sel) Theme.text else Theme.textDim }
+            labels.forEachIndexed { i, l ->
+                l.foreground = if (i == sel || i == hovered) Theme.text else Theme.textDim
+                l.font = if (i == sel) boldFont else plainFont
+            }
             repaint()
         }
 

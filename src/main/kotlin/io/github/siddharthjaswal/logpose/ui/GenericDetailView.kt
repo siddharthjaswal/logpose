@@ -190,8 +190,8 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
      */
     private fun toneColor(tone: String): Color = when (tone) {
         Badge.TONE_INFO -> Theme.accent
-        Badge.TONE_WARN -> Theme.methodColor("PUT")
-        Badge.TONE_ERROR -> Theme.statusColor(500, null)
+        Badge.TONE_WARN -> Theme.warn
+        Badge.TONE_ERROR -> Theme.danger
         else -> Theme.textDim
     }
 

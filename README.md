@@ -69,6 +69,10 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
   repro becomes committing a file. See [Scenarios](#scenarios).
 - **Trace waterfall** — read a whole flow on one time axis: what the push set off, what
   overlapped, what's still running, what took longest. See [Trace waterfall](#trace-waterfall).
+- **Correlation keys** — group a flow by the id a human actually knows — `order_id 21053953` —
+  instead of a trace the app may never have propagated. Tell LogPose your keys once and the row
+  menu, a hover glyph, the waterfall and the MCP tools all speak in them; paste an id from a
+  ticket with **Find by value…**. See [Correlate a flow](#correlate-a-flow).
 - **FCM in the same timeline** — Firebase pushes and token refreshes appear inline with HTTP
   traffic, so you can read push → API call → UI as one story. Notification, metadata and data
   payload are all inspectable.
@@ -237,6 +241,8 @@ Filtering is a one-line, zero-typing bar (all conditions AND-ed):
 | **METHOD** GET / POST / PUT / DELETE | multi-select; show only the picked methods |
 | **STATUS** 2xx / 3xx / 4xx / 5xx | multi-select; show only the picked status classes |
 | **Hide noise** switch | hide muted/noise endpoints entirely (right-click a row → mute to mark it noise) |
+| **`order_id 21053953 ✕`** chip | shown while the timeline is narrowed to a [correlation key](#correlate-a-flow); click it to remove |
+| **⋯** overflow | **Find by value…** and **Correlation keys…** — the two actions that need the whole capture, not a row |
 
 ## Getting started
 
@@ -245,13 +251,14 @@ version independently:
 
 | Half | What it does | Where it comes from | Version |
 |---|---|---|---|
-| **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.8.0 |
-| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.7.0` |
+| **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.9.0 |
+| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.7.1` |
 
 Install the plugin but not the library and the timeline stays empty — there's nothing being
-emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.7.0` needs
+emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.7.1` needs
 plugin 1.5.0+ to render at all (1.8.0 for push injection and the new mock matchers), and on an
-older plugin rows are dropped silently, with no error saying why.
+older plugin rows are dropped silently, with no error saying why. Correlation keys are a plugin
+feature only — they read the payloads your app already emits, so any library version works.
 
 ### 1. Install the plugin
 
@@ -277,9 +284,9 @@ cd logpose
 ### 2. Add the interceptor to your app
 
 The interceptor is distributed via [JitPack](https://jitpack.io/#siddharthjaswal/logpose).
-**Library `v1.7.0` needs plugin 1.5.0+** (1.6.0+ for db/worker/config rows, 1.8.0 for push
-injection, scenarios and the new mock matchers) — on an older plugin the timeline stays empty
-with no error explaining why:
+**Library `v1.7.1` needs plugin 1.5.0+** (1.6.0+ for db/worker/config rows, 1.8.0 for push
+injection, scenarios and the new mock matchers, 1.9.0 to pair with this version's injected-row
+collapse) — on an older plugin the timeline stays empty with no error explaining why:
 
 ```kotlin
 // settings.gradle.kts
@@ -290,10 +297,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.1")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.1")
 }
 ```
 
@@ -318,7 +325,7 @@ val client = OkHttpClient.Builder()
 With the `debug`/`release` split above, the release build links against the no-op stub, so
 LogPose is gone from production by construction. `enabled = BuildConfig.DEBUG` is then just
 belt-and-suspenders. (Prefer a single artifact in all variants? Use plain
-`implementation("…:logpose-android:v1.7.0")` everywhere and rely on the `enabled` flag — but then
+`implementation("…:logpose-android:v1.7.1")` everywhere and rely on the `enabled` flag — but then
 the real artifact, including its auto-init provider and DUMP-gated receivers, ships in release too.)
 See
 [`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
@@ -448,6 +455,12 @@ running app's process. No Play services, no network, no FCM console.
   dialog for `from`, collapse key, notification title/body, and a JSON editor for the data map.
 - Injected pushes appear as ordinary FCM rows with an **INJ** pill and a banner in the detail.
   The timeline says who sent a push; it never passes an injected one off as real.
+- **One row, not two.** Your app's own `FirebaseMessagingService` normally re-logs an injected
+  push moments after LogPose delivers it. With `logpose-android` ≥ 1.7.1 both emissions share the
+  message id, so they collapse onto a single row that stays marked **INJ** instead of the re-log
+  arriving beside it as an unmarked twin. The surviving row then carries the *app's* trace, since
+  the re-log is what updated it — one more reason to read these flows by
+  [correlation key](#correlate-a-flow) rather than by trace.
 
 Tell LogPose where your app's push handling starts — one line at app init, and the reliable tier:
 
@@ -522,6 +535,69 @@ the **trace** chip on any detail card. Rows with no trace id don't offer it.
 - Failed HTTP calls take the danger colour, so the thing that went wrong isn't the same blue as
   everything else.
 - Click a lane to jump to that event's row, which is also how you leave the card.
+
+The waterfall groups by a [correlation key](#correlate-a-flow) just as happily as by a trace — and
+on most apps that's the grouping that actually holds the flow together.
+
+## Correlate a flow
+
+A trace only groups what the app itself propagated. In practice that fragments: an app that starts
+its own trace when it handles a push never joins the IDE's, and an HTTP row joins a trace only when
+the client was built with `LogPose.traceCalls(...)`. Dogfooding turned up one order whose five
+events spanned **four traces, one of them null** — including the `GET /order/21053953/` that had no
+trace at all. The `order_id` in the payloads grouped all five, and needed nothing from the app.
+
+So tell LogPose the ids you think in.
+
+**1. Define your keys.** Filter bar **⋯ → Correlation keys…** (also linked from the waterfall
+header). The first time, the list opens **seeded with suggestions** — id-ish names actually present
+in the capture, each carrying its evidence (`groups 5 events · largest 5 · latest 21053953`) —
+and you tick the ones that matter; **Suggest from capture** re-offers them later. Suggestions
+arrive unticked and inert: nothing groups until a key is enabled. Keys are stored **per project**,
+because `order_id` is your app's vocabulary; LogPose ships none of its own.
+
+**2. The key names the value; the value does the matching.** That's the whole mechanism:
+
+- **Extract** — the key is looked up in an event's payload by name: recursively, case- and
+  snake/camel-insensitively (`order_id` = `orderId` = `ORDER_ID`), and **parsing JSON that arrives
+  nested inside a string value**. Real payloads hide the meaningful JSON in a string — an FCM
+  `data["body"]`, an HTTP body — and a shallow scan would find nothing on exactly those.
+- **Match** — from there the *value* does the work. An event joins the group if `21053953` appears
+  anywhere in its searchable text: url and path, request/response bodies, FCM data keys and values,
+  db sql and args, worker fields, event section bodies. That's what reaches
+  `/app/v4/79096/order/21053953/`, where the id is a bare path segment with no key beside it.
+  (Headers are deliberately excluded — auth tokens, cookies and trace headers would only add
+  matches on values you never see.)
+- **Guard** — matching is **delimiter-bounded** and values must be **≥ 4 characters**, so `2105`
+  never matches `21053953`, and `21053953` never matches `210539531`. Shorter values are still
+  extracted and shown, but they don't group unless you tick **short** for that key and accept the
+  over-grouping risk.
+
+**3. Use them.** Every entry point now reads as the key rather than a hash:
+
+| Where | What you get |
+|---|---|
+| **Row context menu** | `Show waterfall — order_id 21053953` and `Filter by order_id 21053953`, one pair per key the row carries, with the trace actions below (now labelled `— trace d107086f`) |
+| **Row hover** | a `⇉ flow` glyph beside `⧉ cURL` — one click opens the row's best grouping (key first, trace as fallback) |
+| **Waterfall header** | states the grouping, and offers a switcher (`order_id` / `trip_id` / `trace`) when the row belongs to more than one |
+| **Filter bar** | a removable chip while the timeline is narrowed to a key value |
+| **⋯ → Find by value…** | no row needed: paste `21053953` or `order_id=21053953` |
+
+**Find by value…** is the one you'll reach for with an id from a ticket, a backend log or a QA
+report. It trims whitespace and strips surrounding quotes (ids arrive copied out of JSON as often
+as not), labels a bare value with the configured key that holds it, and **states the count before
+you commit** — `7 events · order_id 21053953`, or `no events carry that value`, so a typo is
+obvious rather than an empty screen. A value under the length floor says *"too short to match
+safely"* instead of silently returning nothing.
+
+Agents get the same thing over MCP with
+[`get_related` and `list_correlation_keys`](#connect-a-coding-agent) — reading the same cache and
+the same key list, so a tool call and a click open an identical group.
+
+> Correlation is computed once per event as it arrives, never while a row paints, and cached with
+> both an entry and a character budget. A row whose values haven't been extracted yet simply
+> doesn't offer the glyph. Grouping is **within the current capture** — there's no cross-session
+> correlation, and a value that scrolled out of the buffer is gone.
 
 ## Database, workers and config
 
@@ -655,6 +731,7 @@ client), so you can just *ask*.
 **Start a flow and check what it did** — the loop that needs no clicks at all:
 
 > *"Using logpose, inject an `order_assigned` push and tell me every call it triggered."*
+> *"Using logpose, show me everything that touched order 21053953."*
 > *"Using logpose, make `/v1/accept` fail once then succeed, re-send the last push, and check the
 > app retried."*
 > *"Using logpose, snapshot this session as the `orders-empty` scenario so I can replay it offline."*
@@ -672,15 +749,23 @@ claude mcp add --transport http logpose http://localhost:63342/api/logpose/mcp \
   --header "X-LogPose-Token: <your project token>"
 ```
 
-**Tools (19).**
+**Tools (21).**
 
 | Group | Tools |
 |---|---|
 | **Read the capture** | `list_events`, `get_event`, `get_trace`, `find_failures`, `session_summary`, `clear_capture` |
+| **Follow one id** | `get_related`, `list_correlation_keys` |
 | **Diagnose the other kinds** | `query_hotspots`, `worker_history`, `config_changes`, `analytics_events` |
 | **Change what the app receives** | `list_mocks`, `create_mock`, `set_mock_enabled`, `delete_mock` |
 | **Bottle a state** | `list_scenarios`, `load_scenario`, `save_scenario` |
 | **Start a flow and wait for it** | `inject_fcm`, `await_event` |
+
+`get_related` is usually the better `get_trace`: pass `key` + `value` (`order_id`, `21053953`), a
+bare pasted value, or an `event_id` to group by what that row carries, and it returns the whole
+flow in `get_trace`'s shape with a `grouped_by` field — across traces, including events with none.
+It matches by [value](#correlate-a-flow), so it needs no cooperation from the app.
+`list_correlation_keys` reports the configured vocabulary plus inert suggestions; a `get_trace`
+that comes back empty now says why and points here.
 
 That last row is what makes an agent's loop deterministic. Instead of triggering something and
 polling `list_events` until the result shows up, it's **trigger → await → assert**:
@@ -731,16 +816,17 @@ for the device-side setup.
       per-hit response sequences, committable scenario files
 - [x] Push injection — deliver a synthetic FCM data message into the running app
 - [x] Trace waterfall — a whole flow on one time axis
+- [x] Correlation keys — group a flow by `order_id`, across traces and rows with no trace
 - [x] MCP server for coding agents, including trigger → await → assert (`inject_fcm` +
-      `await_event`)
+      `await_event`) and `get_related` for one business id
 
 ## Road to 1.0 — production checklist
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.7.0`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.7.1`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.0`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.1`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).
@@ -749,16 +835,18 @@ for the device-side setup.
 ### Quality & trust
 
 - [x] **CI** (GitHub Actions): `buildPlugin` + `verifyPlugin` on push/PR; GitHub Release on tag.
-- [x] **Plugin compatibility** verified (Plugin Verifier vs 2024.1 / 2024.3; `since-build 233`,
-      no upper bound; bundled JSON module).
+- [x] **Plugin compatibility** verified (Plugin Verifier vs 2024.1 / 2024.3 / 2025.1 / 2025.2;
+      `since-build 233`, no upper bound; bundled JSON module).
 - [x] **`CHANGELOG.md`** + `<change-notes>` in `plugin.xml`; semantic versioning.
 - [x] **Security/privacy**: documented — runs on *debug/staging* only, `Authorization` &
       cookies redacted on-device, bodies never leave logcat.
-- [x] **Tests for the pure logic** — ~425 across the two halves: `TransactionParser` (incl. chunk
-      reassembly), the MCP tool surface, duplicate detection, SQL summarising, the event store and
-      its waiters, mock matching/serving/steps, scenario snapshot + store, push wire round-trips,
-      the waterfall layout, redaction and body decoding. A reflection **API-parity test** keeps
-      the no-op an exact mirror of the real library.
+- [x] **Tests for the pure logic** — ~550 across the two halves (348 plugin, 206 library):
+      `TransactionParser` (incl. chunk reassembly), the MCP tool surface, duplicate detection, SQL
+      summarising, the event store and its waiters, mock matching/serving/steps, scenario snapshot
+      + store, push wire round-trips, the waterfall layout, correlation (nested-JSON extraction,
+      delimiter-bounded matching, suggestion ranking, the key store and its cache), redaction and
+      body decoding. A reflection **API-parity test** keeps the no-op an exact mirror of the real
+      library.
 - [ ] Still untested: `CurlBuilder` quoting, `FilterState` matching, `MutedEndpoints.normalize`,
       and body capture's multipart/binary/gzip/truncation paths.
 

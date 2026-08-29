@@ -1,7 +1,6 @@
 package io.github.siddharthjaswal.logpose.ui
 
 import com.intellij.openapi.ide.CopyPasteManager
-import com.intellij.ui.JBColor
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.model.Body
@@ -28,7 +27,7 @@ import javax.swing.JPanel
 class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()) {
 
     private val overview = OverviewPanel()
-    private val request = JsonTreePanel("Request", project) { Theme.methodColor(currentMethod) }
+    private val request = JsonTreePanel("Request", project)
     private val response = JsonTreePanel("Response", project)
 
     /** Opens the trace waterfall for the flow this call belongs to (see [OverviewPanel]). */
@@ -39,7 +38,6 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
     private val pretty = Json { prettyPrint = true; encodeDefaults = true }
     private var current: Transaction? = null
-    private var currentMethod: String = "GET"
 
     // Request headers (auth/api-key) are usually useful → shown by default. Response headers
     // (CSP, security, caching) are mostly noise → hidden until the user clicks "Headers".
@@ -77,7 +75,6 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         envelope: io.github.siddharthjaswal.logpose.model.Envelope? = null,
     ) {
         current = tx
-        currentMethod = tx?.request?.method ?: "GET"
         overview.show(tx, dup, envelope)
         if (tx == null) {
             request.setElement(null); request.setStatus(null)

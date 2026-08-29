@@ -1,5 +1,8 @@
 package io.github.siddharthjaswal.logpose.mcp
 
+import io.github.siddharthjaswal.logpose.analysis.Correlation
+import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
+import io.github.siddharthjaswal.logpose.analysis.KeyValue
 import io.github.siddharthjaswal.logpose.model.Badge
 import io.github.siddharthjaswal.logpose.model.ConfigChange
 import io.github.siddharthjaswal.logpose.model.ConfigUpdate
@@ -651,7 +654,8 @@ class McpToolsTest {
         val names = McpTools.catalogue().map { it.jsonObject["name"]!!.jsonPrimitive.content }
         assertEquals(
             listOf(
-                "list_events", "get_event", "get_trace", "await_event", "find_failures",
+                "list_events", "get_event", "get_trace", "get_related", "list_correlation_keys",
+                "await_event", "find_failures",
                 "session_summary", "query_hotspots", "worker_history", "config_changes",
                 "analytics_events", "clear_capture",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
@@ -662,7 +666,10 @@ class McpToolsTest {
         // The deferred tools must be routed to callAsync by the transport; a sync call to one
         // would return "unknown tool" to an agent that did nothing wrong.
         assertEquals(
-            setOf("await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario"),
+            setOf(
+                "await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
+                "get_related", "list_correlation_keys",
+            ),
             names.filter { McpTools.isAsync(it) }.toSet(),
         )
         McpTools.catalogue().forEach { tool ->
@@ -894,6 +901,31 @@ class McpToolsTest {
 
     private var clock = 0L
 
+    /**
+     * The correlation surface the tool window implements over its cache.
+     *
+     * It computes with the real [Correlation], so the tools are exercised against the rules they
+     * actually ship with rather than a hand-written stand-in, and runs [offThread] inline — what
+     * is worth pinning is that the tools do their work inside it, not the scheduler.
+     */
+    private class FakeCorrelations(
+        var configured: List<CorrelationKey> = emptyList(),
+    ) : McpTools.Correlations {
+        var offThreadCalls = 0
+            private set
+
+        override fun keys(): List<CorrelationKey> = configured
+        override fun textOf(event: LogEvent): String = Correlation.searchableText(event)
+        override fun valuesOf(event: LogEvent) = Correlation.extract(event, configured)
+        override fun keyLabelFor(events: List<LogEvent>, value: String): String? =
+            Correlation.keyLabelFor(events, configured, value)
+
+        override fun offThread(work: () -> Unit) {
+            offThreadCalls++
+            work()
+        }
+    }
+
     private fun callAsync(
         name: String,
         args: JsonObject = JsonObject(emptyMap()),
@@ -901,10 +933,11 @@ class McpToolsTest {
         push: McpTools.Push? = null,
         waits: McpTools.Waits? = null,
         scenarios: McpTools.Scenarios? = null,
+        correlations: McpTools.Correlations? = null,
         capturing: Boolean = true,
     ): Answer = Answer().also { answer ->
         McpTools.callAsync(
-            name, args, events, push, waits, scenarios,
+            name, args, events, push, waits, scenarios, correlations,
             captureRunning = { capturing }, now = { clock }, onResult = answer::accept,
         )
     }
@@ -1009,6 +1042,8 @@ class McpToolsTest {
         assertTrue(callAsync("list_scenarios").get().containsKey("error"))
         assertTrue(callAsync("load_scenario").get().containsKey("error"))
         assertTrue(callAsync("save_scenario").get().containsKey("error"))
+        assertTrue(callAsync("get_related").get().containsKey("error"))
+        assertTrue(callAsync("list_correlation_keys").get().containsKey("error"))
     }
 
     // ---- inject_fcm ----------------------------------------------------------------------------
@@ -1459,5 +1494,269 @@ class McpToolsTest {
         val out = callWrite("create_mock", buildJsonObject { put("path_pattern", "/orders") }, mocks)
         assertTrue(out["active"]!!.jsonPrimitive.content.toBoolean())
         assertFalse(mocks.rules.single().let { it.responses.isNotEmpty() || it.matchQuery.isNotEmpty() })
+    }
+
+    // ---- correlation -----------------------------------------------------------------------------
+    //
+    // The shape these tools exist for, taken from the capture that prompted them: one flow whose
+    // events span two traces and one row with no trace at all, held together only by the order_id
+    // a human knows — and, on the push, nested as a JSON string inside data["body"].
+
+    private fun flow(): List<LogEvent> = listOf(
+        fcm("push-1", data = mapOf("body" to """{"order_id":"21053953","trip_id":"88123"}"""), at = 1_000),
+        // The id as a bare path segment, with no key beside it and no trace on the row.
+        http("h1", path = "/app/v4/79096/order/21053953/", at = 1_100),
+        http(
+            "h2", method = "PUT", path = "/app/v4/order/accept/",
+            body = """{"order_id":"21053953","trip_id":"88123"}""", traceId = "t2", at = 1_200,
+        ),
+        // A different order, in its own trace: the guard against a grouping that over-reaches.
+        http("h3", path = "/app/v4/79096/order/21053999/", traceId = "t3", at = 1_300),
+    )
+
+    private fun orderKeys(vararg names: String) =
+        FakeCorrelations(names.map { CorrelationKey(it) })
+
+    private fun related(args: JsonObject, correlations: McpTools.Correlations): JsonObject =
+        callAsync("get_related", args, flow(), correlations = correlations).get()
+
+    @Test fun `list_correlation_keys keeps the configured vocabulary and inert suggestions apart`() {
+        val correlations = orderKeys("order_id")
+        val out = callAsync("list_correlation_keys", events = flow(), correlations = correlations).get()
+
+        val configured = out["configured"]!!.jsonArray.single().jsonObject
+        assertEquals(1, out["configured_count"]!!.jsonPrimitive.int())
+        assertEquals("order_id", configured["key"]!!.jsonPrimitive.content)
+        assertTrue(configured["enabled"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals(4, configured["min_length"]!!.jsonPrimitive.int())
+        assertFalse(configured["allow_short_values"]!!.jsonPrimitive.content.toBoolean())
+        // "the values seen most recently" — an agent can go straight from here to get_related.
+        assertEquals("21053953", configured["latest_value"]!!.jsonPrimitive.content)
+
+        val suggested = out["suggested"]!!.jsonArray.map { it.jsonObject }
+        val trip = suggested.single { it["key"]!!.jsonPrimitive.content == "trip_id" }
+        assertTrue(trip["events_grouped"]!!.jsonPrimitive.int() >= 2, "evidence, not just a name")
+        assertTrue(trip["largest_group"]!!.jsonPrimitive.int() >= 2)
+        assertEquals(2, trip["events_carrying"]!!.jsonPrimitive.int())
+        assertEquals("88123", trip["latest_value"]!!.jsonPrimitive.content)
+        assertFalse(
+            suggested.any { it["key"]!!.jsonPrimitive.content == "order_id" },
+            "a key already configured is not offered back as something to add",
+        )
+        // Suggestions are a discovery aid a human confirms; nothing here may read as enabled.
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("INERT"))
+        assertEquals(listOf(CorrelationKey("order_id")), correlations.configured, "this tool enables nothing")
+    }
+
+    @Test fun `list_correlation_keys says when a project has no vocabulary yet`() {
+        val out = callAsync("list_correlation_keys", events = flow(), correlations = orderKeys()).get()
+        assertEquals(0, out["configured_count"]!!.jsonPrimitive.int())
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("No correlation key is configured"))
+        // The capture still has something to say, and get_related works without a configured key.
+        assertTrue(out["suggested_count"]!!.jsonPrimitive.int() >= 2)
+    }
+
+    @Test fun `list_correlation_keys explains a configured key that groups nothing`() {
+        val correlations = FakeCorrelations(
+            listOf(CorrelationKey("ghost_id"), CorrelationKey("order_id", enabled = false)),
+        )
+        val out = callAsync("list_correlation_keys", events = flow(), correlations = correlations).get()
+        val byKey = out["configured"]!!.jsonArray.associate {
+            it.jsonObject["key"]!!.jsonPrimitive.content to it.jsonObject
+        }
+        assertEquals(0, byKey["ghost_id"]!!["events_carrying"]!!.jsonPrimitive.int())
+        assertTrue(byKey["ghost_id"]!!["note"]!!.jsonPrimitive.content.contains("No event in this capture"))
+        assertTrue(byKey["order_id"]!!["note"]!!.jsonPrimitive.content.contains("Disabled"))
+    }
+
+    @Test fun `get_related groups a flow by key and value across traces and rows with none`() {
+        val correlations = orderKeys("order_id")
+        val out = related(buildJsonObject { put("key", "order_id"); put("value", "21053953") }, correlations)
+
+        assertEquals("order_id 21053953", out["grouped_by"]!!.jsonPrimitive.content)
+        assertEquals("order_id", out["key"]!!.jsonPrimitive.content)
+        assertEquals("21053953", out["value"]!!.jsonPrimitive.content)
+        assertEquals(3, out["count"]!!.jsonPrimitive.int())
+        // The push (no trace), the GET whose only mention is a path segment (no trace), and the
+        // PUT in its own trace — the grouping a trace structurally cannot produce.
+        assertEquals(listOf("push-1", "h1", "h2"), out.ids())
+        assertFalse(out.containsKey("note"), "a healthy group needs no explanation")
+        // The scan may never run on the transport's IO thread.
+        assertEquals(1, correlations.offThreadCalls)
+    }
+
+    @Test fun `get_related takes a bare value and labels it with the key that holds it`() {
+        val out = related(buildJsonObject { put("value", "21053953") }, orderKeys("order_id"))
+        assertEquals("order_id 21053953", out["grouped_by"]!!.jsonPrimitive.content)
+        assertEquals(3, out["count"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `a bare value no key claims is grouped, and says it is unlabelled`() {
+        val out = related(buildJsonObject { put("value", "21053999") }, orderKeys("order_id"))
+        assertEquals("value 21053999", out["grouped_by"]!!.jsonPrimitive.content)
+        assertFalse(out.containsKey("key"))
+        assertEquals(listOf("h3"), out.ids())
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("grouped by the value alone"))
+    }
+
+    @Test fun `get_related reads a pasted key=value pair`() {
+        val out = related(buildJsonObject { put("value", "\"order_id=21053953\"") }, orderKeys("order_id"))
+        assertEquals("order_id 21053953", out["grouped_by"]!!.jsonPrimitive.content)
+        assertEquals(3, out["count"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `get_related groups by an event's own keys and names the others`() {
+        val out = related(buildJsonObject { put("event_id", "push-1") }, orderKeys("order_id", "trip_id"))
+
+        // Configured order decides, exactly as the row menu and the hover glyph decide.
+        assertEquals("order_id 21053953", out["grouped_by"]!!.jsonPrimitive.content)
+        assertEquals(3, out["count"]!!.jsonPrimitive.int())
+        val other = out["other_keys"]!!.jsonArray.single().jsonObject
+        assertEquals("trip_id", other["key"]!!.jsonPrimitive.content)
+        assertEquals("88123", other["value"]!!.jsonPrimitive.content)
+        // Which id the flow is really about is the caller's question, so the road to it is stated.
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("trip_id 88123"))
+    }
+
+    @Test fun `the first configured key wins, and key picks another of the event's own`() {
+        // Same row, vocabulary in the other order: the user's ordering is the precedence.
+        val reordered = related(buildJsonObject { put("event_id", "push-1") }, orderKeys("trip_id", "order_id"))
+        assertEquals("trip_id 88123", reordered["grouped_by"]!!.jsonPrimitive.content)
+
+        val picked = related(
+            buildJsonObject { put("event_id", "push-1"); put("key", "trip_id") },
+            orderKeys("order_id", "trip_id"),
+        )
+        assertEquals("trip_id 88123", picked["grouped_by"]!!.jsonPrimitive.content)
+        assertEquals(listOf("push-1", "h2"), picked.ids())
+    }
+
+    @Test fun `get_related refuses an unknown key instead of guessing`() {
+        val out = related(buildJsonObject { put("key", "ordre_id"); put("value", "21053953") }, orderKeys("order_id"))
+        val error = out["error"]!!.jsonPrimitive.content
+        assertTrue(error.contains("not a configured correlation key"))
+        assertTrue(error.contains("order_id"), "name what is configured, so the fix is one call away")
+    }
+
+    @Test fun `a too-short value is refused out loud, never as an empty timeline`() {
+        val out = related(buildJsonObject { put("key", "order_id"); put("value", "210") }, orderKeys("order_id"))
+        assertTrue(out["too_short"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals(4, out["min_length"]!!.jsonPrimitive.int())
+        assertEquals(0, out["count"]!!.jsonPrimitive.int())
+        assertTrue(out["events"]!!.jsonArray.isEmpty())
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("TOO SHORT"))
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("short values"), "name the per-key opt-in")
+        assertFalse(out.containsKey("error"), "an explicit result an agent can read, not a failure")
+    }
+
+    @Test fun `the per-key short-value opt-in is honoured, not re-decided`() {
+        val opted = FakeCorrelations(listOf(CorrelationKey("order_id", allowShortValues = true)))
+        val out = related(buildJsonObject { put("key", "order_id"); put("value", "210") }, opted)
+        assertFalse(out.containsKey("too_short"), "the key's own rule decides, exactly as in the UI")
+    }
+
+    @Test fun `get_related says nothing carries a value, and stays delimiter-bounded`() {
+        val missing = related(buildJsonObject { put("value", "99999999") }, orderKeys("order_id"))
+        assertEquals(0, missing["count"]!!.jsonPrimitive.int())
+        assertTrue(missing["note"]!!.jsonPrimitive.content.contains("No event carries this value"))
+
+        // Four characters clears the length floor, so this is the boundary rule alone: '2105'
+        // sitting inside '21053953' is not a match, or every id would group with every other.
+        val partial = related(buildJsonObject { put("value", "2105") }, orderKeys("order_id"))
+        assertEquals(0, partial["count"]!!.jsonPrimitive.int())
+    }
+
+    @Test fun `get_related reports the whole group even when it pages`() {
+        val out = related(
+            buildJsonObject { put("key", "order_id"); put("value", "21053953"); put("limit", 2) },
+            orderKeys("order_id"),
+        )
+        assertEquals(3, out["count"]!!.jsonPrimitive.int(), "count is the group, not the page")
+        assertEquals(2, out["returned"]!!.jsonPrimitive.int())
+        assertEquals(listOf("h1", "h2"), out.ids(), "newest last, like list_events")
+        assertTrue(out["note"]!!.jsonPrimitive.content.contains("limit"))
+    }
+
+    @Test fun `get_related needs something to group by, and a real event id`() {
+        val correlations = orderKeys("order_id")
+        assertTrue(related(JsonObject(emptyMap()), correlations)["error"]!!.jsonPrimitive.content.contains("Provide"))
+        assertTrue(
+            related(buildJsonObject { put("event_id", "ghost") }, correlations)["error"]!!
+                .jsonPrimitive.content.contains("No event with id"),
+        )
+    }
+
+    @Test fun `an event carrying no key is told what to do instead`() {
+        val out = related(buildJsonObject { put("event_id", "h3") }, orderKeys("order_id"))
+        val error = out["error"]!!.jsonPrimitive.content
+        assertTrue(error.contains("no groupable correlation key"))
+        assertTrue(error.contains("t3"), "the row's own trace is the honest fallback to offer")
+    }
+
+    @Test fun `get_trace points at get_related when the trace isn't the flow`() {
+        // The gandalf failure mode: the app mints its own trace, HTTP rows never join it, and the
+        // trace answer is empty or a single row — which reads as "nothing happened" and isn't.
+        val empty = call("get_trace", flow(), buildJsonObject { put("trace_id", "nope") })
+        assertEquals(0, empty["count"]!!.jsonPrimitive.int())
+        assertTrue(empty["note"]!!.jsonPrimitive.content.contains("get_related"))
+        assertTrue(empty["note"]!!.jsonPrimitive.content.contains("business key"))
+
+        val lone = call("get_trace", flow(), buildJsonObject { put("trace_id", "t2") })
+        assertEquals(1, lone["count"]!!.jsonPrimitive.int())
+        assertTrue(lone["note"]!!.jsonPrimitive.content.contains("get_related(event_id='h2')"))
+    }
+
+    @Test fun `a trace that really does hold a flow is left alone`() {
+        val events = listOf(http("a", traceId = "t1"), http("b", traceId = "t1"))
+        val out = call("get_trace", events, buildJsonObject { put("trace_id", "t1") })
+        assertEquals(2, out["count"]!!.jsonPrimitive.int())
+        assertFalse(out.containsKey("note"), "a working trace needs no advice")
+    }
+
+    @Test fun `a correlation failure is answered, never left hanging`() {
+        // The work runs on a pooled thread; an exception escaping it would hold an agent's request
+        // open until its client gave up, which is the one outcome this layer never allows.
+        val broken = object : McpTools.Correlations {
+            override fun keys(): List<CorrelationKey> = error("the cache is gone")
+            override fun textOf(event: LogEvent) = ""
+            override fun valuesOf(event: LogEvent) = emptyList<KeyValue>()
+            override fun keyLabelFor(events: List<LogEvent>, value: String): String? = null
+            override fun offThread(work: () -> Unit) = work()
+        }
+        assertTrue(related(buildJsonObject { put("value", "21053953") }, broken).containsKey("error"))
+        assertTrue(
+            callAsync("list_correlation_keys", events = flow(), correlations = broken)
+                .get().containsKey("error"),
+        )
+    }
+
+    @Test fun `inject_fcm reports the id the injected row will carry`() {
+        // The ack correlation id, the message id and the FCM row's envelope id are one value. Two
+        // ids meant the reported id named nothing on the timeline, and the app's own re-log of the
+        // push landed beside it as a second, unmarked row.
+        val push = FakePush()
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("data", buildJsonObject { put("k", "v") }) },
+            push = push,
+        ).get()
+
+        val id = out["id"]!!.jsonPrimitive.content
+        assertEquals(id, push.sent!!.id)
+        assertEquals(id, push.sent!!.message.messageId)
+    }
+
+    @Test fun `a replayed push carries one fresh id too`() {
+        val push = FakePush()
+        val out = callAsync(
+            "inject_fcm",
+            buildJsonObject { put("from_event_id", "fcm-1") },
+            listOf(fcm("fcm-1")),
+            push = push,
+        ).get()
+
+        val id = out["id"]!!.jsonPrimitive.content
+        assertEquals(id, push.sent!!.message.messageId)
+        assertNotEquals("fcm-1", id, "a replay is a new message, or the app's own dedup swallows it")
     }
 }

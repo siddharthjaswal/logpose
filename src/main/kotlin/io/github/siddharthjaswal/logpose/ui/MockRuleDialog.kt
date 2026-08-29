@@ -20,7 +20,6 @@ import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.components.panels.VerticalLayout
 import com.intellij.util.ui.JBUI
-import com.intellij.util.ui.UIUtil
 import io.github.siddharthjaswal.logpose.model.MockRule
 import io.github.siddharthjaswal.logpose.model.Transaction
 import kotlinx.serialization.json.Json
@@ -30,10 +29,7 @@ import kotlinx.serialization.json.JsonObject
 import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.Component
-import java.awt.Cursor
 import java.awt.Dimension
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
 import java.util.UUID
 import javax.swing.Box
 import javax.swing.BoxLayout
@@ -72,9 +68,10 @@ class MockRuleDialog(
                 selected: Boolean, hasFocus: Boolean,
             ) {
                 text = value
+                // Method carries no hue any more — one axis owns hue, and it isn't this one.
+                // The foreground is left to the renderer so the highlighted row in the popup
+                // keeps the list's own selection contrast instead of a hard-coded neutral.
                 font = JBUI.Fonts.label(12f).asBold()
-                foreground = if (value != null && value != "*") Theme.methodColor(value)
-                else UIUtil.getLabelForeground()
             }
         }
     }
@@ -94,14 +91,7 @@ class MockRuleDialog(
     private val matchBody = JBTextField(initial.matchBodyContains.orEmpty())
     private var matchersExpanded = initial.matchQuery.isNotEmpty() ||
         initial.matchHeaders.isNotEmpty() || !initial.matchBodyContains.isNullOrBlank()
-    private val matchersToggle = JBLabel().apply {
-        foreground = Theme.accent
-        font = JBUI.Fonts.label(11f)
-        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) { matchersExpanded = !matchersExpanded; updateMatchers() }
-        })
-    }
+    private val matchersToggle = LinkLabel { matchersExpanded = !matchersExpanded; updateMatchers() }
     private lateinit var matchersFields: JComponent
 
     // ---- Then -----------------------------------------------------------------------------
@@ -138,13 +128,7 @@ class MockRuleDialog(
         border = JBUI.Borders.customLine(Theme.borderStrong, 1)
         preferredSize = Dimension(JBUI.scale(520), JBUI.scale(58))
     }
-    private val headersToggle = JBLabel().apply {
-        foreground = Theme.accent
-        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) { headersExpanded = !headersExpanded; updateHeaders() }
-        })
-    }
+    private val headersToggle = LinkLabel { headersExpanded = !headersExpanded; updateHeaders() }
     private val body = EditorTextField(
         EditorFactory.getInstance().createDocument(prettyBody(initial.body)),
         project, JsonFileType.INSTANCE, false, false,
@@ -648,18 +632,10 @@ class MockRuleDialog(
     private fun hgap(px: Int) = Box.createHorizontalStrut(JBUI.scale(px))
     private fun glue() = Box.createHorizontalGlue()
 
-    private fun link(text: String, onClick: () -> Unit) = JBLabel(text).apply {
-        foreground = Theme.accent; font = JBUI.Fonts.label(11f)
-        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        addMouseListener(object : MouseAdapter() { override fun mouseClicked(e: MouseEvent) = onClick() })
-    }
+    private fun link(text: String, onClick: () -> Unit) = LinkLabel(text, onClick)
 
     private fun iconLabel(icon: javax.swing.Icon, tip: String, onClick: () -> Unit) =
-        JBLabel(icon).apply {
-            toolTipText = tip
-            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-            addMouseListener(object : MouseAdapter() { override fun mouseClicked(e: MouseEvent) = onClick() })
-        }
+        IconButton(icon, tip, onClick)
 
     /** A short text area in a bordered box — the matcher inputs, which are 1–3 lines each. */
     private fun boxed(area: JBTextArea, height: Int): JComponent = JBScrollPane(area).apply {

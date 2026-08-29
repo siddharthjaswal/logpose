@@ -50,16 +50,9 @@ class ComposePushDialog(
     private val notificationBody = JBTextField(initial.notificationBody.orEmpty())
     private var notificationExpanded =
         !initial.notificationTitle.isNullOrBlank() || !initial.notificationBody.isNullOrBlank()
-    private val notificationToggle = JBLabel().apply {
-        foreground = Theme.accent
-        font = JBUI.Fonts.label(11f)
-        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) {
-                notificationExpanded = !notificationExpanded
-                updateNotification()
-            }
-        })
+    private val notificationToggle = LinkLabel {
+        notificationExpanded = !notificationExpanded
+        updateNotification()
     }
     private lateinit var notificationFields: JComponent
 

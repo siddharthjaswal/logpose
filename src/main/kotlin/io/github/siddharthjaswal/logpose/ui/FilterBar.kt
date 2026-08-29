@@ -4,8 +4,10 @@ import com.intellij.ui.DocumentAdapter
 import com.intellij.ui.SearchTextField
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
+import java.awt.AlphaComposite
 import java.awt.Color
 import java.awt.Component
 import java.awt.Cursor
@@ -127,17 +129,20 @@ class FilterBar : JPanel() {
     var onChange: () -> Unit = {}
 
     private val search = SearchTextField(false)
+    // Method and status chips are *selections*, not statements of what a call was, so they light
+    // in accent rather than in a per-verb or per-class hue: kind is the only axis that owns hue,
+    // and a "2xx" chip lit in the (now neutral) 2xx colour would read as disabled.
     private val methodChips = linkedMapOf(
-        "GET" to chip("GET", Theme.methodColor("GET"), flat = true),
-        "POST" to chip("POST", Theme.methodColor("POST"), flat = true),
-        "PUT" to chip("PUT", Theme.methodColor("PUT"), flat = true),
-        "DELETE" to chip("DELETE", Theme.methodColor("DELETE"), flat = true),
+        "GET" to chip("GET", Theme.accent, flat = true),
+        "POST" to chip("POST", Theme.accent, flat = true),
+        "PUT" to chip("PUT", Theme.accent, flat = true),
+        "DELETE" to chip("DELETE", Theme.accent, flat = true),
     )
     private val statusChips = linkedMapOf(
-        2 to chip("2xx", Theme.statusColor(200, null), flat = false),
-        3 to chip("3xx", Theme.statusColor(300, null), flat = false),
-        4 to chip("4xx", Theme.statusColor(400, null), flat = false),
-        5 to chip("5xx", Theme.statusColor(500, null), flat = false),
+        2 to chip("2xx", Theme.accent, flat = false),
+        3 to chip("3xx", Theme.accent, flat = false),
+        4 to chip("4xx", Theme.accent, flat = false),
+        5 to chip("5xx", Theme.accent, flat = false),
     )
     private val hideNoise = ToggleSwitch { onChange() }
     private val dupChip = chip("⚠ Dupes", Theme.warn, flat = false)
@@ -157,6 +162,30 @@ class FilterBar : JPanel() {
     )
     private val count = JBLabel().apply { foreground = Theme.textMuted }
 
+    /**
+     * The active correlation grouping, when the timeline is narrowed to one key value.
+     *
+     * Kept beside the chips rather than inside [FilterState] for the same reason "duplicates
+     * only" is: deciding it needs the whole capture (a value can hide in a body the row never
+     * shows), so the panel applies it against its cached haystacks and this bar only *states* it.
+     */
+    private var correlation: Grouping? = null
+    private val correlationChip = RemovableChip { setCorrelationFilter(null) }
+
+    /** Opens the bar's overflow menu — correlation keys, find by value. */
+    var onOverflow: (Component) -> Unit = {}
+
+    private val overflow = JBLabel("⋯", SwingConstants.CENTER).apply {
+        foreground = Theme.textDim
+        font = JBUI.Fonts.label(15f).asBold()
+        border = JBUI.Borders.empty(0, 8)
+        toolTipText = "More — correlation keys, find by value"
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) = onOverflow(this@apply)
+        })
+    }
+
     init {
         isOpaque = false
         layout = java.awt.BorderLayout()
@@ -171,8 +200,26 @@ class FilterBar : JPanel() {
         count.border = JBUI.Borders.empty(0, 10)
 
         add(controlsRow(), java.awt.BorderLayout.WEST)
-        add(count, java.awt.BorderLayout.EAST)
+        add(hbox(correlationChip, strut(6), overflow, count), java.awt.BorderLayout.EAST)
     }
+
+    /**
+     * Narrows the timeline to one correlation grouping, shown as a removable chip — the same way
+     * filtering by trace reads today, except that a key can say what it is grouping by.
+     * Null clears it.
+     */
+    fun setCorrelationFilter(grouping: Grouping?) {
+        if (correlation == grouping) return
+        correlation = grouping
+        // The bar's width belongs to the chips on the left, so a long id is trimmed here rather
+        // than allowed to squeeze them; the tooltip still carries the whole thing.
+        correlationChip.show(grouping?.let { "${ellipsize(it.shortLabel, 34)}   ✕" })
+        correlationChip.toolTipText = grouping?.let { "Filtered by ${it.shortLabel} — click to remove" }
+        revalidate(); repaint()
+        onChange()
+    }
+
+    fun correlationFilter(): Grouping? = correlation
 
     fun state() = FilterState(
         urlQuery = search.text.trim(),
@@ -256,14 +303,67 @@ class FilterBar : JPanel() {
     }
 
     private fun strut(px: Int) = Box.createHorizontalStrut(JBUI.scale(px))
+
+    private fun ellipsize(text: String, max: Int) =
+        if (text.length <= max) text else text.take(max - 1) + "…"
 }
 
-/** A toggle pill. `flat` = no own border (for use inside a segmented group). */
+/**
+ * A filter the user can see and take off again: `order_id 21053953  ✕`.
+ *
+ * Distinct from [ToggleChip] because it isn't a mode you switch — it's one specific narrowing,
+ * created by a row menu or a pasted value, and the only thing to do with it is remove it.
+ */
+class RemovableChip(private val onRemove: () -> Unit) : JLabel("", SwingConstants.CENTER) {
+
+    init {
+        isOpaque = false
+        isVisible = false
+        border = JBUI.Borders.empty(3, 11)
+        font = JBUI.Fonts.label(11.5f).asBold()
+        foreground = Theme.accent
+        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) = onRemove()
+        })
+    }
+
+    /** Shows [label], or hides the chip entirely when it's null. */
+    fun show(label: String?) {
+        text = label.orEmpty()
+        isVisible = label != null
+    }
+
+    override fun paintComponent(g: Graphics) {
+        val g2 = g.create() as Graphics2D
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        g2.color = Theme.accentTint
+        g2.fillRoundRect(0, 0, width - 1, height - 1, 10, 10)
+        g2.color = Theme.accent
+        g2.drawRoundRect(0, 0, width - 1, height - 1, 10, 10)
+        g2.dispose()
+        super.paintComponent(g)
+    }
+}
+
+/**
+ * A toggle pill: label 11.5 bold, padding 3/13, radius 10.
+ *
+ * Unselected is a `borderStrong` outline over `textDim`; selected fills with [color] at 40 alpha
+ * and strokes and letters in [color]. Hover is a single swap with no transition — unselected
+ * gains a `bg2` fill and lifts to `text`, selected deepens its tint by 8 alpha — so a chip
+ * answers "am I a control?" before anyone clicks it.
+ *
+ * `flat` = no own border **and no hover**, for chips embedded in a segmented frame where the
+ * frame, not the chip, owns the rollover.
+ */
 class ToggleChip(text: String, private val color: Color, private val flat: Boolean, onToggle: () -> Unit) :
     JLabel(text, SwingConstants.CENTER) {
 
     var selected = false
         private set
+
+    private var hovered = false
 
     init {
         isOpaque = false
@@ -274,22 +374,44 @@ class ToggleChip(text: String, private val color: Color, private val flat: Boole
         addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 selected = !selected
-                foreground = if (selected) color else Theme.textDim
+                applyForeground()
                 repaint()
                 onToggle()
             }
+
+            override fun mouseEntered(e: MouseEvent) {
+                if (flat) return
+                hovered = true; applyForeground(); repaint()
+            }
+
+            override fun mouseExited(e: MouseEvent) {
+                if (flat) return
+                hovered = false; applyForeground(); repaint()
+            }
         })
+    }
+
+    private fun applyForeground() {
+        foreground = when {
+            selected -> color
+            hovered -> Theme.text
+            else -> Theme.textDim
+        }
     }
 
     override fun paintComponent(g: Graphics) {
         val g2 = g.create() as Graphics2D
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
         if (selected) {
-            g2.color = Theme.tint(color, 40)
+            g2.color = Theme.tint(color, if (hovered) 48 else 40)
             g2.fillRoundRect(0, 0, width - 1, height - 1, 10, 10)
             g2.color = color
             g2.drawRoundRect(0, 0, width - 1, height - 1, 10, 10)
         } else if (!flat) {
+            if (hovered) {
+                g2.color = Theme.bg2
+                g2.fillRoundRect(0, 0, width - 1, height - 1, 10, 10)
+            }
             g2.color = Theme.borderStrong
             g2.drawRoundRect(0, 0, width - 1, height - 1, 10, 10)
         }
@@ -298,24 +420,57 @@ class ToggleChip(text: String, private val color: Color, private val flat: Boole
     }
 }
 
-/** A small on/off switch. */
+/**
+ * A small on/off switch: 34×20 stadium, 14px knob inset 3, `accent` on / `bg3` off.
+ *
+ * Hover deepens the track (`accentHover` when on, `borderStrong` when off) so the switch reads as
+ * throwable before it's thrown. [setEnabled]`(false)` paints the whole control at 40% alpha and
+ * drops the hand cursor, the hover and the click — the alpha goes on the composite rather than on
+ * each colour, so the knob/track relationship survives the fade.
+ */
 class ToggleSwitch(initialOn: Boolean = false, private val onToggle: () -> Unit) : JComponent() {
     var on = initialOn
         private set
+
+    private var hovered = false
 
     init {
         cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         val d = Dimension(JBUI.scale(34), JBUI.scale(20))
         preferredSize = d; minimumSize = d; maximumSize = d
         addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) { on = !on; repaint(); onToggle() }
+            override fun mouseClicked(e: MouseEvent) {
+                if (!isEnabled) return
+                on = !on; repaint(); onToggle()
+            }
+
+            override fun mouseEntered(e: MouseEvent) {
+                if (!isEnabled) return
+                hovered = true; repaint()
+            }
+
+            override fun mouseExited(e: MouseEvent) { hovered = false; repaint() }
         })
+    }
+
+    override fun setEnabled(enabled: Boolean) {
+        super.setEnabled(enabled)
+        cursor = if (enabled) Cursor.getPredefinedCursor(Cursor.HAND_CURSOR) else Cursor.getDefaultCursor()
+        if (!enabled) hovered = false
+        repaint()
     }
 
     override fun paintComponent(g: Graphics) {
         val g2 = g.create() as Graphics2D
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        g2.color = if (on) Theme.accent else Theme.bg3
+        if (!isEnabled) {
+            g2.composite = AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.4f)
+        }
+        g2.color = when {
+            on -> if (hovered) Theme.accentHover else Theme.accent
+            hovered -> Theme.borderStrong
+            else -> Theme.bg3
+        }
         g2.fillRoundRect(0, 0, width - 1, height - 1, height, height)
         val knob = height - JBUI.scale(6)
         val x = if (on) width - knob - JBUI.scale(3) else JBUI.scale(3)

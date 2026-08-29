@@ -276,8 +276,10 @@ data class FcmMessage(
     /**
      * True when LogPose itself delivered this push on the IDE's behalf (see [PushInject]) rather
      * than the app reporting one Firebase actually delivered. The timeline never passes an
-     * injected push off as a real one; the library's `logFcmMessage` always leaves this false.
-     * Library 1.7.0+; older payloads simply omit it.
+     * injected push off as a real one — including when the app's own messaging service re-logs
+     * the injected push through `logFcmMessage`: library 1.7.1+ recognises that re-log by its
+     * message id, keeps the flag, and emits it under the same envelope id so the two land on one
+     * row. Library 1.7.0+; older payloads simply omit it.
      */
     val injected: Boolean = false,
 )
@@ -435,7 +437,12 @@ data class MockAck(
 @Serializable
 data class PushInject(
     val kind: String = "push_inject",
-    /** Correlation id: the FCM row's envelope id, and the id the [PushAck] comes back under. */
+    /**
+     * Correlation id: the FCM row's envelope id, the id the [PushAck] comes back under, and —
+     * since 1.9.0 / library 1.7.1 — [PushMessage.messageId] itself. One value for all three is
+     * what makes the app's own re-log of the injected push land on the row LogPose already
+     * emitted, instead of appearing beside it as an unmarked twin (see `mock/PushReplay`).
+     */
     val id: String,
     /** Trace to deliver inside, so everything the push triggers lands in one `get_trace` group. */
     val traceId: String? = null,

@@ -11,14 +11,11 @@ import io.github.siddharthjaswal.logpose.model.MockRule
 import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Component
-import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
 import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JLabel
@@ -27,7 +24,7 @@ import javax.swing.SwingConstants
 
 /**
  * Collapsible strip under the filter bar listing active mock rules — styled to match the
- * timeline rows (colored method badge, status pill, latency/hit chips) so mocks read as
+ * timeline rows (weighted method label, status pill, latency/hit chips) so mocks read as
  * first-class. Enable toggle, edit / delete, "Disable all", and the device sync state.
  * Rebuilt wholesale on each [refresh]; the rule count is small, so simplicity beats diffing.
  */
@@ -48,16 +45,11 @@ class MocksBar(
     }
     private val syncDot = JBLabel("●").apply { font = JBUI.Fonts.label(9f) }
     private val syncText = JBLabel().apply { font = JBUI.Fonts.label(11f) }
-    private val disableAll = linkLabel("Disable all") { onDisableAll() }
-    private val scenarios = JBLabel("Scenarios ▾").apply {
-        foreground = Theme.accent
-        font = JBUI.Fonts.label(11f)
-        cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+    private val disableAll = LinkLabel("Disable all") { onDisableAll() }
+    private val scenarios = LinkLabel("Scenarios ▾").apply {
         toolTipText = "Save the current rules, snapshot the session, or load a saved scenario " +
             "from .logpose/scenarios"
-        addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) = onScenarios(this@apply)
-        })
+        onClick = { onScenarios(this) }
     }
 
     init {
@@ -72,8 +64,10 @@ class MocksBar(
             isOpaque = false
             val left = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(7), 0)).apply {
                 isOpaque = false
+                // A caption, not a state: it names the strip rather than saying anything about it,
+                // so it sits in textDim and leaves the colour budget to the rules underneath.
                 add(JBLabel("MOCKS").apply {
-                    foreground = Theme.methodColor("PATCH"); font = JBUI.Fonts.label(10.5f).asBold()
+                    foreground = Theme.textDim; font = JBUI.Fonts.label(10.5f).asBold()
                 })
                 add(syncDot)
                 add(syncText)
@@ -140,7 +134,7 @@ class MocksBar(
                 tip = "Waiting for the device to acknowledge revision ${sync.revision}."
             }
             else -> {
-                syncDot.foreground = Theme.methodColor("POST") // green
+                syncDot.foreground = Theme.ok
                 syncText.foreground = Theme.textDim
                 syncText.text = "$name  ·  synced rev ${device.syncedRevision}"
                 tip = buildString {
@@ -168,8 +162,9 @@ class MocksBar(
         val withheld = device.helloSeen && !DeviceCapability.canPush(rule, device.libVersion)
 
         val method = JLabel(rule.method, SwingConstants.LEFT).apply {
-            font = JBUI.Fonts.label(11f).asBold()
-            foreground = fade(Theme.methodColor(rule.method), on)
+            // Same rule as the timeline row: no hue, weight does the work.
+            font = if (Theme.isRead(rule.method)) JBUI.Fonts.label(11f) else JBUI.Fonts.label(11f).asBold()
+            foreground = fade(Theme.methodTextColor(rule.method), on)
             val d = Dimension(JBUI.scale(46), JBUI.scale(20))
             preferredSize = d; minimumSize = d; maximumSize = d
         }
@@ -197,8 +192,10 @@ class MocksBar(
                 add(chip("only when", Theme.accent, on))
                 add(Box.createHorizontalStrut(JBUI.scale(6)))
             }
+            // "×3 steps" states a shape, not a severity — neutral, so the outcome pill beside it
+            // stays the only coloured thing in the row's right half.
             MockRuleForm.stepsLabel(rule)?.let {
-                add(chip(it, Theme.methodColor("GET"), on))
+                add(chip(it, Theme.textDim, on))
                 add(Box.createHorizontalStrut(JBUI.scale(6)))
             }
             add(outcome)
@@ -218,12 +215,12 @@ class MocksBar(
             // Quick diff: original captured response vs what this rule serves, without opening the
             // editor. Only meaningful when the rule actually has a body to compare.
             if (!rule.body.isNullOrBlank()) {
-                add(iconLabel(AllIcons.Actions.Diff, "Diff vs original") { onDiff(rule) })
+                add(IconButton(AllIcons.Actions.Diff, "Diff vs original") { onDiff(rule) })
                 add(Box.createHorizontalStrut(JBUI.scale(6)))
             }
-            add(iconLabel(AllIcons.Actions.Edit, "Edit") { onEdit(rule) })
+            add(IconButton(AllIcons.Actions.Edit, "Edit") { onEdit(rule) })
             add(Box.createHorizontalStrut(JBUI.scale(6)))
-            add(iconLabel(AllIcons.General.Remove, "Delete") { onDelete(rule.id) })
+            add(IconButton(AllIcons.General.Remove, "Delete") { onDelete(rule.id) })
         }
 
         val west = JPanel(FlowLayout(FlowLayout.LEFT, JBUI.scale(8), 0)).apply {
@@ -269,11 +266,11 @@ class MocksBar(
         val status = MockRuleForm.effectiveStatus(rule)
         val behavior = MockRuleForm.effectiveBehavior(rule)
         when {
-            // Patch rules keep the backend's status — the response is merged, not replaced.
-            rule.mode == MockRule.MODE_PATCH -> {
-                val c = Theme.methodColor("PATCH")
-                set("MERGE", fade(c, on), tintFor(c, on))
-            }
+            // Patch rules keep the backend's status — the response is merged, not replaced. A
+            // merge is LogPose reaching into the response, so it wears the solid intervention
+            // fill the MOCK pill wears in the row it will produce.
+            rule.mode == MockRule.MODE_PATCH ->
+                set("MERGE", fade(Theme.onAccent, on), fade(Theme.intervention, on))
             behavior == MockRule.BEHAVIOR_TIMEOUT ->
                 set("TIMEOUT", fade(Theme.warn, on), tintFor(Theme.warn, on))
             behavior == MockRule.BEHAVIOR_CONNECTION_FAILURE ->
@@ -294,25 +291,6 @@ class MocksBar(
     /** Dims a color when the rule is disabled, so the whole row reads as "off". */
     private fun fade(c: Color, on: Boolean): Color = if (on) c else Theme.fade(c, 0.5f)
     private fun tintFor(c: Color, on: Boolean): Color = Theme.tint(c, if (on) 26 else 12)
-
-    private fun iconLabel(icon: javax.swing.Icon, tip: String, onClick: () -> Unit) =
-        JLabel(icon).apply {
-            toolTipText = tip
-            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-            addMouseListener(object : MouseAdapter() {
-                override fun mouseClicked(e: MouseEvent) = onClick()
-            })
-        }
-
-    private fun linkLabel(text: String, onClick: () -> Unit) =
-        JBLabel(text).apply {
-            foreground = Theme.accent
-            font = JBUI.Fonts.label(11f)
-            cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
-            addMouseListener(object : MouseAdapter() {
-                override fun mouseClicked(e: MouseEvent) = onClick()
-            })
-        }
 
     /** A rounded card surface for one rule, with a little vertical breathing room below it. */
     private class CardRow : JPanel(BorderLayout()) {

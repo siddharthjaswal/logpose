@@ -397,10 +397,22 @@ object LogPose {
 
     // ---- Push messaging ---------------------------------------------------------------
 
-    /** Record an incoming FCM push. Call from `FirebaseMessagingService.onMessageReceived`. */
+    /**
+     * Record an incoming FCM push. Call from `FirebaseMessagingService.onMessageReceived`.
+     *
+     * A push LogPose injected itself (see `mock/PushInjector`) reaches the app's own messaging
+     * service like any other, so this is normally called again for it. That re-log is recognised
+     * by its [FcmMessageInfo.messageId] and stays flagged [WireFcmMessage.injected]: the timeline
+     * must never pass an injected push off as a real one, and the envelope id it shares with the
+     * injected emission collapses the two into one updating row rather than an unmarked twin.
+     */
     fun logFcmMessage(info: FcmMessageInfo, config: LogPoseConfig = LogPoseConfig()) {
         if (!config.enabled) return
-        emitFcm(fcmMessage(info, id = info.messageId ?: newId()), config)
+        val messageId = info.messageId?.takeIf { it.isNotBlank() }
+        emitFcm(
+            fcmMessage(info, id = messageId ?: newId(), injected = wasInjected(messageId)),
+            config,
+        )
     }
 
     /** Record an FCM registration-token refresh. Call from `onNewToken`. */
@@ -464,8 +476,15 @@ object LogPose {
     /**
      * Emit the timeline row for a push LogPose injected on the IDE's behalf (see
      * `mock/PushInjector`), flagged [WireFcmMessage.injected] so the capture never passes it off
-     * as a real one. The envelope id and trace come from the injection, so the ack, the row, and
-     * everything the push triggers all line up.
+     * as a real one. The trace comes from the injection, so the row and everything the push
+     * triggers all line up.
+     *
+     * The envelope id is the **message id** — the same trick [logWorker] uses to keep one row per
+     * request. The app's own `onMessageReceived` re-logs this push through [logFcmMessage] moments
+     * later; keying both emissions on the message id lands them on one row in the IDE's id-keyed
+     * store instead of two, and [rememberInjected] keeps that second row honest about where the
+     * push came from. [id] (the ack's correlation id) is the fallback for a push carrying no
+     * message id of its own — the IDE sends the two as the same value.
      */
     internal fun logInjectedFcm(
         info: FcmMessageInfo,
@@ -474,8 +493,48 @@ object LogPose {
         config: LogPoseConfig = LogPoseConfig(),
     ) {
         if (!config.enabled) return
-        emitFcm(fcmMessage(info, id = id, injected = true), config, traceId)
+        val messageId = info.messageId?.takeIf { it.isNotBlank() }
+        rememberInjected(messageId)
+        emitFcm(fcmMessage(info, id = messageId ?: id, injected = true), config, traceId)
     }
+
+    /**
+     * Message ids LogPose delivered itself, so the app's re-log of one is still reported as
+     * injected. Bounded, oldest evicted first: injections are a developer action a few at a time,
+     * and a set that grew with the session would be a leak in a library that must cost a debug
+     * build nothing. Guarded by its own monitor — an injection arrives on a broadcast thread and
+     * the re-log on whatever thread FCM delivers on, and both are far too rare for the lock to
+     * be worth avoiding.
+     */
+    private val injectedMessageIds = LinkedHashSet<String>()
+
+    private fun rememberInjected(messageId: String?) {
+        if (messageId == null) return
+        synchronized(injectedMessageIds) {
+            // Remove-then-add so re-injecting an id refreshes its place in the queue;
+            // LinkedHashSet orders by first insertion, not by last.
+            injectedMessageIds.remove(messageId)
+            injectedMessageIds.add(messageId)
+            while (injectedMessageIds.size > MAX_INJECTED_IDS) {
+                injectedMessageIds.remove(injectedMessageIds.first())
+            }
+        }
+    }
+
+    private fun wasInjected(messageId: String?): Boolean =
+        messageId != null && synchronized(injectedMessageIds) { messageId in injectedMessageIds }
+
+    /** Test hook: forget which pushes were injected, so cases don't leak into each other. */
+    internal fun clearInjectedPushIds() = synchronized(injectedMessageIds) {
+        injectedMessageIds.clear()
+    }
+
+    /** Test hook: how many injected message ids are remembered (see [MAX_INJECTED_IDS]). */
+    internal fun injectedPushIdCount(): Int = synchronized(injectedMessageIds) {
+        injectedMessageIds.size
+    }
+
+    private const val MAX_INJECTED_IDS = 32
 
     /** The wire form of an [FcmMessageInfo]; shared by the real and the injected paths. */
     private fun fcmMessage(

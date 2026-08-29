@@ -13,14 +13,11 @@ import java.awt.FlowLayout
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.RenderingHints
-import java.awt.event.MouseAdapter
-import java.awt.event.MouseEvent
 import java.awt.geom.RoundRectangle2D
 import java.text.SimpleDateFormat
 import java.util.Date
 import javax.swing.Box
 import javax.swing.BoxLayout
-import javax.swing.JLabel
 import javax.swing.JPanel
 
 /**
@@ -43,7 +40,9 @@ class OverviewPanel : CardPanel(null) {
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS")
 
     private val statusPill = TagLabel().apply { font = JBUI.Fonts.label(13f).asBold() }
-    private val methodPill = TagLabel().apply { font = JBUI.Fonts.label(12f).asBold() }
+    private val methodFontRegular = JBUI.Fonts.label(12f)
+    private val methodFontBold = JBUI.Fonts.label(12f).asBold()
+    private val methodPill = TagLabel().apply { font = methodFontBold }
     private val dupBanner = JBLabel().apply {
         font = JBUI.Fonts.label(11.5f).asBold()
         border = JBUI.Borders.empty(5, 10)
@@ -109,13 +108,7 @@ class OverviewPanel : CardPanel(null) {
         val title = JBLabel("Overview").apply {
             foreground = Theme.text; font = JBUI.Fonts.label(13f).asBold()
         }
-        val copy = JLabel(AllIcons.Actions.Copy).apply {
-            toolTipText = "Copy transaction JSON"
-            cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
-            addMouseListener(object : MouseAdapter() {
-                override fun mouseClicked(e: MouseEvent) = onCopyJson()
-            })
-        }
+        val copy = IconButton(AllIcons.Actions.Copy, "Copy transaction JSON") { onCopyJson() }
         return object : JPanel(BorderLayout()) {
             override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
         }.apply {
@@ -193,7 +186,7 @@ class OverviewPanel : CardPanel(null) {
         applyDuplicate(tx, dup)
         applyError(tx)
         if (tx == null) {
-            statusPill.set("—", Theme.textDim, Theme.bg2)
+            statusPill.set("—", Theme.statusNeutral, Theme.statusNeutralBg)
             methodPill.set("", Theme.textDim, null)
             url.text = "Select a request"
             chips.removeAll(); chips.revalidate(); chips.repaint()
@@ -214,8 +207,10 @@ class OverviewPanel : CardPanel(null) {
             val label = if (tx.mocked) "MOCK · $base" else base
             statusPill.set(label, sColor, Theme.statusTint(code, tx.error))
         }
-        val mColor = Theme.methodColor(tx.request.method)
-        methodPill.set(tx.request.method, mColor, Theme.bg2)
+        // Method carries no hue — read vs write is weight, so a POST looks heavier than a GET
+        // without borrowing a colour that status already means something with.
+        methodPill.font = if (Theme.isRead(tx.request.method)) methodFontRegular else methodFontBold
+        methodPill.set(tx.request.method, Theme.methodTextColor(tx.request.method), Theme.bg2)
 
         url.text = tx.request.url
 

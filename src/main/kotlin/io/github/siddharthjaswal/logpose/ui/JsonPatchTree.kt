@@ -243,7 +243,7 @@ class JsonPatchTree : JPanel(BorderLayout()) {
         private val keyField = JBTextField(14)
         private val valueField = JBTextField(22)
         private val typeCombo = com.intellij.openapi.ui.ComboBox(arrayOf("string", "number", "boolean", "null"))
-        private val removeBtn = linkLabel("Remove") { removeCurrent() }
+        private val removeBtn = LinkLabel("Remove") { removeCurrent() }
         private var updating = false
 
         init {
@@ -344,24 +344,15 @@ class JsonPatchTree : JPanel(BorderLayout()) {
 
     private fun JBLabel.withMuted(): JBLabel = apply { foreground = Theme.textDim; font = JBUI.Fonts.label(11f) }
 
-    private fun linkLabel(text: String, onClick: () -> Unit) = JBLabel(text).apply {
-        foreground = Theme.accent
-        font = JBUI.Fonts.label(11f)
-        cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
-        addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mouseClicked(e: java.awt.event.MouseEvent) = onClick()
-        })
-    }
-
-    private fun iconLink(icon: javax.swing.Icon, tip: String, onClick: () -> Unit) = JBLabel(tip, icon, JBLabel.LEFT).apply {
-        foreground = Theme.accent
-        font = JBUI.Fonts.label(11f)
-        iconTextGap = JBUI.scale(4)
-        cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
-        addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mouseClicked(e: java.awt.event.MouseEvent) = onClick()
-        })
-    }
+    /**
+     * A [LinkLabel] carrying a leading icon. Not an [IconButton]: the visible text is the point —
+     * "Add a new field" is discoverable, a bare `+` with a tooltip is not.
+     */
+    private fun iconLink(icon: javax.swing.Icon, text: String, onClick: () -> Unit) =
+        LinkLabel(text, onClick).apply {
+            this.icon = icon
+            iconTextGap = JBUI.scale(4)
+        }
 
     private companion object {
         val CHANGED = SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, Theme.accent)

@@ -42,8 +42,10 @@ import javax.swing.SwingConstants
  *
  *   `FCM      [NOTIF]    title / from … …          n keys  time`
  *
- * Per spec §4, METHOD is plain colored bold text in a fixed column; only the status is a
- * pill. Muted (HTTP) rows are shorter (26px) and faded; hover reveals a cURL affordance.
+ * METHOD is plain text in a fixed column, carrying **no hue** — reads are regular `methodRead`,
+ * writes bold `methodWrite` — so the only coloured pills in a row are the status (semantic) and
+ * the solid-accent MOCK/INJ marks (LogPose's own interventions). Muted (HTTP) rows are shorter
+ * (26px) and faded; hover reveals a cURL affordance.
  */
 class TransactionListRenderer : ListCellRenderer<LogEvent> {
 
@@ -58,7 +60,22 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     /** Duplicate-burst mark for a transaction, or null if it isn't a repeated call. */
     var duplicateProvider: (Transaction) -> DuplicateDetector.Mark? = { null }
 
+    /**
+     * Whether this row can open a flow — a configured correlation key value, or a trace.
+     *
+     * This is asked on every paint, so it **must** answer from a cache
+     * ([io.github.siddharthjaswal.logpose.analysis.CorrelationIndex.hasCachedKeyValue]) and never
+     * scan a payload. A row whose values aren't cached yet simply doesn't offer the affordance;
+     * one click's worth of missing glyph is the right price for never scanning inside a repaint.
+     */
+    var groupingProvider: (LogEvent) -> Boolean = { false }
+
     private val timeFmt = SimpleDateFormat("HH:mm:ss")
+
+    // Method weight is the whole read/write signal now that method carries no hue, so both faces
+    // are built once rather than derived per row.
+    private val methodFontRegular = JBUI.Fonts.label(11f)
+    private val methodFontBold = JBUI.Fonts.label(11f).asBold()
 
     // ---- HTTP row -------------------------------------------------------------------------
     private val httpIcon = JLabel(TypeIcons.forKind(Envelope.KIND_HTTP)).fixed(JBUI.scale(18), JBUI.scale(20))
@@ -221,7 +238,7 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         isSelected: Boolean,
         cellHasFocus: Boolean,
     ): Component = when (value) {
-        is LogEvent.Http -> httpRow(value.tx, index, isSelected)
+        is LogEvent.Http -> httpRow(value, index, isSelected)
         is LogEvent.Fcm -> fcmRow(value, index, isSelected)
         // Everything else — db, worker, config, and app-defined kinds — shares one row, driven
         // by KindPresenter. Their differences are presentational, so they don't warrant
@@ -259,6 +276,11 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         genCount.text = badges.getOrNull(1)?.text.orEmpty()
         genCount.foreground = Theme.textDim
 
+        if (index == hoveredIndex && canGroup(value)) {
+            genTime.text = FLOW
+            genTime.foreground = Theme.accent
+            return genRow
+        }
         genTime.text = when {
             // A worker that's still running is genuinely open and the state badge already says
             // so, so a spinner would be redundant here too.
@@ -281,7 +303,8 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         else -> "${millis / 60_000}m ${(millis % 60_000) / 1000}s"
     }
 
-    private fun httpRow(value: Transaction, index: Int, isSelected: Boolean): Component {
+    private fun httpRow(event: LogEvent.Http, index: Int, isSelected: Boolean): Component {
+        val value = event.tx
         val muted = MutedEndpoints.isMuted(value)
         val hovered = index == hoveredIndex
         row.selected = isSelected
@@ -290,9 +313,12 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
 
         fun shade(c: Color): Color = if (!muted) c else Theme.fade(c, if (hovered) 0.7f else 0.34f)
 
-        val mColor = Theme.methodColor(value.request.method)
+        // Method carries no hue: read vs write is weight. An unknown verb is treated as a write,
+        // because a verb LogPose doesn't recognise is far likelier to change state than not.
+        val read = Theme.isRead(value.request.method)
         methodLabel.text = value.request.method
-        methodLabel.foreground = shade(mColor)
+        methodLabel.font = if (read) methodFontRegular else methodFontBold
+        methodLabel.foreground = shade(Theme.methodTextColor(value.request.method))
 
         val pending = value.isPending()
         val code = value.response?.code
@@ -307,15 +333,18 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         path.text = value.request.path.ifBlank { value.request.url }
         path.foreground = shade(Theme.text)
 
+        // MOCK is the one solid-accent fill a row may carry: it says LogPose itself caused this
+        // response. Solid (not tinted) keeps it distinct from the 15%-accent selection tint.
         if (value.mocked) {
-            val mColorMock = Theme.methodColor("PATCH")
             mockTag.isVisible = true
-            mockTag.set("MOCK", shade(mColorMock), if (muted) Theme.tint(mColorMock, 14) else Theme.tint(mColorMock, 30))
+            mockTag.set("MOCK", shade(Theme.onAccent), shade(Theme.intervention))
         } else {
             mockTag.isVisible = false
             mockTag.set("", Theme.text, null)
         }
 
+        // DUP is outlined, never filled. A filled amber/red pill states a fact about the response;
+        // an outlined one offers advice about the call — the border keeps the two grammars apart.
         val dup = duplicateProvider(value)
         if (dup != null) {
             val fg = when (dup.severity) {
@@ -323,13 +352,8 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
                 DuplicateDetector.Severity.MEDIUM -> Theme.warn
                 DuplicateDetector.Severity.INFO -> Theme.textDim
             }
-            val bg = when (dup.severity) {
-                DuplicateDetector.Severity.STRONG -> Theme.dangerTint
-                DuplicateDetector.Severity.MEDIUM -> Theme.warnTint
-                DuplicateDetector.Severity.INFO -> Theme.tint(Theme.textDim, 22)
-            }
             dupTag.isVisible = true
-            dupTag.set("DUP ×${dup.ordinal}", shade(fg), if (muted) Theme.tint(fg, 14) else bg)
+            dupTag.set("DUP ×${dup.ordinal}", shade(fg), null, stroke = shade(fg))
         } else {
             dupTag.isVisible = false
             dupTag.set("", Theme.text, null)
@@ -344,8 +368,15 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
             hovered && !muted -> {
                 sizeLabel.text = "⧉ cURL"
                 sizeLabel.foreground = Theme.accent
-                duration.text = value.durationMillis?.let { "${it}ms" } ?: ""
-                duration.foreground = shade(Theme.textMuted)
+                // The duration column doubles as the flow affordance, exactly as the size column
+                // doubles as the cURL one — same band, same hover, same single click.
+                if (canGroup(event)) {
+                    duration.text = FLOW
+                    duration.foreground = Theme.accent
+                } else {
+                    duration.text = value.durationMillis?.let { "${it}ms" } ?: ""
+                    duration.foreground = shade(Theme.textMuted)
+                }
             }
             else -> {
                 sizeLabel.text = value.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { Theme.humanSize(it) } ?: ""
@@ -364,23 +395,21 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         fcmRow.hovered = index == hoveredIndex && !isSelected
         fcmRow.rowHeight = 34
 
+        // TOKEN / NOTIF / DATA is a *label*, not a severity: which of the three it is changes
+        // nothing about how urgent the row is, so all three are neutral. The FCM hue is already
+        // stated once, by the gutter glyph.
         val kind = fcmKind(msg)
-        val kColor = when (kind) {
-            "TOKEN" -> Theme.accent
-            "NOTIF" -> Theme.methodColor("PATCH")
-            else -> Theme.textDim // DATA
-        }
-        fcmTag.set(kind, kColor, Theme.tint(kColor, 22))
+        fcmTag.set(kind, Theme.textDim, Theme.bg2)
 
         fcmText.text = fcmSummary(msg)
         fcmText.foreground = Theme.text
 
-        // A push LogPose itself delivered is marked, always — the same trust rule as the purple
-        // MOCK pill, in the FCM hue: the timeline never passes an injected push off as a real one.
+        // A push LogPose itself delivered is marked, always — the same trust rule and the same
+        // solid-intervention fill as the MOCK pill: the timeline never passes an injected push
+        // off as a real one, and both interventions look alike whatever kind they land on.
         if (msg.injected) {
-            val c = Theme.typeColor(Envelope.KIND_FCM)
             injTag.isVisible = true
-            injTag.set("INJ", c, Theme.tint(c, 30))
+            injTag.set("INJ", Theme.onAccent, Theme.intervention)
         } else {
             injTag.isVisible = false
             injTag.set("", Theme.text, null)
@@ -393,8 +422,13 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
         // An injected push has no device receive-time of its own, so fall back to the envelope's
         // clock rather than leaving the column blank.
         val at = msg.receivedAtMillis.takeIf { it > 0 } ?: event.timestampMillis
-        fcmTime.text = at.takeIf { it > 0 }?.let { timeFmt.format(Date(it)) } ?: ""
-        fcmTime.foreground = Theme.textMuted
+        if (index == hoveredIndex && canGroup(event)) {
+            fcmTime.text = FLOW
+            fcmTime.foreground = Theme.accent
+        } else {
+            fcmTime.text = at.takeIf { it > 0 }?.let { timeFmt.format(Date(it)) } ?: ""
+            fcmTime.foreground = Theme.textMuted
+        }
 
         return fcmRow
     }
@@ -428,8 +462,34 @@ class TransactionListRenderer : ListCellRenderer<LogEvent> {
     fun isInCurlZone(rowWidth: Int, x: Int): Boolean =
         x in (rowWidth - JBUI.scale(146))..(rowWidth - JBUI.scale(74))
 
+    /**
+     * The flow affordance occupies the duration column — the band immediately right of the cURL
+     * one, with a gap between them so a click near the boundary can only ever mean one of the two.
+     */
+    fun isInFlowZone(rowWidth: Int, x: Int): Boolean =
+        x in (rowWidth - JBUI.scale(70))..(rowWidth - JBUI.scale(6))
+
+    /**
+     * Whether a hovered row actually paints the flow glyph — the click zone asks this so it can
+     * only ever fire where something was drawn. Cache-backed; never scans.
+     */
+    fun paintsFlow(event: LogEvent): Boolean = when (event) {
+        // A pending row's duration column is its live timer, which outranks an affordance; a
+        // muted row paints no affordances at all.
+        is LogEvent.Http -> !event.tx.isPending() && !MutedEndpoints.isMuted(event.tx) && canGroup(event)
+        else -> canGroup(event)
+    }
+
+    private fun canGroup(event: LogEvent): Boolean =
+        groupingProvider(event) || !event.traceId.isNullOrBlank()
+
     private fun <T : JLabel> T.fixed(w: Int, h: Int): T = apply {
         val d = Dimension(w, h); preferredSize = d; minimumSize = d; maximumSize = d
+    }
+
+    private companion object {
+        /** The hover glyph for "open this row's flow", paired with "⧉ cURL" beside it. */
+        const val FLOW = "⇉ flow"
     }
 
     private class RowPanel : JPanel(BorderLayout()) {

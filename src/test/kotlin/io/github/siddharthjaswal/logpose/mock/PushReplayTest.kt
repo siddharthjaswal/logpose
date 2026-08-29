@@ -92,14 +92,39 @@ class PushReplayTest {
 
     @Test
     fun `an injection always gets its own fresh trace, so two replays are two flows`() {
-        val message = PushReplay.toMessage(captured, "id", 1)
-        val first = PushReplay.inject(message)
-        val second = PushReplay.inject(message)
+        val first = PushReplay.inject(PushReplay.toMessage(captured, PushReplay.newId(), 1))
+        val second = PushReplay.inject(PushReplay.toMessage(captured, PushReplay.newId(), 2))
 
         assertNotEquals(first.traceId, second.traceId)
         assertNotEquals(first.id, second.id)
         assertTrue(first.traceId!!.isNotBlank())
         assertEquals("push_inject", first.kind)
-        assertEquals(message, first.message)
+    }
+
+    @Test
+    fun `the injection id and the message id are one value`() {
+        // Two ids meant two rows: the device emits the injected row under the message id, and the
+        // app's own service re-logs the same push under the same id moments later. Daylight
+        // between them is what put an unmarked twin on the timeline (correlation PRD §1a).
+        val message = PushReplay.toMessage(captured, "inj-abc123", 1)
+        val injection = PushReplay.inject(message)
+
+        assertEquals("inj-abc123", injection.id)
+        assertEquals(injection.id, injection.message.messageId)
+        assertEquals(message, injection.message, "every other field travels untouched")
+    }
+
+    @Test
+    fun `a message with no id of its own is stamped with the injection id`() {
+        val composed = PushMessage(data = mapOf("orderId" to "42"))
+        val injection = PushReplay.inject(composed)
+
+        assertTrue(injection.id.isNotBlank())
+        assertEquals(injection.id, injection.message.messageId)
+
+        // An explicit id wins, and takes the message with it.
+        val forced = PushReplay.inject(composed, id = "chosen")
+        assertEquals("chosen", forced.id)
+        assertEquals("chosen", forced.message.messageId)
     }
 }

@@ -52,7 +52,9 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
     /** Says out loud that LogPose delivered this push — the detail half of the row's INJ pill. */
     private val injectedBanner = JBLabel("⚡  Injected by LogPose — delivered into the app on your " +
         "behalf, not by Firebase").apply {
-        foreground = Theme.typeColor(Envelope.KIND_FCM)
+        // Intervention, not kind: kind hues are confined to the glyph, the TYPE chip, the kind
+        // pill and waterfall marks, and this banner is the detail half of the row's INJ pill.
+        foreground = Theme.intervention
         font = JBUI.Fonts.label(11.5f).asBold()
         isVisible = false
     }
@@ -110,8 +112,8 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
             return
         }
 
-        val (kind, color) = kindOf(msg)
-        kindPill.set(kind, color, Theme.tint(color, 30))
+        val kind = kindOf(msg)
+        kindPill.set(kind, Theme.textDim, Theme.statusNeutralBg)
         eventLabel.text = if (msg.event == "token") "Token refresh" else "Push message"
         summary.text = summaryOf(msg)
         injectedBanner.isVisible = msg.injected
@@ -149,10 +151,15 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
         payload.setElement(payloadJson(msg))
     }
 
-    private fun kindOf(msg: FcmMessage): Pair<String, java.awt.Color> = when {
-        msg.event == "token" -> "TOKEN" to Theme.accent
-        msg.notification != null -> "NOTIF" to Theme.methodColor("PATCH")
-        else -> "DATA" to Theme.textDim
+    /**
+     * TOKEN / NOTIF / DATA — a label, not a severity. All three render neutral (the same pill the
+     * timeline row shows), because which of the three a push is says nothing about how much it
+     * matters; the FCM hue is stated once, by the header glyph.
+     */
+    private fun kindOf(msg: FcmMessage): String = when {
+        msg.event == "token" -> "TOKEN"
+        msg.notification != null -> "NOTIF"
+        else -> "DATA"
     }
 
     private fun summaryOf(msg: FcmMessage): String = when {

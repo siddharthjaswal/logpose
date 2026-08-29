@@ -42,6 +42,8 @@ object McpSessions {
         val push: McpTools.Push? = null,
         /** Committable scenario files; null for a project with no directory on disk. */
         val scenarios: McpTools.Scenarios? = null,
+        /** The project's correlation keys and their cache; null without a tool window. */
+        val correlations: McpTools.Correlations? = null,
         /**
          * "Tell me when the app does X", backed by [EventStore.addWaiter]. Passed as a lambda like
          * everything else here so a stale session can't keep a store alive by identity alone.

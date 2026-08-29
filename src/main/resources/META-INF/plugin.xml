@@ -27,6 +27,10 @@
             <li><b>Read</b> — <code>list_events</code>, <code>get_event</code>,
                 <code>get_trace</code>, <code>find_failures</code>,
                 <code>session_summary</code></li>
+            <li><b>Follow one id</b> — <code>get_related</code> returns every event carrying a
+                business id (<i>order_id 21053953</i>) as a timeline, across traces and including
+                rows with no trace at all; <code>list_correlation_keys</code> says which keys this
+                project uses</li>
             <li><b>Diagnose</b> — <code>query_hotspots</code>, <code>worker_history</code>,
                 <code>config_changes</code>: "what's making this screen slow?", "did SyncWorker
                 retry?", "what flag changed before this broke?"</li>
@@ -97,19 +101,59 @@
                 network). Re-send a captured push verbatim, or compose a new one</li>
             <li><b>Trace waterfall</b> — read a whole flow on one time axis: what the push set off,
                 what overlapped, what is still running, and what took the longest</li>
+            <li><b>Correlation keys</b> — group that flow by the id you actually know
+                (<i>order_id 21053953</i>) rather than a trace hash. The key names a value; the
+                value is matched anywhere in an event, so the group spans traces and reaches rows
+                that carry none. Paste an id from a ticket with <b>Find by value…</b></li>
         </ul>
 
         <p>
             Requires the <code>logpose-android</code> interceptor in your debug/staging build (a
             zero-overhead no-op ships for release). Mocking needs <code>logpose-android</code>
             1.2.1+; database, worker, config and app events need 1.4.0+; push injection and the
-            new mock matchers/steps need 1.7.0+. Works in IntelliJ IDEA and Android Studio, light
-            and dark.
+            new mock matchers/steps need 1.7.0+, and 1.7.1+ collapses an injected push and the
+            app's own re-log of it into a single row. Correlation keys need no library support at
+            all — they read the payloads you already emit. Works in IntelliJ IDEA and Android
+            Studio, light and dark.
         </p>
     ]]></description>
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Group a flow by the id you actually know</b> — define your app's correlation
+                keys (<code>order_id</code>, <code>trip_id</code>) in the filter bar's
+                <b>⋯ → Correlation keys…</b>, seeded with suggestions found in the capture, and
+                every entry point reads <i>order_id 21053953</i> instead of a trace hash. The key
+                only names a <b>value</b>; the value does the matching — anywhere in an event's
+                url, bodies, FCM data, db args or sections — so a group spans several traces and
+                reaches the <code>GET /order/21053953/</code> that carries no trace at all. The
+                scan parses JSON nested inside string values (an FCM <code>data["body"]</code>),
+                and matching is delimiter-bounded with a 4-character floor, so <code>2105</code>
+                never matches <code>21053953</code>. Keys are per project; LogPose ships none of
+                its own, and a suggestion groups nothing until you tick it.</li>
+            <li><b>Open a flow from anywhere</b> — a row's menu leads with <b>Show waterfall —
+                order_id 21053953</b> and <b>Filter by order_id 21053953</b> (trace actions still
+                there, now labelled as traces); the hover band that shows <code>⧉ cURL</code> also
+                shows a <code>⇉ flow</code> glyph that opens the row's best grouping in one click;
+                the waterfall header states what it grouped by and offers a switcher between
+                <code>order_id</code> / <code>trip_id</code> / <code>trace</code>; and a key filter
+                appears as a removable chip. <b>Find by value…</b> needs no row at all: paste an id
+                from a ticket or a backend log and it tells you how many events carry it before you
+                commit.</li>
+            <li><b>Two new MCP tools (21 total)</b> — <code>get_related</code> returns everything
+                carrying one business id in <code>get_trace</code>'s shape (by key + value, by a
+                bare pasted value, or by <code>event_id</code>), and
+                <code>list_correlation_keys</code> reports the configured vocabulary plus inert
+                suggestions. <code>get_trace</code> now explains an empty result — an app that
+                mints its own trace for a push, or an HTTP client not built with
+                <code>LogPose.traceCalls(...)</code>, is the usual reason — and points at
+                <code>get_related</code>.</li>
+            <li><b>An injected push is one row again</b> — the app's own
+                <code>FirebaseMessagingService</code> re-logging a push LogPose injected used to
+                add an unmarked twin beside it. With <code>logpose-android</code> &ge; 1.7.1 both
+                emissions share the message id, so they collapse into one row that stays marked
+                <b>INJ</b>. Note the consequence: the surviving row carries the <i>app's</i> trace
+                rather than the injection's, which is one more reason to group these by key.</li>
             <li><b>Start a flow, don't just watch it</b> — right-click any captured push →
                 <b>Re-send this push</b>, or <b>Compose push…</b> for a new one: LogPose delivers
                 it into the running app in-process, no Play services and no network. Register

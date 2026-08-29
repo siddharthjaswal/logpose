@@ -25,9 +25,10 @@ it exceeds logcat's limit). It also:
 > plugin **1.5.0+** is the first version able to read — on an older plugin the timeline simply
 > stays empty, with no error to tell you why. Plugin **1.6.0+** additionally renders db, worker
 > and config as first-class rows, **1.7.0+** splits a capture that spans an app restart into
-> separate sessions, and **1.8.0+** is required for push injection, scenarios and the new mock
-> matchers/steps this version adds. On a newer plugin an older library still works: legacy
-> payloads are recognised and wrapped.
+> separate sessions, **1.8.0+** is required for push injection, scenarios and the new mock
+> matchers/steps, and **1.9.0+** sends an injection id this version can collapse an injected
+> push's re-log onto (below). On a newer plugin an older library still works: legacy payloads are
+> recognised and wrapped.
 
 ```kotlin
 // settings.gradle.kts
@@ -38,9 +39,9 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.0")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.1")
     // Release builds: a zero-overhead no-op with the same API (no logcat, no extra deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.0")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.1")
 }
 ```
 
@@ -131,8 +132,19 @@ row → **Re-send this push**, or **Compose push…** for a new one.
   `onMessageReceived` path. It cannot reproduce the system-tray path of a *background
   notification* message, because that's the OS posting a notification, not your app receiving
   one. Data messages are what trigger flows, so this is the useful half.
-- Injected rows carry `injected = true` on the wire and show an **INJ** pill in the timeline;
-  `logFcmMessage` from your real service never sets it, so the capture can't confuse the two.
+- Injected rows carry `injected = true` on the wire and show an **INJ** pill in the timeline. You
+  never set that flag yourself — it comes from the injection, so the capture can't confuse a real
+  push with one the IDE sent.
+- **One row, not two** (v1.7.1+, with plugin 1.9.0+). Your service receives an injected push like
+  any other and normally re-logs it through `logFcmMessage`, which used to add a second,
+  *unmarked* row 20-odd ms after the first. LogPose now emits the injected row under the **message
+  id** as its envelope id and remembers the last 32 injected message ids, so your re-log lands on
+  the same row and keeps the `injected` flag. Nothing to change in your code — keep calling
+  `logFcmMessage` from `onMessageReceived` exactly as above.
+  - Because the re-log arrives second, it is what the surviving row reflects — including **your**
+    ambient trace (or none) in place of the injection's. That's the honest reading of what
+    happened, and it's why the IDE's `order_id`-style correlation keys, not traces, are the
+    reliable way to group an injected flow.
 
 Injection arrives over the same DUMP-gated adb receiver mocks use — it ships **only in the real
 artifact**, and the release no-op mirrors `onPushInject` as an inert function.
