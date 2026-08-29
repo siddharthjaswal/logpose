@@ -27,8 +27,27 @@ import javax.swing.JPanel
  */
 class OverviewPanel : CardPanel(null) {
 
+    /**
+     * Which call of a collapsed polling run is on screen — `3 / 30`, 1-based.
+     *
+     * The row shows one line for a run of identical calls, with a `~median` duration; this is how
+     * the card says which of them it is actually describing. Absent (null) for every ordinary row,
+     * and then the stepper is not merely disabled but invisible, so a single-occurrence hero lays
+     * out exactly as it did before the stepper existed.
+     */
+    data class Occurrence(val index: Int, val total: Int)
+
     var onCopyCurl: () -> Unit = {}
     var onCopyJson: () -> Unit = {}
+
+    /**
+     * Walks the shown occurrence by ±1. The owner ([TransactionDetailView]) re-renders the whole
+     * card, not just this hero: the Request and Response JSON belong to the occurrence too.
+     *
+     * Stepping changes **which response you are looking at** and nothing else — not the list
+     * selection (the other occurrences have no row of their own to move to) and not the waterfall.
+     */
+    var onStep: (Int) -> Unit = {}
 
     /**
      * Opens the trace waterfall. Only the **LogPose** trace chip is a link: a server-side
@@ -83,6 +102,33 @@ class OverviewPanel : CardPanel(null) {
         isOpaque = false
         layout = BoxLayout(this, BoxLayout.X_AXIS)
     }
+
+    // ---- occurrence stepper ------------------------------------------------------------------
+    // Sits at the EAST end of the pill row, which was empty: the stepper is a property of *which
+    // response you are looking at*, and the pills are what it changes. The chips row below reflows
+    // as its contents change, so it is the wrong neighbour for a control that must hold still.
+    private val prevOccurrence = IconButton(AllIcons.Actions.PreviousOccurence, "Previous occurrence") { onStep(-1) }
+    private val nextOccurrence = IconButton(AllIcons.Actions.NextOccurence, "Next occurrence") { onStep(+1) }
+    private val occurrenceCaption = JBLabel("occurrence").apply {
+        foreground = Theme.textMuted; font = JBUI.Fonts.label(11f)
+    }
+    private val occurrenceCount = JBLabel().apply {
+        foreground = Theme.textDim
+        font = JBUI.Fonts.create("JetBrains Mono", 11)
+        border = JBUI.Borders.empty(0, 2)
+    }
+    private val stepper = JPanel().apply {
+        isOpaque = false
+        layout = BoxLayout(this, BoxLayout.X_AXIS)
+        add(occurrenceCaption)
+        add(Box.createHorizontalStrut(JBUI.scale(6)))
+        add(prevOccurrence)
+        add(occurrenceCount)
+        add(nextOccurrence)
+        // BorderLayout skips invisible children, so a hidden stepper costs the pill row no height.
+        isVisible = false
+    }
+
     private lateinit var headerComp: Component
 
     private var pending = false
@@ -175,7 +221,12 @@ class OverviewPanel : CardPanel(null) {
 
             add(bannerHolder)
             add(vGap(8))
-            add(row(hbox(mockPill, mockGap, statusPill, Box.createHorizontalStrut(JBUI.scale(8)), methodPill), fill = false))
+            add(
+                pillRow(
+                    hbox(mockPill, mockGap, statusPill, Box.createHorizontalStrut(JBUI.scale(8)), methodPill),
+                    stepper,
+                ),
+            )
             add(vGap(8))
             add(row(url, fill = true))
             errorRow = row(errorText, fill = true)
@@ -191,15 +242,18 @@ class OverviewPanel : CardPanel(null) {
 
     /**
      * Shows [tx]. [envelope] is the transport it arrived in — the only carrier of the LogPose
-     * trace id, which the transaction payload itself doesn't hold.
+     * trace id, which the transaction payload itself doesn't hold. [occurrence] is set only when
+     * the selected row stands for a collapsed run of calls, and is what puts the stepper on screen.
      */
     fun show(
         tx: Transaction?,
         dup: DuplicateDetector.Mark? = null,
         envelope: io.github.siddharthjaswal.logpose.model.Envelope? = null,
+        occurrence: Occurrence? = null,
     ) {
         applyDuplicate(tx, dup)
         applyError(tx)
+        applyOccurrence(if (tx == null) null else occurrence)
         if (tx == null) {
             showMock(false)
             statusPill.set("—", Theme.statusNeutral, Theme.statusNeutralBg)
@@ -264,6 +318,27 @@ class OverviewPanel : CardPanel(null) {
             chips.add(c)
         }
         chips.revalidate(); chips.repaint()
+    }
+
+    /**
+     * Shows or hides the `occurrence ‹ n / N ›` stepper.
+     *
+     * The arrows disable rather than wrap at the ends: a run is a stretch of time, and stepping off
+     * the newest call back to the oldest would say something about the order that isn't true.
+     */
+    private fun applyOccurrence(occurrence: Occurrence?) {
+        if (occurrence == null || occurrence.total <= 1) {
+            stepper.isVisible = false
+            return
+        }
+        occurrenceCount.text = "${occurrence.index} / ${occurrence.total}"
+        prevOccurrence.isEnabled = occurrence.index > 1
+        nextOccurrence.isEnabled = occurrence.index < occurrence.total
+        occurrenceCount.toolTipText =
+            "Call ${occurrence.index} of ${occurrence.total} folded into this row (matching the current filter)"
+        stepper.isVisible = true
+        stepper.revalidate()
+        stepper.repaint()
     }
 
     /** Shows or hides the `MOCK` pill and the gap that only exists to separate it from the status. */
@@ -351,6 +426,28 @@ class OverviewPanel : CardPanel(null) {
         429 -> "Too Many Requests"; 500 -> "Internal Server Error"; 502 -> "Bad Gateway"
         503 -> "Service Unavailable"; 504 -> "Gateway Timeout"; else -> ""
     }
+
+    /** The status/method pills at the west end, the occurrence stepper (when there is one) at the east. */
+    private fun pillRow(pills: Component, east: Component): JPanel =
+        object : JPanel(BorderLayout()) {
+            override fun getMaximumSize() = Dimension(Int.MAX_VALUE, preferredSize.height)
+        }.apply {
+            isOpaque = false
+            alignmentX = LEFT_ALIGNMENT
+            add(pills, BorderLayout.WEST)
+            add(east, BorderLayout.EAST)
+            // §3.3's narrow rule applied to the hero: in a cramped detail pane the word
+            // "occurrence" goes and the stepper is just `‹ 3 / 30 ›`, so a long status message
+            // ("503 Service Unavailable" next to a MOCK pill) never has to fight it for the row.
+            addComponentListener(object : java.awt.event.ComponentAdapter() {
+                override fun componentResized(e: java.awt.event.ComponentEvent) {
+                    val roomy = width >= JBUI.scale(340)
+                    if (occurrenceCaption.isVisible == roomy) return
+                    occurrenceCaption.isVisible = roomy
+                    stepper.revalidate()
+                }
+            })
+        }
 
     private fun row(c: Component, fill: Boolean): JPanel =
         object : JPanel(BorderLayout()) {

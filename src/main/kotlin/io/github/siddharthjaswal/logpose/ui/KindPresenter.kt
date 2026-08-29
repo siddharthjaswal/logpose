@@ -62,6 +62,31 @@ object KindPresenter {
             ?: if (msg.event == "token") "token refreshed" else "data message"
 
     /**
+     * True when a badge only repeats the row's own kind — `ANALYTICS` on an analytics event.
+     *
+     * The kind is already stated by the glyph beside it and by the detail header's kind pill, so
+     * echoing it in a badge spends a row's most contested space saying nothing. The detail card has
+     * always dropped these; the row is now held to the same rule, from this one predicate so the
+     * two cannot drift.
+     */
+    fun isKindEcho(badge: Badge, event: LogEvent): Boolean =
+        badge.text.equals(event.kind, ignoreCase = true) ||
+            badge.text.equals(kindLabel(event), ignoreCase = true)
+
+    /** The event's badges with the kind echo removed — what both the row and the card show. */
+    fun rowBadges(event: LogEvent): List<Badge> = rowBadges(event, present(event))
+
+    /**
+     * The same, for a caller that already has the presentation.
+     *
+     * [present] rebuilds a [GenericEvent] on every call — for a config update that means building
+     * its sections' JSON — and a row painter asks several of these questions about the same event,
+     * so handing the presentation back in keeps a repaint to one construction rather than four.
+     */
+    fun rowBadges(event: LogEvent, presentation: GenericEvent?): List<Badge> =
+        presentation?.badges.orEmpty().filterNot { isKindEcho(it, event) }
+
+    /**
      * The presentation for a structured event, or the device's own for a self-describing one.
      * Null when the kind has a bespoke view instead (HTTP, FCM).
      */

@@ -299,6 +299,73 @@ class TagLabel(arc: Int = 6) : JLabel("", SwingConstants.CENTER) {
     }
 }
 
+/**
+ * A single line of text made of several **runs**, each with its own font and colour, ellipsized as
+ * one.
+ *
+ * A `JLabel` carries exactly one font and one colour, which is why the generic row used to paint
+ * `title  ·  subtitle` in a single flat run — and why a db row could not put its table in label 12.5
+ * `text` and the statement behind it in mono 11 `textMuted` (§2.4, §6). This does, with a bounded
+ * cost: one `stringWidth` per run that fits, plus a binary search over the one run that doesn't.
+ * A `JLabel`'s own ellipsis already measures, so this is not new work in a repaint — but the string
+ * handed in must still be capped by the caller, never the untruncated payload.
+ */
+class RunLabel : JComponent() {
+
+    data class Run(val text: String, val font: Font, val color: Color)
+
+    var runs: List<Run> = emptyList()
+
+    init { isOpaque = false }
+
+    override fun getPreferredSize(): Dimension = Dimension(0, JBUI.scale(20))
+    override fun getMinimumSize(): Dimension = Dimension(0, JBUI.scale(20))
+
+    override fun paintComponent(g: Graphics) {
+        if (runs.isEmpty()) return
+        val g2 = g.create() as Graphics2D
+        g2.aa()
+        val insets = insets
+        val available = width - insets.left - insets.right
+        // One shared baseline, taken from the first run, so a mono 11 tail sits on the same line as
+        // the label 12.5 name it follows rather than drifting by the second font's ascent.
+        val primary = getFontMetrics(runs[0].font)
+        val baseline = (height + primary.ascent - primary.descent) / 2
+        var x = insets.left
+        for (run in runs) {
+            if (run.text.isEmpty()) continue
+            val fm = getFontMetrics(run.font)
+            val remaining = insets.left + available - x
+            if (remaining <= 0) break
+            g2.font = run.font
+            g2.color = run.color
+            val w = fm.stringWidth(run.text)
+            if (w <= remaining) {
+                g2.drawString(run.text, x, baseline)
+                x += w
+            } else {
+                g2.drawString(clip(run.text, fm, remaining), x, baseline)
+                break
+            }
+        }
+        g2.dispose()
+    }
+
+    /** Longest prefix of [text] that fits in [max] with an ellipsis, found by binary search. */
+    private fun clip(text: String, fm: java.awt.FontMetrics, max: Int): String {
+        val ell = "…"
+        val ellW = fm.stringWidth(ell)
+        if (ellW > max) return ""
+        var lo = 0
+        var hi = text.length
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            if (fm.stringWidth(text.substring(0, mid)) + ellW <= max) lo = mid else hi = mid - 1
+        }
+        return text.substring(0, lo) + ell
+    }
+}
+
 /** A rounded card surface with a subtle border. */
 open class CardPanel(layout: java.awt.LayoutManager? = java.awt.BorderLayout()) : JPanel(layout) {
     var arc = 10
@@ -506,6 +573,11 @@ class LinkLabel(text: String = "", action: () -> Unit = {}) : JBLabel(text) {
  * it replaces had a 16px target and no rollover at all, so an action you could see was an action
  * you had to guess at.
  *
+ * `isEnabled = false` gives the same treatment §5 specifies for a disabled ToggleSwitch — the whole
+ * control at 40% alpha, no cursor, no hover, no click. An end of the occurrence stepper is the
+ * first place that was needed: an arrow that silently does nothing is worse than one that says it
+ * cannot.
+ *
  * The tint is done here rather than through `IconUtil.colorize`: that function carries Kotlin
  * default arguments whose synthetic `colorize$default` bridge changed arity between 2024.1 and
  * 2025.2, so a call to it fails the plugin verifier on the newer IDEs. The re-colour below uses
@@ -527,12 +599,23 @@ class IconButton(private val icon: javax.swing.Icon, tooltip: String, action: ()
         val d = Dimension(JBUI.scale(26), JBUI.scale(26))
         preferredSize = d; minimumSize = d; maximumSize = d
         addMouseListener(object : java.awt.event.MouseAdapter() {
-            override fun mouseEntered(e: java.awt.event.MouseEvent) { hovered = true; repaint() }
+            override fun mouseEntered(e: java.awt.event.MouseEvent) { if (isEnabled) { hovered = true; repaint() } }
             override fun mouseExited(e: java.awt.event.MouseEvent) { hovered = false; pressed = false; repaint() }
-            override fun mousePressed(e: java.awt.event.MouseEvent) { pressed = true; repaint() }
+            override fun mousePressed(e: java.awt.event.MouseEvent) { if (isEnabled) { pressed = true; repaint() } }
             override fun mouseReleased(e: java.awt.event.MouseEvent) { pressed = false; repaint() }
-            override fun mouseClicked(e: java.awt.event.MouseEvent) = onClick()
+            override fun mouseClicked(e: java.awt.event.MouseEvent) { if (isEnabled) onClick() }
         })
+    }
+
+    override fun setEnabled(enabled: Boolean) {
+        if (enabled == isEnabled) return
+        super.setEnabled(enabled)
+        // A rollover left behind by the state change would outlive the pointer, so both flags are
+        // dropped rather than trusted to a mouseExited that may never come.
+        hovered = false
+        pressed = false
+        cursor = Cursor.getPredefinedCursor(if (enabled) Cursor.HAND_CURSOR else Cursor.DEFAULT_CURSOR)
+        repaint()
     }
 
     /**
@@ -569,7 +652,8 @@ class IconButton(private val icon: javax.swing.Icon, tooltip: String, action: ()
         val g2 = g.create() as Graphics2D
         g2.aa()
         val arc = JBUI.scale(6)
-        val active = pressed || hovered
+        val active = isEnabled && (pressed || hovered)
+        if (!isEnabled) g2.composite = AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.4f)
         if (active) {
             g2.color = if (pressed) Theme.bg3 else Theme.bg2
             g2.fillRoundRect(0, 0, width, height, arc, arc)

@@ -30,7 +30,9 @@ import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.analysis.Groupings
+import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.analysis.Suggestion
+import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
@@ -50,6 +52,7 @@ import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.PushMessage
 import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.ui.ComposePushDialog
 import io.github.siddharthjaswal.logpose.ui.CorrelationKeysDialog
@@ -119,13 +122,67 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     // Latest duplicate-burst marks, keyed by transaction id; recomputed each refresh and read
     // by the renderer, the row tooltip, and the detail banner.
     private var duplicateMarks: Map<String, DuplicateDetector.Mark> = emptyMap()
-    private val list = object : JBList<LogEvent>(javax.swing.DefaultListModel<LogEvent>()) {
+
+    /**
+     * The state sequence each worker request was observed to pass through.
+     *
+     * The store cannot answer this: the library reuses `workId` as the envelope id, so a re-put
+     * replaces the earlier state rather than adding a row — which is what makes a worker one
+     * mutating row, and what destroys enqueued/running once the terminal state lands. Written on the
+     * reader thread beside the correlation warm-up; read by one context-menu item.
+     */
+    private val workerLifecycle = WorkerLifecycle()
+
+    /**
+     * Which collapsed groups the user has opened, by [RowCollapse.Row.key].
+     *
+     * A panel field, deliberately: the renderer is a rubber stamp with no per-row state, and the
+     * list model is thrown away and rebuilt every 150ms. The key embeds the group's **anchor event
+     * id**, so it survives both — and it is never an index and never a row object's identity, so a
+     * new poll arriving cannot silently re-key a group the user expanded. Pruned each refresh
+     * against the keys the pass actually produced, so a long session can't accumulate keys whose
+     * anchors the store has since evicted.
+     */
+    private val expandedGroups = HashSet<String>()
+
+    /**
+     * Every event id in the list, mapped to the row standing for it — a folded poll's members and a
+     * transaction's ceremony included. This is what lets a waterfall lane click reach a row that no
+     * longer has an element of its own, and what expands a collapsed row back into its members when
+     * a timeline is copied.
+     */
+    private var memberRows: Map<String, RowCollapse.Row> = emptyMap()
+
+    /**
+     * The filtered list the current rows were folded from — kept so the context menu can ask what a
+     * row would belong to if *nothing* were expanded, which is the only way "Collapse this run"
+     * can find its target from one of the members it was expanded into. Recomputing there costs one
+     * O(n) pass on a right-click, which is far cheaper than folding twice on every 150ms tick.
+     */
+    private var lastFiltered: List<LogEvent> = emptyList()
+
+    /**
+     * The collapsed run the detail card is currently describing, by [RowCollapse.Row.key], and the
+     * occurrence within it the user stepped to.
+     *
+     * A null pin means *follow the latest*, which is how a run opens (§6: the row shows the latest
+     * timestamp, so the card agrees with it). The first arrow click pins, and a pinned card holds
+     * still while the run keeps growing underneath it — only the `n / N` total moves. The pin is
+     * dropped the moment the selection moves to a different row, so it can never describe a run the
+     * user has left.
+     */
+    private var shownGroupKey: String? = null
+    private var pinnedOccurrenceId: String? = null
+
+    private val list = object : JBList<RowCollapse.Row>(javax.swing.DefaultListModel<RowCollapse.Row>()) {
         override fun getToolTipText(event: MouseEvent): String? {
             val idx = locationToIndex(event.point)
             if (idx < 0) return null
             val bounds = getCellBounds(idx, idx) ?: return null
             if (!bounds.contains(event.point)) return null
-            val tx = (model.getElementAt(idx) as? LogEvent.Http)?.tx ?: return null
+            val row = model.getElementAt(idx)
+            (row as? RowCollapse.Row.Group)?.let { return groupTooltip(it) }
+            val tx = (row.lead as? LogEvent.Http)?.tx ?: return null
             return duplicateMarks[tx.id]?.let { duplicateTooltip(tx, it) }
         }
     }
@@ -263,9 +320,18 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         renderer.elapsedProvider = { tx ->
             if (tx.isPending()) store.elapsedMillis(tx.id) else null
         }
+        // The running worker's count-up. Same clock as the pending-HTTP timer, so the two read the
+        // same way; it measures the envelope's open span, which for a worker includes queue time
+        // (the detail's own `timing` line says so).
+        renderer.eventElapsedProvider = { id -> store.elapsedMillis(id).takeIf { it > 0 } }
         // Cache-only, by contract: this is called for every painted row.
         renderer.groupingProvider = { event -> correlation.hasCachedKeyValue(event) }
         liveTimer.start()
+
+        // Stepping through a collapsed run pins the occurrence, so the card holds still while the
+        // run keeps growing. Nothing else moves: the list selection stays on the row (the other
+        // occurrences have no row of their own), and the waterfall is untouched.
+        detail.onOccurrenceChanged = { id -> pinnedOccurrenceId = id }
 
         // A trace id shown on any detail card is also the way into that flow's waterfall.
         detail.onOpenTrace = { trace -> showWaterfall(traceGrouping(trace)) }
@@ -324,8 +390,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             // List and waterfall are one selection model: the lane whose row is selected wears the
             // row's own accent tint and rail. Kept in step even when the selection was *restored*
             // under a refresh (which is suppressed below), since the waterfall survives those.
-            waterfall.setSelectedId(list.selectedValue?.id)
-            if (!suppressSelectionEvents) showDetail(list.selectedValue)
+            // A collapsed run's lead is its latest occurrence, so the lane that lights up is the
+            // one the detail is showing.
+            waterfall.setSelectedId(list.selectedValue?.lead?.id)
+            if (!suppressSelectionEvents) showDetailFor(list.selectedValue)
         }
         val mouse = ListMouse()
         list.addMouseListener(mouse)
@@ -479,6 +547,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                     // and never again. Warming before the store's listeners fire means the EDT's
                     // refresh and the first paint of the row both find a cache hit.
                     correlation.warm(event)
+                    // The store is about to overwrite this worker's previous state in place, so the
+                    // sequence is recorded here or nowhere.
+                    if (event is LogEvent.Worker) workerLifecycle.note(event, System.currentTimeMillis())
                     store.add(event)
                 }
             },
@@ -525,7 +596,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     }
 
     private fun refreshList() {
-        val selectedId = list.selectedValue?.id
+        // The anchor is always a real event id, and a group's anchor never moves as the run grows —
+        // which is exactly why selection is saved by it rather than by the lead (a poll run's lead
+        // is its latest member, so it changes once per arrival).
+        val selectedAnchor = list.selectedValue?.anchorId
         val all = store.snapshot()
         val state = filterBar.state()
 
@@ -548,17 +622,31 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         filterBar.setHiddenDbMatch(hiddenDb)
         showListState(all, filtered, state, grouping, hiddenDb)
 
-        val model = javax.swing.DefaultListModel<LogEvent>()
-        filtered.forEach { model.addElement(it) }
+        // Collapsing runs LAST, over the already-filtered list, and it is the only thing between the
+        // filter and the model. It is pure presentation: the store still holds every event, and MCP,
+        // the waterfall, get_trace, correlation, duplicate detection and export all read the store
+        // (or this snapshot) rather than the list model, so none of them can see a fold. Do not
+        // route any of them through `list.model`.
+        //
+        // Note the ordering dependency: DuplicateDetector.analyze above feeds the pass its STRONG
+        // marks, which is what keeps an overlapping double-submit out of a `×N` pill.
+        val rows = RowCollapse.collapse(filtered, expandedGroups, duplicateMarks, store::sessionOf)
+        memberRows = RowCollapse.memberIndex(rows)
+        lastFiltered = filtered
+        // Drop expansion keys whose groups no longer exist — a run that broke apart, or an anchor
+        // the store's cap evicted. Without this the set grows for the life of the session.
+        // Pruned by whether the group's ANCHOR is still in the list, not by whether a Group row was
+        // emitted: an expanded group emits its members as plain rows and produces no Group at all,
+        // so pruning on the emitted rows would re-collapse it on the very next tick.
+        expandedGroups.retainAll { key -> key.substringAfter(':') in memberRows }
+
+        val model = javax.swing.DefaultListModel<RowCollapse.Row>()
+        rows.forEach { model.addElement(it) }
 
         suppressSelectionEvents = true
         try {
             list.model = model
-            if (selectedId != null) {
-                for (i in 0 until model.size()) {
-                    if (model.get(i).id == selectedId) { list.selectedIndex = i; break }
-                }
-            }
+            if (selectedAnchor != null) restoreSelection(model, selectedAnchor)
         } finally {
             suppressSelectionEvents = false
         }
@@ -568,11 +656,62 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         if (shown != null) {
             // The waterfall is a view over a whole flow, not over the selection, so a refresh
             // re-snapshots it instead of letting the selected row's detail take the card back.
-            waterfall.show(shown, membersOf(shown, all), waterfallAlternatives, sel?.id)
-        } else if (sel != lastShown) {
-            // If the selected transaction's data changed (e.g. pending → completed), re-render
-            // the detail even though the selection index didn't change.
-            showDetail(sel)
+            waterfall.show(shown, membersOf(shown, all), waterfallAlternatives, sel?.lead?.id)
+        } else if (sel?.lead != lastShown) {
+            // If the selected transaction's data changed (e.g. pending → completed, or a poll run
+            // gaining a newer latest occurrence), re-render the detail even though the selection
+            // index didn't change. For a run this is also how `n / 30` becomes `n / 31` — and,
+            // because the pin survives, how a card the user stepped back to stays where they put it.
+            showDetailFor(sel)
+        }
+    }
+
+    /**
+     * Puts the selection back on the row that holds [anchorId], after the model was rebuilt.
+     *
+     * Two passes, and the second is what makes collapsing survivable in both directions: a row that
+     * has just been absorbed into a forming run is now *inside* a group's members, and a group that
+     * was expanded (or broke apart on a failed call) is now its own single row. Neither can be
+     * defeated by a member arriving, because a group's anchor never moves.
+     */
+    private fun restoreSelection(model: javax.swing.DefaultListModel<RowCollapse.Row>, anchorId: String) {
+        for (i in 0 until model.size()) {
+            if (model.get(i).anchorId == anchorId) { list.selectedIndex = i; return }
+        }
+        for (i in 0 until model.size()) {
+            if (anchorId in model.get(i).memberIds) { list.selectedIndex = i; return }
+        }
+    }
+
+    /**
+     * What a collapsed row says when you hover it.
+     *
+     * The row itself has no space for a time range, and — because it sits at its **first** member's
+     * position while showing the latest occurrence's content — no way to state one honestly. This is
+     * also the only place the filter-relativity can be said out loud: the pass runs over the
+     * filtered list, so `×30` means thirty rows *matching the current filter*, not thirty calls the
+     * app necessarily made.
+     */
+    private fun groupTooltip(group: RowCollapse.Row.Group): String {
+        val facts = group.facts
+        val label = KindPresenter.rowLabel(group.lead)
+        val clock = java.text.SimpleDateFormat("HH:mm:ss")
+        val span = facts.latestAtMillis.takeIf { it > 0 }
+            ?.let { "latest ${clock.format(java.util.Date(it))}" }
+            .orEmpty()
+        return when (group.groupKind) {
+            RowCollapse.GroupKind.NET_POLL -> buildString {
+                append("<html><b>${facts.count} calls</b> matching the current filter<br/>")
+                append("$label<br/>")
+                facts.medianDurationMillis?.let { append("median ${it}ms") }
+                if (span.isNotEmpty()) { if (facts.medianDurationMillis != null) append(" · "); append(span) }
+                append("<br/>Double-click to expand</html>")
+            }
+            RowCollapse.GroupKind.DB_TXN -> buildString {
+                append("<html><b>Transaction</b> — ${facts.count} ceremony rows folded<br/>")
+                append("${facts.statements} wrapped statement(s), still listed individually<br/>")
+                append("Double-click to expand</html>")
+            }
         }
     }
 
@@ -684,7 +823,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         // them (a detail card's trace chip) shows none rather than the last row's.
         waterfallAlternatives = alternatives
         // The row this was opened from stays selected in the list, and its lane says so.
-        waterfall.show(grouping, membersOf(grouping, store.snapshot()), alternatives, list.selectedValue?.id)
+        waterfall.show(grouping, membersOf(grouping, store.snapshot()), alternatives, list.selectedValue?.lead?.id)
         detailCards.show(detailPane, "waterfall")
     }
 
@@ -815,22 +954,172 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     /**
      * Selects an event's row from somewhere other than the list — today, a waterfall lane. A row
      * the current filter hides can't be selected, and saying so beats a click that does nothing.
+     *
+     * A lane may point at an event that is currently *folded* into a collapsed row. Selecting the
+     * group and silently showing a different occurrence would be the collapse lying, and the old
+     * "hidden by the current filter" toast would be plainly false — the row is visible, just folded.
+     * So the group is expanded first, and then the member's own row is selected.
      */
     private fun selectEventInList(id: String) {
+        val holder = memberRows[id]
+        if (holder is RowCollapse.Row.Group && expandedGroups.add(holder.key)) {
+            refreshList()
+        }
         val model = list.model
         for (i in 0 until model.size) {
-            if (model.getElementAt(i).id != id) continue
+            val row = model.getElementAt(i)
+            if (row.lead.id != id && id !in row.memberIds) continue
             list.selectedIndex = i
             list.ensureIndexIsVisible(i)
             // Selecting an already-selected row fires no event, so the detail is shown explicitly.
-            showDetail(model.getElementAt(i))
+            // The lane click named one specific call, so if the row it landed on is a collapsed run
+            // the card opens on *that* occurrence — not on the run's latest.
+            showDetailFor(row, pin = id)
             return
         }
         Toast.show(list, "That row is hidden by the current filter")
     }
 
+    /**
+     * Opens or closes a collapsed run, then keeps its anchor in view.
+     *
+     * The toggle rebuilds the model rather than repainting, because row heights differ (34 vs 26)
+     * and a JList caches the heights it laid out — a 34px row drawn into a 26px slot is what a
+     * repaint-only version would give.
+     */
+    private fun toggleExpanded(group: RowCollapse.Row.Group) {
+        if (!expandedGroups.add(group.key)) expandedGroups.remove(group.key)
+        refreshList()
+        val model = list.model
+        for (i in 0 until model.size) {
+            if (model.getElementAt(i).anchorId == group.anchorId) { list.ensureIndexIsVisible(i); break }
+        }
+    }
+
+    /**
+     * The group a row would belong to if nothing were expanded, so an already-expanded run can be
+     * folded back from any of its members. Costs nothing while nothing is expanded.
+     */
+    private fun naturalGroupFor(row: RowCollapse.Row): RowCollapse.Row.Group? {
+        if (expandedGroups.isEmpty()) return null
+        val natural = RowCollapse.memberIndex(
+            RowCollapse.collapse(lastFiltered, emptySet(), duplicateMarks, store::sessionOf)
+        )
+        return natural[row.lead.id] as? RowCollapse.Row.Group
+    }
+
+    /**
+     * The state sequence a worker was **observed** to pass through.
+     *
+     * Offered only when there is a sequence — see [WorkerLifecycle.hasTransitions]. A row replayed
+     * from WorkManager's persisted store on attach is a single terminal sighting, and a menu item
+     * that opens an empty view is worse than no menu item.
+     */
+    private fun showStateTransitions(event: LogEvent.Worker) {
+        val transitions = workerLifecycle.transitions(workerLifecycle.keyOf(event))
+        if (transitions.size < 2) {
+            Toast.show(list, "No state transitions were observed for this worker")
+            return
+        }
+        val clock = java.text.SimpleDateFormat("HH:mm:ss.SSS")
+        val lines = transitions.joinToString("<br/>") { t ->
+            val at = t.atMillis.takeIf { it > 0 } ?: t.hostMillis
+            val attempt = if (t.runAttempt > 1) "  ·  attempt ${t.runAttempt}" else ""
+            "<code>${clock.format(java.util.Date(at))}</code>&nbsp;&nbsp;${t.state}$attempt"
+        }
+        val html = "<html><body style='width:340px'><b>${event.work.worker}</b><br/><br/>$lines<br/><br/>" +
+            "<i>These are the transitions LogPose observed. WorkManager can move between two states " +
+            "in the gap between observer emissions, so this is a record of sightings, not its full " +
+            "history.</i></body></html>"
+        val body = JBLabel(html).apply {
+            border = JBUI.Borders.empty(10, 12)
+            isOpaque = true
+            background = Theme.bg1
+            foreground = Theme.text
+        }
+        JBPopupFactory.getInstance()
+            .createComponentPopupBuilder(body, null)
+            .setTitle("Observed state transitions")
+            .setResizable(false)
+            .setMovable(true)
+            .setRequestFocus(true)
+            .createPopup()
+            .showInCenterOf(list)
+    }
+
+    /**
+     * Shows the detail for a **row**, which is not always the detail for one event.
+     *
+     * A collapsed polling run stands for N calls, and the card renders one of them with an
+     * `occurrence n / N` stepper. Which one: the [pin] when the caller names a member (a waterfall
+     * lane click knows exactly which call it meant), else the occurrence the user last stepped to
+     * on this same run, else — for a run just selected — the latest, matching what the row shows.
+     *
+     * Only NET_POLL groups get this. A folded transaction is *ceremony* around statements that are
+     * still listed individually, so its rows are not interchangeable occurrences of one call and a
+     * stepper over them would be inventing a relationship the wire doesn't describe.
+     */
+    private fun showDetailFor(row: RowCollapse.Row?, pin: String? = null) {
+        val group = (row as? RowCollapse.Row.Group)?.takeIf { it.groupKind == RowCollapse.GroupKind.NET_POLL }
+        val occurrences = group?.let { occurrencesOf(it) }?.takeIf { it.size > 1 }
+        if (group == null || occurrences == null) {
+            showDetail(row?.lead)
+            return
+        }
+        when {
+            pin != null -> { shownGroupKey = group.key; pinnedOccurrenceId = pin }
+            group.key != shownGroupKey -> { shownGroupKey = group.key; pinnedOccurrenceId = null }
+        }
+        // A pinned call the run no longer contains (evicted by the store's cap, or filtered out)
+        // falls back to the latest rather than to nothing.
+        val index = pinnedOccurrenceId
+            ?.let { id -> occurrences.indexOfFirst { it.id == id } }
+            ?.takeIf { it >= 0 }
+            ?: occurrences.lastIndex
+        // The row's lead is the run's latest call; recording it here is what stops refreshList from
+        // re-rendering this card on every tick.
+        lastShown = group.lead
+        waterfallGrouping = null
+        waterfallAlternatives = emptyList()
+        detail.showOccurrences(
+            occurrences.map { TransactionDetailView.Occurrence(it.tx, it.envelope) },
+            index,
+        ) { tx -> duplicateMarks[tx.id] }
+        detailCards.show(detailPane, "http")
+    }
+
+    /**
+     * The calls a collapsed run stands for, in arrival order.
+     *
+     * Resolved from the filtered snapshot the rows were folded from — every member is in it by
+     * construction — so the detail card never reaches into the store from the EDT, and a member
+     * that has since been evicted simply isn't offered.
+     */
+    private fun occurrencesOf(group: RowCollapse.Row.Group): List<LogEvent.Http> {
+        val wanted = group.memberIds.toHashSet()
+        val byId = HashMap<String, LogEvent.Http>(wanted.size)
+        for (event in lastFiltered) if (event is LogEvent.Http && event.id in wanted) byId[event.id] = event
+        return group.memberIds.mapNotNull { byId[it] }
+    }
+
+    /**
+     * The event the detail card is showing for [row] — its lead, unless the user has stepped a
+     * collapsed run back to an earlier occurrence. The row's context menu acts on this, so
+     * `Copy as cURL` copies the call on screen rather than a different one from the same run.
+     */
+    private fun shownEvent(row: RowCollapse.Row): LogEvent {
+        val group = row as? RowCollapse.Row.Group ?: return row.lead
+        val pin = pinnedOccurrenceId
+            ?.takeIf { group.key == shownGroupKey && it in group.memberIds }
+            ?: return row.lead
+        return occurrencesOf(group).firstOrNull { it.id == pin } ?: row.lead
+    }
+
     private fun showDetail(event: LogEvent?) {
         lastShown = event
+        // Anything that isn't a collapsed run has no occurrence to remember.
+        shownGroupKey = null
+        pinnedOccurrenceId = null
         // Any explicit selection leaves the waterfall — the card follows the row again.
         waterfallGrouping = null
         waterfallAlternatives = emptyList()
@@ -873,9 +1162,18 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun onLiveTick() {
         renderer.spinnerFrame++
         val model = list.model
-        val anyPending = (0 until model.size).any { (model.getElementAt(it) as? LogEvent.Http)?.tx?.isPending() == true }
-        if (anyPending) list.repaint()
-        val sel = list.selectedValue
+        // Two things animate in the list: an in-flight request's spinner and count-up, and a
+        // running worker's pulsing dot and count-up. A collapsed run can't be either — a member
+        // joins only once it has completed 2xx — so only a row's lead needs testing.
+        val anyLive = (0 until model.size).any { i ->
+            when (val event = model.getElementAt(i).lead) {
+                is LogEvent.Http -> event.tx.isPending()
+                is LogEvent.Worker -> event.work.state.equals(WorkerEvent.STATE_RUNNING, ignoreCase = true)
+                else -> false
+            }
+        }
+        if (anyLive) list.repaint()
+        val sel = list.selectedValue?.lead
         if (sel is LogEvent.Http && sel.tx.isPending()) detail.tick(store.elapsedMillis(sel.id), renderer.spinnerFrame)
         // An open span in the waterfall grows towards "now", so the card animates on the same
         // timer as the in-flight rows rather than owning a second one.
@@ -1120,7 +1418,13 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * any of the request/response detail. `selectedValuesList` is already index-ordered.
      */
     private fun copySelectedTimeline() {
-        val events = list.selectedValuesList
+        val rows = list.selectedValuesList
+        if (rows.isEmpty()) return
+        // A collapsed row is expanded back into its members here. A copied timeline is an artefact
+        // that leaves LogPose — pasted into a ticket, read by someone who cannot expand anything —
+        // so it carries the truth (fifteen lines) and never the summary (one).
+        val byId = store.snapshot().associateBy { it.id }
+        val events = rows.flatMap { row -> row.memberIds.mapNotNull { byId[it] } }
         if (events.isEmpty()) return
         val text = events.joinToString("\n") { timelineLabel(it) }
         copyToClipboard(text, if (events.size == 1) "Copied 1 row" else "Copied ${events.size} rows")
@@ -1161,15 +1465,21 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             if (e.isShiftDown || e.isMetaDown || e.isControlDown) return
             val idx = indexAt(e)
             if (idx < 0) return
-            val event = list.model.getElementAt(idx)
+            val row = list.model.getElementAt(idx)
             // The buttons are tested *before* anything else this click could mean. They now paint
             // on the selected row too, and the selected row is exactly the one a waterfall click
             // would otherwise bounce back to the detail view — so hitting a button has to be the
             // whole click, not a prelude to one.
-            if (clickedAction(e, idx, event)) return
+            if (clickedAction(e, idx, row)) return
+            // §6 says "click expands", but a single click is already spoken for by selection, so
+            // the gesture is a double-click (and a context-menu item, which the tooltip names).
+            if (e.clickCount == 2 && row is RowCollapse.Row.Group) {
+                toggleExpanded(row)
+                return
+            }
             // Clicking the row that's already selected fires no selection event, so a click meant
             // to leave the waterfall would otherwise do nothing at all.
-            if (waterfallGrouping != null) showDetail(event)
+            if (waterfallGrouping != null) showDetailFor(row)
         }
 
         /**
@@ -1183,19 +1493,19 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
          * cell it would have drawn it in ([io.github.siddharthjaswal.logpose.ui.RowGeometry]).
          * Nothing here re-derives a coordinate, so a button can't drift away from its hit target.
          */
-        private fun clickedAction(e: MouseEvent, idx: Int, event: LogEvent): Boolean {
+        private fun clickedAction(e: MouseEvent, idx: Int, row: RowCollapse.Row): Boolean {
             if (!renderer.actionsArmed(idx, list.isSelectedIndex(idx))) return false
             val bounds = list.getCellBounds(idx, idx) ?: return false
             val x = e.x - bounds.x
             // Two disjoint bands: cURL over the size cell (HTTP only, as before), the flow over the
-            // duration cell (any row that has one). A muted row paints neither, and both predicates
-            // already say so, so its clicks are still swallowed.
-            if (renderer.isInCurlZone(bounds.width, x) && renderer.paintsCurl(event)) {
-                copyToClipboard(CurlBuilder.build((event as LogEvent.Http).tx), "cURL copied")
+            // duration cell (any row that has one). A muted row and a collapsed row paint neither,
+            // and both predicates already say so, so their clicks are still swallowed.
+            if (renderer.isInCurlZone(bounds.width, x) && renderer.paintsCurl(row)) {
+                copyToClipboard(CurlBuilder.build((row.lead as LogEvent.Http).tx), "cURL copied")
                 return true
             }
-            if (renderer.isInFlowZone(bounds.width, x) && renderer.paintsFlow(event)) {
-                openBestGrouping(event)
+            if (renderer.isInFlowZone(bounds.width, x) && renderer.paintsFlow(row)) {
+                openBestGrouping(row.lead)
                 return true
             }
             return false
@@ -1223,7 +1533,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                     add(act("Copy timeline (${list.selectedIndices.size} rows)", AllIcons.Actions.Copy) { copySelectedTimeline() })
                 }
             } else {
-                val event = list.selectedValue ?: return
+                val row = list.selectedValue ?: return
+                // Not the row's lead but the occurrence the card is showing: on a run the user has
+                // stepped back through, "Copy as cURL" must copy the call they are looking at.
+                val event = shownEvent(row)
                 val rowGroup = when (event) {
                     is LogEvent.Http -> httpGroup(event)
                     is LogEvent.Fcm -> fcmGroup(event)
@@ -1232,7 +1545,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 // The key leads: `order_id 21053953` is the id a human knows, and it groups what
                 // a trace structurally can't. When no configured key is on this row the menu is
                 // exactly what it always was.
-                withKeyActions(event, rowGroup)
+                withCollapseActions(row, withKeyActions(event, rowGroup))
             }
             showActionPopup(group, e)
         }
@@ -1244,6 +1557,32 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
          * `order_id` before `trip_id` — because that order is the user's own statement of which
          * id they think in.
          */
+        /**
+         * Prepends `Expand …` / `Collapse …` when the row is (or belongs to) a collapsed run.
+         *
+         * §6 says "click expands", but single click is already selection, so the gesture is a
+         * double-click — and this is the discoverable form of it, exactly as the row's painted
+         * buttons also appear in the menu.
+         */
+        private fun withCollapseActions(row: RowCollapse.Row, rest: ActionGroup): ActionGroup {
+            val group = row as? RowCollapse.Row.Group
+                ?: naturalGroupFor(row)?.takeIf { it.key in expandedGroups }
+                ?: return rest
+            val expanded = group.key in expandedGroups
+            val label = when (group.groupKind) {
+                RowCollapse.GroupKind.NET_POLL ->
+                    if (expanded) "Collapse ${group.facts.count} repeated calls"
+                    else "Expand ${group.facts.count} occurrences"
+                RowCollapse.GroupKind.DB_TXN ->
+                    if (expanded) "Collapse transaction" else "Expand transaction"
+            }
+            return DefaultActionGroup().apply {
+                add(act(label, AllIcons.Actions.Expandall) { toggleExpanded(group) })
+                addSeparator()
+                add(rest)
+            }
+        }
+
         private fun withKeyActions(event: LogEvent, rest: ActionGroup): ActionGroup {
             val keys = groupingsFor(event).filterNot { it.isTrace }
             if (keys.isEmpty()) return rest
@@ -1333,6 +1672,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         }
 
         private fun structuredGroup(ev: LogEvent): ActionGroup = DefaultActionGroup().apply {
+            // A worker is one row for its whole life (the library reuses `workId` as the envelope
+            // id, and the store updates that row in place), so the sequence it passed through is
+            // not otherwise reachable from the timeline. Offered only when one was actually
+            // observed — see WorkerLifecycle.
+            if (ev is LogEvent.Worker && workerLifecycle.hasTransitions(workerLifecycle.keyOf(ev))) {
+                add(act("Show state transitions", AllIcons.Actions.ShowAsTree) { showStateTransitions(ev) })
+                addSeparator()
+            }
             add(act("Copy as JSON", AllIcons.Actions.Copy) {
                 copyToClipboard(
                     prettyJson.encodeToString(Envelope.serializer(), ev.envelope),
@@ -1425,6 +1772,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         override fun actionPerformed(e: AnActionEvent) {
             store.clear()
             correlation.clear()
+            workerLifecycle.clear()
+            // Expansion is session state over rows that no longer exist.
+            expandedGroups.clear()
+            memberRows = emptyMap()
+            lastFiltered = emptyList()
             reader.clearBuffer()
             showDetail(null)
             refreshList()

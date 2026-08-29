@@ -73,6 +73,24 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         layout = BoxLayout(this, BoxLayout.Y_AXIS)
         border = JBUI.Borders.empty(12, 14)
     }
+
+    // ---- the collapsible parts of the hero ----------------------------------------------------
+    // Each hideable row owns the gap that PRECEDES it, so any combination of them can disappear and
+    // the spacing still reads right. BoxLayout skips invisible children — a hidden strut really is
+    // 0px, not a blank band — which is what makes this a collapse rather than a blanking.
+    private val subtitleGap = vGap(8)
+    private val subtitleRow = row(subtitle, fill = true)
+    private val badgesGap = vGap(8)
+    private val badgesRow = row(badges, fill = false)
+    private val sectionsGap = vGap(12)
+    private val sectionsRow = row(
+        JBScrollPane(sections).apply {
+            border = JBUI.Borders.empty()
+            isOpaque = false
+            viewport.isOpaque = false
+        },
+        fill = true,
+    )
     private val payload = JsonTreePanel("Payload", project)
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss.SSS")
@@ -87,18 +105,17 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
             typeIcon, Box.createHorizontalStrut(JBUI.scale(6)),
             kindPill, Box.createHorizontalStrut(JBUI.scale(8)), titleLabel,
         ), fill = false))
-        overview.add(vGap(8))
-        overview.add(row(subtitle, fill = true))
-        overview.add(vGap(8))
-        overview.add(row(badges, fill = false))
+        overview.add(subtitleGap)
+        overview.add(subtitleRow)
+        overview.add(badgesGap)
+        overview.add(badgesRow)
+        // The chips are the one part that always has something to say (an event has a time and an
+        // id, whatever else it lacks), so their gap is the one that never hides: a fully collapsed
+        // hero is header → 8px → chips.
         overview.add(vGap(8))
         overview.add(row(chips, fill = false))
-        overview.add(vGap(12))
-        overview.add(row(JBScrollPane(sections).apply {
-            border = JBUI.Borders.empty()
-            isOpaque = false
-            viewport.isOpaque = false
-        }, fill = true))
+        overview.add(sectionsGap)
+        overview.add(sectionsRow)
 
         val outer = OnePixelSplitter(true, 0.5f).apply {
             firstComponent = pad(overview, 0, 120)
@@ -114,6 +131,11 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
             kindPill.set("—", Theme.textDim, Theme.bg2)
             titleLabel.text = ""
             subtitle.text = "Select an event"
+            // The placeholder lives in the subtitle, so the empty card has to un-collapse or the
+            // one line it exists to show would be hidden.
+            setRowVisible(subtitleRow, subtitleGap, true)
+            setRowVisible(badgesRow, badgesGap, true)
+            setRowVisible(sectionsRow, sectionsGap, true)
             badges.removeAll(); chips.removeAll(); sections.removeAll()
             repaintAll()
             payload.setElement(null); payload.setStatus(null)
@@ -134,13 +156,21 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
 
         badges.removeAll()
         // The header chip already states the type, so drop any badge that just repeats it
-        // (e.g. an "ANALYTICS" badge next to the ANLY chip) — state the type exactly once.
-        presentation?.badges
-            ?.filterNot { it.text.equals(event.kind, ignoreCase = true) || it.text.equals(kindLabel, ignoreCase = true) }
-            ?.forEachIndexed { i, badge ->
-                if (i > 0) badges.add(Box.createHorizontalStrut(JBUI.scale(6)))
-                badges.add(badgeLabel(badge))
-            }
+        // (e.g. an "ANALYTICS" badge next to the ANLY chip) — state the type exactly once. The rule
+        // is [KindPresenter]'s, shared with the row painter, so the card and the row can't drift.
+        val shownBadges = KindPresenter.rowBadges(event, presentation)
+        shownBadges.forEachIndexed { i, badge ->
+            if (i > 0) badges.add(Box.createHorizontalStrut(JBUI.scale(6)))
+            badges.add(badgeLabel(badge))
+        }
+
+        // §6: an event with nothing to say collapses its hero body instead of reserving space for
+        // it. Judged per part, not as one flag — an analytics event that carries a screen still
+        // shows it here, and after §6 moved the screen off the row's subtitle and into its fact
+        // column this card is the only place it is readable in full.
+        setRowVisible(subtitleRow, subtitleGap, !presentation?.subtitle.isNullOrBlank())
+        setRowVisible(badgesRow, badgesGap, shownBadges.isNotEmpty())
+        setRowVisible(sectionsRow, sectionsGap, !presentation?.sections.isNullOrEmpty())
 
         chips.removeAll()
         val items = buildList {
@@ -172,8 +202,17 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         payload.setElement(event.envelope.payload)
     }
 
+    /** Hides a hero row together with the gap that precedes it, so no empty band is left behind. */
+    private fun setRowVisible(rowComp: Component, gap: Component, visible: Boolean) {
+        if (rowComp.isVisible == visible && gap.isVisible == visible) return
+        rowComp.isVisible = visible
+        gap.isVisible = visible
+    }
+
     private fun repaintAll() {
-        listOf(badges, chips, sections).forEach { it.revalidate(); it.repaint() }
+        // `overview` itself, not just its children: hiding a child changes the parent's own layout,
+        // and revalidating only the children would leave the space they used to occupy.
+        listOf(badges, chips, sections, overview).forEach { it.revalidate(); it.repaint() }
     }
 
     private fun badgeLabel(badge: Badge): Component {

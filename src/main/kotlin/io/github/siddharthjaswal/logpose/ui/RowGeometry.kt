@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose.ui
 
 import com.intellij.util.ui.JBUI
+import io.github.siddharthjaswal.logpose.model.Envelope
 
 /**
  * The alignment rules every timeline row obeys, as plain numbers.
@@ -46,6 +47,38 @@ object RowGeometry {
 
     /** Generic rows carry no size, so their fact column takes the freed width — `+N` never again. */
     const val FACT = 120
+
+    /**
+     * Analytics names the screen it fired on in the fact column, and `NavDrawerFragment` does not
+     * fit in 120.
+     */
+    const val FACT_ANALYTICS = 150
+
+    /**
+     * Below this row width the analytics fact column gives its extra 30px back to the title.
+     *
+     * The fixed structure of a widened analytics row is 42 (content edge) + 150 + 10 + 56 + 14 =
+     * 272px. At the 300px low end that leaves the event name ~28px — an immediate ellipsis on the
+     * one thing the row exists to say. The screen is still in full on the detail card, so the fact
+     * cell is what yields.
+     */
+    const val FACT_WIDE_ABOVE = 380
+
+    /**
+     * The fact column width for a kind, given the row's width.
+     *
+     * Only the *left* cell of the meta pair varies: [TIME] is 56 for every kind and [timeCell] is
+     * derived from the row's right inset, so a wider fact column can only ever eat into the
+     * flexible text zone — it can never move a timestamp out of line with the row above it.
+     *
+     * There is deliberately no `factCell()` hit-test helper: the generic fact cell is never an
+     * action button (only HTTP's [sizeCell] is), so nothing routes a click there.
+     */
+    fun fact(kind: String, rowWidth: Int = Int.MAX_VALUE, scale: (Int) -> Int = JBUI::scale): Int = when {
+        kind != Envelope.KIND_ANALYTICS -> FACT
+        rowWidth != Int.MAX_VALUE && rowWidth < scale(FACT_WIDE_ABOVE) -> FACT
+        else -> FACT_ANALYTICS
+    }
 
     /** Right-hand pair, second cell. Identical across kinds, so timestamps line up. */
     const val TIME = 56

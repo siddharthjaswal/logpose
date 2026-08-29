@@ -121,6 +121,16 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Each kind's row says the useful thing.</b> A wall of repeated polling collapses
+                to one line with an <b>×N</b> pill, the median duration and an
+                <i>occurrence ‹ n/N ›</i> stepper in the detail (it breaks on any non-2xx — a failed
+                poll always stands alone). DB rows lead with the verb and the table, with the full
+                statement greyed behind them, and BEGIN/END ceremony folds into a single muted
+                <i>transaction ✓ · 4 statements · 128ms</i> row. Worker rows state their state with
+                shape and semantics — <i>✓ succeeded</i>, <i>● running</i> with a live count-up,
+                <i>✕ failed</i>, an outlined <b>RETRY ×N</b> — and surface the tag that tells one
+                <code>DataSyncWorker</code> from another. Analytics rows drop the
+                <i>· ANALYTICS</i> echo and put the screen in the fact column.</li>
             <li><b>A systematic visual pass — one axis owns hue.</b> Amber used to mean PUT, 4xx,
                 db, warning, timeout and pending-sync at once. Now <b>kind</b> keeps the seven
                 hues (row glyph, TYPE chip, detail pill, waterfall bars — nowhere else),

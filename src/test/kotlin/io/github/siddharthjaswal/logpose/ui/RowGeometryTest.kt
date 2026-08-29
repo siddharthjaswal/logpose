@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose.ui
 
+import io.github.siddharthjaswal.logpose.model.Envelope
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -97,6 +98,32 @@ class RowGeometryTest {
         // The whole point of widening it: `hyperlocal_feature_db` fits, and a db row's timestamp
         // still lines up with an HTTP row's duration directly above it.
         assertTrue(RowGeometry.FACT > RowGeometry.SIZE)
+        assertEquals(RowGeometry.timeCell(width, x1), RowGeometry.timeCell(width, x1))
+        assertEquals(width - 70, RowGeometry.timeCell(width, x1).first)
+    }
+
+    @Test
+    fun `only analytics widens its fact column, and only when there is room`() {
+        // §6 gives the screen name 150px; every other kind keeps 120. The clamp is what stops a
+        // 300px tool window from spending half its row on a fact and ellipsizing the event name.
+        assertEquals(150, RowGeometry.fact(Envelope.KIND_ANALYTICS, width, x1))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_ANALYTICS, 300, x1))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_DB, width, x1))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_WORKER, width, x1))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_CONFIG, width, x1))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_EVENT, width, x1))
+        // The clamp is a *scaled* comparison: on a 200% display a 700px row is 350 logical px and
+        // must clamp exactly as a 350px row does at 100%.
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_ANALYTICS, 700, x2))
+        assertEquals(150, RowGeometry.fact(Envelope.KIND_ANALYTICS, 800, x2))
+    }
+
+    @Test
+    fun `the widened analytics fact column still leaves the row a text zone`() {
+        val fixed = RowGeometry.contentEdge(x1) + RowGeometry.fact(Envelope.KIND_ANALYTICS, width, x1) +
+            RowGeometry.META_GAP + RowGeometry.TIME + RowGeometry.EDGE
+        assertTrue(fixed < width, "no room left for the event name")
+        // And it cannot have moved the timestamp: timeCell is derived from the right inset alone.
         assertEquals(RowGeometry.timeCell(width, x1), RowGeometry.timeCell(width, x1))
         assertEquals(width - 70, RowGeometry.timeCell(width, x1).first)
     }

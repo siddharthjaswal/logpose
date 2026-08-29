@@ -113,6 +113,50 @@ IDE's never propagates, and an HTTP row joins a trace only when the client was b
   `Show waterfall d107086f`, which names a hash a human has never seen; beside an
   `order_id 21053953` item it has to be obvious which of the two you're picking.
 
+### Changed (rows) — each kind says the useful thing
+A second design round, aimed at what each row actually *says* rather than how it's coloured. Same
+encoding rules as above: semantics and shape, never a new hue. Success stays neutral — in a healthy
+capture almost everything succeeds, and a wall of green is noise.
+
+- **A polling wall collapses to one line.** Three or more consecutive same-method, same-path 2xx
+  calls fold into a single row carrying a neutral outlined `×N` pill, the `~median` duration and
+  the latest occurrence's size; double-click (or the context menu) expands it, and the detail card
+  gains an `occurrence ‹ n/N ›` stepper. It breaks on any non-2xx — a failed poll must stand alone —
+  and on a gap over two minutes, since a poll every 30s for ten minutes and three back-to-back
+  calls mean different things. The path is matched **verbatim**: normalising numeric segments would
+  merge two riders' `/79096/location/` and `/79097/location/` into one row, which is a lie `×N`
+  cannot express. **A strong duplicate is never folded** — an overlapping double-submit is the bug
+  LogPose exists to show.
+- **DB rows lead with the verb and the table.** `[SELECT] orders  SELECT * FROM orders WHERE …` —
+  a neutral verb tag (reads regular, writes bold, no hue), the table as the primary text, and the
+  full statement greyed behind it. This also fixes a real mis-parse: statements like
+  `UPDATE OR ABORT \`battery_saver_info\` SET …` used to render with `OR` as the operation.
+- **Transaction ceremony folds.** BEGIN / `SELECT changes()` / TRANSACTION SUCCESSFUL / END collapse
+  into one muted 26px row (`transaction ✓ · 4 statements · 128ms`) while the wrapped statements stay
+  as normal rows. The `✓` is painted only on positive evidence, and a second interleaved `BEGIN`
+  **abandons the fold rather than guessing** — the wire carries no thread id, so a wrong fold is
+  worse than none. The duration is the wall span, not a sum: Room reports no per-statement timing,
+  so a true `Σ` would print `0ms` on nearly every capture.
+- **Worker rows state their state**: `✓ succeeded` neutral · `● running` accent with a pulsing dot
+  and a live count-up · `◦ enqueued` muted · `✕ failed` red · `RETRY ×N` an outlined amber pill
+  (only above attempt 1 — a `RETRY ×1` on a first-attempt block would be wrong) · `cancelled` struck
+  through. The glyph stays worker-teal in every state, and the first tag that isn't the class name
+  is surfaced, since that's what distinguishes one `DataSyncWorker` from another.
+- **Analytics rows drop the echo.** The `· ANALYTICS` subtitle was the kind badge repeating itself;
+  the screen moves to a right-aligned fact column instead, so every analytics row answers *what
+  fired, where, when* in three fixed columns. In the detail card, an event with no sections and no
+  non-redundant badges collapses its empty hero body instead of leaving blank space.
+
+Collapsing is **presentation only**. The store keeps every event, and MCP, `get_trace`, the
+waterfall, correlation and export still see each one individually — ⌘C on a folded row copies all N
+lines, and a waterfall lane click expands the group to reveal its member.
+
+Two honest gaps, both because the data isn't on the wire: **`queued 6.2s` is not implemented** (each
+worker state overwrites the same envelope id, so the enqueue time is gone by the time the terminal
+state lands — it needs `runStartedAt` from the library), and **"Show state transitions"** reads from
+a small side index of what LogPose *observed*, worded to say so rather than claiming to be
+WorkManager's own history. MCP's `worker_history` still sees only the surviving state.
+
 ### Changed (visual) — one axis owns hue
 The tool window got its first systematic visual pass, against an external design spec written in
 response to `docs/design-handoff.md`. The problem it solves: amber used to mean PUT, 4xx, db,

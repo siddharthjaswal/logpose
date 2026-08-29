@@ -26,6 +26,12 @@ import javax.swing.JPanel
  */
 class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()) {
 
+    /** One call of a collapsed polling run: the transaction and the envelope it arrived in. */
+    data class Occurrence(
+        val tx: Transaction,
+        val envelope: io.github.siddharthjaswal.logpose.model.Envelope?,
+    )
+
     private val overview = OverviewPanel()
     private val request = JsonTreePanel("Request", project)
     private val response = JsonTreePanel("Response", project)
@@ -35,9 +41,22 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         get() = overview.onOpenTrace
         set(value) { overview.onOpenTrace = value }
 
+    /**
+     * Reports the transaction id the stepper moved to, so the owner can pin it: once a user has
+     * walked back to occurrence 3 of a live poll, a new call landing must not yank the card
+     * forward to 31 under them.
+     */
+    var onOccurrenceChanged: (String) -> Unit = {}
+
     private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
     private val pretty = Json { prettyPrint = true; encodeDefaults = true }
     private var current: Transaction? = null
+
+    // The calls a collapsed row stands for, in arrival order, and which one is on screen. Empty for
+    // every ordinary selection — [show] clears it, so a stepper can never outlive its run.
+    private var occurrences: List<Occurrence> = emptyList()
+    private var occurrenceIndex = 0
+    private var duplicateOf: (Transaction) -> io.github.siddharthjaswal.logpose.analysis.DuplicateDetector.Mark? = { null }
 
     // Request headers (auth/api-key) are usually useful → shown by default. Response headers
     // (CSP, security, caching) are mostly noise → hidden until the user clicks "Headers".
@@ -48,6 +67,11 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         isOpaque = true
         background = Theme.bg0
         border = JBUI.Borders.empty(8)
+
+        // The arrows re-render the whole card, not just the hero: the Request and Response JSON
+        // belong to the occurrence too, and a stepper that moved only the status pill would be
+        // showing one call's headline over another call's body.
+        overview.onStep = { delta -> step(delta) }
 
         overview.onCopyCurl = { current?.let { copy(CurlBuilder.build(it), "cURL copied") } }
         overview.onCopyJson = { current?.let { copy(pretty.encodeToString(Transaction.serializer(), it), "Transaction JSON copied") } }
@@ -74,6 +98,8 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         dup: io.github.siddharthjaswal.logpose.analysis.DuplicateDetector.Mark? = null,
         envelope: io.github.siddharthjaswal.logpose.model.Envelope? = null,
     ) {
+        occurrences = emptyList()
+        occurrenceIndex = 0
         current = tx
         overview.show(tx, dup, envelope)
         if (tx == null) {
@@ -83,6 +109,52 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         }
         renderRequest(tx)
         renderResponse(tx)
+    }
+
+    /**
+     * Shows one call out of the run a collapsed row stands for, with the `occurrence n / N` stepper.
+     *
+     * [index] is 0-based over [items] in arrival order, so `items.lastIndex` is the latest call —
+     * which is what a freshly selected run opens on (§6: the row shows the latest timestamp, and
+     * the card should agree with the row).
+     */
+    fun showOccurrences(
+        items: List<Occurrence>,
+        index: Int,
+        dupOf: (Transaction) -> io.github.siddharthjaswal.logpose.analysis.DuplicateDetector.Mark?,
+    ) {
+        if (items.isEmpty()) {
+            show(null)
+            return
+        }
+        occurrences = items
+        duplicateOf = dupOf
+        occurrenceIndex = index.coerceIn(0, items.lastIndex)
+        renderOccurrence()
+    }
+
+    private fun step(delta: Int) {
+        if (occurrences.isEmpty()) return
+        val next = (occurrenceIndex + delta).coerceIn(0, occurrences.lastIndex)
+        if (next == occurrenceIndex) return
+        occurrenceIndex = next
+        renderOccurrence()
+        onOccurrenceChanged(occurrences[next].tx.id)
+    }
+
+    private fun renderOccurrence() {
+        val item = occurrences[occurrenceIndex]
+        current = item.tx
+        // The duplicate banner is per-occurrence and *should* appear when you step onto a marked
+        // call: the row's aggregate pill is what invited the user to come and look.
+        overview.show(
+            item.tx,
+            duplicateOf(item.tx),
+            item.envelope,
+            OverviewPanel.Occurrence(occurrenceIndex + 1, occurrences.size),
+        )
+        renderRequest(item.tx)
+        renderResponse(item.tx)
     }
 
     private fun renderRequest(tx: Transaction) {
@@ -118,6 +190,8 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
 
     fun showError(message: String) {
         current = null
+        occurrences = emptyList()
+        occurrenceIndex = 0
         overview.show(null)
         request.showMessage(message); request.setStatus(null)
         response.setElement(null); response.setStatus(null)
