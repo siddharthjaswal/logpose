@@ -5,6 +5,7 @@ import io.github.siddharthjaswal.logpose.LogPoseConfig
 import io.github.siddharthjaswal.logpose.wire.Body
 import io.github.siddharthjaswal.logpose.wire.MultipartPart
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.MultipartBody
 import okhttp3.Request
 import okhttp3.Response
@@ -77,6 +78,45 @@ internal object BodyCapture {
         }
         val charset = body.contentType()?.charset(UTF8) ?: UTF8
         return peek.toBody(contentType, reportedSize, config, charset, alreadyTruncated = bufferedBytes > config.maxBodyBytes)
+    }
+
+    /**
+     * [url] as a string with sensitive query-parameter **values** replaced by "██" — the name
+     * stays visible, so the capture still shows *which* params a request carried. Matching
+     * mirrors [headersToMap]: exact names case-insensitively, then name substrings.
+     *
+     * Emission-only, like header redaction: the interceptor's mock matching reads the real
+     * values off `request.url` itself, never off this string.
+     */
+    fun redactUrl(url: HttpUrl, config: LogPoseConfig): String {
+        val query = url.encodedQuery
+        if (query.isNullOrEmpty()) return url.toString()
+        val exact = config.redactQueryParams.map { it.lowercase() }.toHashSet()
+        val patterns = config.redactQueryParamPatterns.map { it.lowercase() }
+        if (exact.isEmpty() && patterns.isEmpty()) return url.toString()
+
+        var changed = false
+        val redacted = query.split('&').joinToString("&") { pair ->
+            val eq = pair.indexOf('=')
+            // A bare name (`?debug`) or an empty value (`?token=`) has nothing to leak.
+            if (eq < 0 || eq == pair.length - 1) return@joinToString pair
+            val name = pair.substring(0, eq)
+            val lower = decodeForMatch(name)
+            val secret = lower in exact || patterns.any { it in lower }
+            if (secret) { changed = true; "$name=██" } else pair
+        }
+        if (!changed) return url.toString()
+
+        val base = url.newBuilder().encodedQuery(null).encodedFragment(null).build().toString()
+        val fragment = url.encodedFragment?.let { "#$it" }.orEmpty()
+        return "$base?$redacted$fragment"
+    }
+
+    /** Percent-decode a query-param name for matching only (`api%5Fkey` is still `api_key`). */
+    private fun decodeForMatch(name: String): String {
+        val lower = name.lowercase()
+        if ('%' !in lower && '+' !in lower) return lower
+        return runCatching { java.net.URLDecoder.decode(lower, "UTF-8") }.getOrDefault(lower)
     }
 
     fun headersToMap(headers: Headers, config: LogPoseConfig): Map<String, String> {

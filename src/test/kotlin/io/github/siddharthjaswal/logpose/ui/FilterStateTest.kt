@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose.ui
 
+import io.github.siddharthjaswal.logpose.model.Body
 import io.github.siddharthjaswal.logpose.model.DbQuery
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
@@ -108,6 +109,55 @@ class FilterStateTest {
         assertTrue(FilterState(urlQuery = "   ").matches(http()))
     }
 
+    // ---- HTTP search beyond the URL ---------------------------------------------------------------
+
+    @Test
+    fun `status code text matches an HTTP row the URL misses`() {
+        // No textOf hook needed — the code is on the transaction itself.
+        assertTrue(FilterState(urlQuery = "404").matches(http(code = 404)))
+        assertFalse(FilterState(urlQuery = "404").matches(http(code = 200)))
+        assertFalse(FilterState(urlQuery = "404").matches(http(code = null)))
+    }
+
+    @Test
+    fun `body text matches only through the injected haystack`() {
+        val event = httpWithBody(responseBody = """{"rider_name":"kavya"}""")
+        // Pure state: search stays URL-only, exactly as every existing caller constructed it.
+        assertFalse(FilterState(urlQuery = "kavya").matches(event))
+        // With the panel's cache injected, the body is reachable.
+        assertTrue(FilterState(urlQuery = "kavya", textOf = ::fakeHaystack).matches(event))
+        assertFalse(FilterState(urlQuery = "nagpur", textOf = ::fakeHaystack).matches(event))
+    }
+
+    @Test
+    fun `body search waits for three characters, the URL fast path does not`() {
+        val event = httpWithBody(responseBody = """{"zone":"xy"}""")
+        // Two chars: bodies are off the table (they'd match everything while typing)…
+        assertFalse(FilterState(urlQuery = "xy", textOf = ::fakeHaystack).matches(event))
+        // …but the same short query still matches through the URL.
+        assertTrue(FilterState(urlQuery = "v4", textOf = ::fakeHaystack).matches(event))
+    }
+
+    @Test
+    fun `request bodies are searched too`() {
+        val event = httpWithBody(requestBody = """{"coupon":"MONSOON50"}""")
+        assertTrue(FilterState(urlQuery = "monsoon50", textOf = ::fakeHaystack).matches(event))
+    }
+
+    @Test
+    fun `a body match still respects the other HTTP chips`() {
+        val event = httpWithBody(responseBody = """{"rider_name":"kavya"}""")
+        val state = FilterState(urlQuery = "kavya", methods = setOf("POST"), textOf = ::fakeHaystack)
+        assertFalse(state.matches(event)) // it's a GET
+    }
+
+    /** Stands in for CorrelationIndex.textOf: url + bodies, the way the real haystack reads. */
+    private fun fakeHaystack(event: LogEvent): String {
+        val tx = (event as LogEvent.Http).tx
+        return listOfNotNull(tx.request.url, tx.request.body?.text, tx.response?.body?.text)
+            .joinToString(" ")
+    }
+
     // ---- fixtures -----------------------------------------------------------------------------------
 
     private fun envelope(kind: String, id: String = "e1") =
@@ -124,6 +174,23 @@ class FilterStateTest {
             response = code?.let { Response(code = it) },
         )
         return LogEvent.Http(tx, envelope(Envelope.KIND_HTTP, "h1"))
+    }
+
+    private fun httpWithBody(
+        requestBody: String? = null,
+        responseBody: String? = null,
+    ): LogEvent.Http {
+        val tx = Transaction(
+            id = "h2",
+            request = Request(
+                method = "GET",
+                url = "https://api.example.com/v4/trips/",
+                path = "/v4/trips/",
+                body = requestBody?.let { Body(text = it) },
+            ),
+            response = Response(code = 200, body = responseBody?.let { Body(text = it) }),
+        )
+        return LogEvent.Http(tx, envelope(Envelope.KIND_HTTP, "h2"))
     }
 
     private fun fcm(data: Map<String, String> = mapOf("channel" to "order-assigned")) =

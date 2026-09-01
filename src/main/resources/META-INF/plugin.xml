@@ -121,6 +121,19 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Secrets stop leaking through query strings</b> (library 1.7.3): sensitive query
+                values (<code>api_key</code>, <code>token</code>, <code>secret</code>, …) are
+                masked in the capture the way headers already were — the name stays, the value
+                goes. Mock rules still match against the real values. FCM registration tokens
+                truncate by default.</li>
+            <li><b>Device picker</b> — with several devices attached, capture used to fail; a
+                <i>device: auto ▾</i> link in the toolbar now lists devices and remembers your
+                choice per project. One device attached: nothing changes.</li>
+            <li><b>Search reads bodies</b> — the list search now matches status codes and (for 3+
+                character queries) request/response bodies through the correlation cache, so typing
+                never scans a payload.</li>
+            <li><b>Response-body privacy has a switch</b>: the Connect Coding Agent panel can now
+                withhold bodies from agents (<code>payload_withheld</code> over MCP).</li>
             <li><b>Worker rows tell waiting apart from running</b> (needs
                 <code>logpose-android</code> 1.7.2). The fact column shows <i>queued 6.2s</i> and the
                 time column is now the run duration rather than queue + run. The library remembers

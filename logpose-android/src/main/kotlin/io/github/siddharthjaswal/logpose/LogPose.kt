@@ -465,16 +465,24 @@ object LogPose {
     /** Record an FCM registration-token refresh. Call from `onNewToken`. */
     fun logFcmToken(token: String, config: LogPoseConfig = LogPoseConfig()) {
         if (!config.enabled) return
+        // A registration token is a credential for addressing pushes at this device, and its only
+        // display use is "token refreshed" — a prefix serves that. Opt out via config to copy the
+        // whole token out of the IDE.
+        val shown = if (config.redactFcmToken && token.length > TOKEN_PREFIX_CHARS)
+            token.take(TOKEN_PREFIX_CHARS) + "…" else token
         emitFcm(
             WireFcmMessage(
                 id = newId(),
                 event = "token",
                 receivedAtMillis = System.currentTimeMillis(),
-                token = token,
+                token = shown,
             ),
             config,
         )
     }
+
+    /** How much of an FCM token survives [LogPoseConfig.redactFcmToken] — enough to tell tokens apart. */
+    private const val TOKEN_PREFIX_CHARS = 12
 
     /**
      * Hand LogPose the app's push entry point, so the IDE can **inject** a push — replay a

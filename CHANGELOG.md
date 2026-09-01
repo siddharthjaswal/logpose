@@ -6,6 +6,46 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-09-02
+
+Plugin **1.9.2**, library **v1.7.3**. Three of the oldest items on the backlog: secrets stop
+leaking through query strings, two devices stop breaking capture, and search finally reads bodies.
+
+### Added (library — v1.7.3)
+- **Query-parameter redaction.** Redaction previously existed only for headers, so
+  `?api_key=…`, `?access_token=…` went to logcat in the clear on every request. The URL's
+  sensitive query values are now masked with the same `██` marker headers use — the parameter
+  *name* stays visible, the value goes. Config mirrors the header surface exactly:
+  `redactQueryParams` (exact names, case-insensitive) + `redactQueryParamPatterns` (name
+  substrings), both defaulted to the query-string twins of the header lists, with the same
+  documented over-redaction tradeoff (`sort_key` gets masked; a wrongly-redacted value costs a
+  re-run, a wrongly-emitted one costs a rotated secret). No wire change — the `url` field is
+  still a string; only its content is safer.
+- **Mock matching is unaffected by design**: `matchQuery` rules match against the *real* OkHttp
+  query values, before redaction — pinned by a test that serves a mock keyed on the actual
+  secret while the emitted line shows `██`.
+- **FCM registration tokens truncate to 12 chars + `…` by default** (`redactFcmToken = false`
+  restores the full token for the copy-from-detail workflow).
+
+### Added (plugin)
+- **Device picker** — the oldest open gap. `LogcatReader`, `PushController` and the mock
+  broadcasts have accepted a device serial all along; nothing ever assigned one, so a second
+  attached device broke capture with an error in the detail pane. A quiet `device: auto ▾` link
+  in the toolbar now lists `adb devices -l` (refreshed on open, off the EDT) and persists the
+  choice per project. With 0–1 devices everything behaves exactly as before; with several and no
+  choice, capture picks the first and says so instead of failing. Switching devices mid-capture
+  clears rules on the old device, restarts, and notifies.
+- **Search reads bodies.** The list search matched only `request.url` for HTTP rows. It now also
+  matches status-code text (`404` finds the failures) and — for queries of 3+ characters —
+  request/response bodies, through the same per-event cache the correlation chip uses, so typing
+  never scans a payload. The counter and the filtered-to-nothing state stay consistent because
+  everything routes through the one filter predicate.
+- **The `exposeBodies` privacy control has a UI at last.** The Connect Coding Agent button now
+  opens a small panel: copy the MCP command, plus a switch for "Expose response bodies to
+  agents" — advertised in the plugin description since 1.5.0, previously settable only by
+  hand-editing project properties. Withheld bodies return `payload_withheld` over MCP.
+
+
 ## [1.9.1] - 2026-08-29
 
 Plugin **1.9.1**, library **v1.7.2**. A worker row can finally say how long it *waited* as opposed

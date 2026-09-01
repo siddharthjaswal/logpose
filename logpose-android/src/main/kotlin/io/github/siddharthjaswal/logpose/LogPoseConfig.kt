@@ -37,6 +37,20 @@ data class LogPoseConfig(
     val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
     val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
     /**
+     * Exact query-parameter names whose **values** are replaced with "██" in the emitted URL
+     * (case-insensitive; the name stays visible). The query-string twin of [redactHeaders]:
+     * `?api_key=…` in logcat is the same leak as an `API-Key` header. Extend rather than replace:
+     * `redactQueryParams = LogPoseConfig.DEFAULT_REDACT_QUERY_PARAMS + "tenant_key"`.
+     * Emission-only — mock rules still match on the real values.
+     */
+    val redactQueryParams: Set<String> = DEFAULT_REDACT_QUERY_PARAMS,
+    /**
+     * Substrings that redact any query parameter whose *name* contains one — the twin of
+     * [redactHeaderPatterns], for the `?shop_token=`/`?gcs_signature=` shapes an exact list
+     * can't enumerate.
+     */
+    val redactQueryParamPatterns: Set<String> = DEFAULT_REDACT_QUERY_PATTERNS,
+    /**
      * Decoders that turn otherwise-unreadable bodies (encrypted, custom binary) into text for the
      * inspector. Consulted in order; the first non-null result wins, and an empty list keeps the
      * current raw-body behaviour. See [BodyDecoder].
@@ -67,6 +81,13 @@ data class LogPoseConfig(
      * `redactAnalyticsParams = LogPoseConfig.DEFAULT_REDACT_PARAMS` (or `+ "user_id"`).
      */
     val redactAnalyticsParams: Set<String> = emptySet(),
+    /**
+     * Truncate the FCM registration token emitted by `LogPose.logFcmToken` to its first 12
+     * characters plus "…". The token's display use is "token refreshed", which the prefix serves;
+     * a full token pasted out of a capture can address pushes at the device. Set false when you
+     * genuinely need to copy the whole token out of the IDE.
+     */
+    val redactFcmToken: Boolean = true,
 ) {
     companion object {
         /**
@@ -115,6 +136,50 @@ data class LogPoseConfig(
             "api-key",
             "api_key",
             "auth",
+        )
+
+        /**
+         * Credential-bearing query-parameter names in wide use. Same philosophy as
+         * [DEFAULT_REDACT_HEADERS]: a capture gets pasted into tickets and handed to coding
+         * agents, so a value wrongly redacted costs a re-run while a value wrongly emitted costs
+         * a rotated secret.
+         */
+        val DEFAULT_REDACT_QUERY_PARAMS: Set<String> = setOf(
+            "api_key",
+            "apikey",
+            "api-key",
+            "key",
+            "token",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "auth",
+            "auth_token",
+            "authorization",
+            "secret",
+            "client_secret",
+            "password",
+            "passwd",
+            "signature",
+            "sig",
+        )
+
+        /**
+         * Name substrings that redact whatever query parameter carries them — the shapes
+         * credential params actually take (`?shop_token=`, `?x-goog-signature=`). Deliberately
+         * broad, per the same tradeoff as [DEFAULT_REDACT_PATTERNS]; note "key" also masks
+         * benign names like `sort_key` — accepted over-redaction, since `X-Signing-Key`-style
+         * params are exactly the ones an exact list misses.
+         */
+        val DEFAULT_REDACT_QUERY_PATTERNS: Set<String> = setOf(
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "credential",
+            "auth",
+            "key",
+            "signature",
         )
 
         /**

@@ -26,12 +26,15 @@ data class LogPoseConfig(
     val exportBufferSize: Int = 2000,
     val redactHeaders: Set<String> = DEFAULT_REDACT_HEADERS,
     val redactHeaderPatterns: Set<String> = DEFAULT_REDACT_PATTERNS,
+    val redactQueryParams: Set<String> = DEFAULT_REDACT_QUERY_PARAMS,
+    val redactQueryParamPatterns: Set<String> = DEFAULT_REDACT_QUERY_PATTERNS,
     val bodyDecoders: List<BodyDecoder> = emptyList(),
     val mocksEnabled: Boolean = true,
     val dbEnabled: Boolean = true,
     val workersEnabled: Boolean = true,
     val analyticsEnabled: Boolean = true,
     val redactAnalyticsParams: Set<String> = emptySet(),
+    val redactFcmToken: Boolean = true,
 ) {
     /**
      * Mirrors the real config's constants so that
@@ -75,6 +78,37 @@ data class LogPoseConfig(
             "api-key",
             "api_key",
             "auth",
+        )
+
+        val DEFAULT_REDACT_QUERY_PARAMS: Set<String> = setOf(
+            "api_key",
+            "apikey",
+            "api-key",
+            "key",
+            "token",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "auth",
+            "auth_token",
+            "authorization",
+            "secret",
+            "client_secret",
+            "password",
+            "passwd",
+            "signature",
+            "sig",
+        )
+
+        val DEFAULT_REDACT_QUERY_PATTERNS: Set<String> = setOf(
+            "token",
+            "secret",
+            "password",
+            "passwd",
+            "credential",
+            "auth",
+            "key",
+            "signature",
         )
 
         val DEFAULT_REDACT_PARAMS: Set<String> = setOf(

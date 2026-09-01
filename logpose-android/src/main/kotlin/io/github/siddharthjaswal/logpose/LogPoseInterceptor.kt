@@ -62,7 +62,7 @@ class LogPoseInterceptor @JvmOverloads constructor(
 
         val wireRequest = WireRequest(
             method = request.method,
-            url = request.url.toString(),
+            url = BodyCapture.redactUrl(request.url, config),
             host = request.url.host,
             path = request.url.encodedPath,
             headers = BodyCapture.headersToMap(request.headers, config),

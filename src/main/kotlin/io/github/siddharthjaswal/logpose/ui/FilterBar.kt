@@ -64,6 +64,17 @@ data class FilterState(
      * is a property of the whole capture, not of a single event in isolation.
      */
     val duplicatesOnly: Boolean = false,
+    /**
+     * The cached searchable haystack for an event — bodies included — injected by the panel from
+     * its [io.github.siddharthjaswal.logpose.analysis.CorrelationIndex], exactly the way the
+     * correlation chip matches values that hide in bodies no row shows.
+     *
+     * Null (the pure default, and what every existing test constructs) keeps HTTP search
+     * URL-only. With the hook set, an HTTP row whose URL misses is given a second chance against
+     * status-code text and — for queries of [MIN_BODY_QUERY] chars or more — the cached body
+     * text. Never a scan: the lookup must be the panel's cache, which is warmed off the EDT.
+     */
+    val textOf: ((LogEvent) -> String)? = null,
 ) {
     fun matches(event: LogEvent): Boolean = when (event) {
         is LogEvent.Http -> types.allowsHttp() && matchesHttp(event)
@@ -92,7 +103,7 @@ data class FilterState(
 
     private fun matchesHttp(event: LogEvent.Http): Boolean {
         val tx = event.tx
-        if (urlQuery.isNotBlank() && !tx.request.url.contains(urlQuery, ignoreCase = true)) return false
+        if (urlQuery.isNotBlank() && !httpTextMatches(event)) return false
         if (methods.isNotEmpty() && tx.request.method.uppercase() !in methods) return false
         if (statusClasses.isNotEmpty()) {
             val cls = (tx.response?.code ?: 0) / 100
@@ -100,6 +111,28 @@ data class FilterState(
         }
         if (hideNoise && MutedEndpoints.isMuted(tx)) return false
         return true
+    }
+
+    /**
+     * Whether the query hits an HTTP row anywhere it can. The URL stays the fast path — one
+     * string, no lookup — and is what a hook-less state (tests, or a panel that hasn't wired the
+     * cache) still searches. Status-code text is next, so `404` finds the failures. Bodies come
+     * last and only for queries of [MIN_BODY_QUERY]+ chars, through the injected cache: a one- or
+     * two-char query would match nearly every body and turn typing's first keystrokes into noise.
+     */
+    private fun httpTextMatches(event: LogEvent.Http): Boolean {
+        val tx = event.tx
+        if (tx.request.url.contains(urlQuery, ignoreCase = true)) return true
+        val code = tx.response?.code
+        if (code != null && code.toString().contains(urlQuery)) return true
+        val lookup = textOf ?: return false
+        if (urlQuery.length < MIN_BODY_QUERY) return false
+        return lookup(event).contains(urlQuery, ignoreCase = true)
+    }
+
+    companion object {
+        /** Shortest query that searches request/response bodies, not just URL and status. */
+        const val MIN_BODY_QUERY = 3
     }
 
     private fun matchesFcm(event: LogEvent.Fcm): Boolean {
@@ -162,6 +195,12 @@ class FilterBar : JPanel(BorderLayout()) {
 
     /** Opens the correlation-keys dialog. */
     var onCorrelationKeys: () -> Unit = {}
+
+    /**
+     * The panel's cached haystack lookup, threaded into every [FilterState] this bar hands out so
+     * HTTP search can reach status text and bodies without ever scanning a payload itself.
+     */
+    var httpTextOf: ((LogEvent) -> String)? = null
 
     // ---- controls ------------------------------------------------------------------------------
 
@@ -282,6 +321,7 @@ class FilterBar : JPanel(BorderLayout()) {
         hideNoise = hideNoise.on,
         types = typeChips.filterValues { it.selected }.keys,
         duplicatesOnly = dupesOnly.on,
+        textOf = httpTextOf,
     )
 
     fun setCount(shown: Int, total: Int) { count.text = "$shown/$total" }

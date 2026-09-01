@@ -33,6 +33,7 @@ import io.github.siddharthjaswal.logpose.analysis.Groupings
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.analysis.Suggestion
 import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
+import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
@@ -68,6 +69,7 @@ import io.github.siddharthjaswal.logpose.ui.FilteredToNothingPanel
 import io.github.siddharthjaswal.logpose.ui.GenericDetailView
 import io.github.siddharthjaswal.logpose.ui.KindPresenter
 import io.github.siddharthjaswal.logpose.ui.isPending
+import io.github.siddharthjaswal.logpose.ui.LinkLabel
 import io.github.siddharthjaswal.logpose.ui.LogPoseNotifications
 import io.github.siddharthjaswal.logpose.ui.MockDiff
 import io.github.siddharthjaswal.logpose.ui.MockRuleDialog
@@ -106,7 +108,29 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     private val store = EventStore()
     private val parser = TransactionParser()
-    private val reader = LogcatReader()
+
+    /**
+     * A `var`, because the target device is a constructor argument: picking a different device
+     * replaces the reader. Only startCapture assigns it (on the EDT), and every start resolves
+     * the serial afresh, so a stale reader can never be re-attached against the wrong device.
+     */
+    private var reader = LogcatReader()
+
+    /**
+     * The device this project captures from — null is *auto* (no `-s`, today's behaviour).
+     * Persisted per project; adb is only consulted when the picker opens or capture starts,
+     * always off the EDT.
+     */
+    private var selectedDeviceSerial: String? = DeviceSelection.serial(project)
+
+    /** What `adb devices -l` last reported — only for labelling the picker, never for logic. */
+    private var knownDevices: List<Adb.DeviceInfo> = emptyList()
+
+    private val devicePicker = LinkLabel("").apply {
+        toolTipText = "Which attached device LogPose reads. The list refreshes from `adb devices -l` " +
+            "when it opens; Auto tails the default device, as adb picks it."
+        onClick = { openDevicePicker() }
+    }
 
     /**
      * Correlation's cache: one searchable haystack and one key extraction per event, computed on
@@ -404,6 +428,12 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         filterBar.onChange = { refreshList() }
         filterBar.onFindByValue = { findByValue() }
         filterBar.onCorrelationKeys = { editCorrelationKeys() }
+        // HTTP search reads the same cached haystack the correlation chip matches against —
+        // warmed on the reader thread as events arrive, a map lookup by the time a keystroke
+        // filters. The cache recomputes on a miss (an evicted entry), which is the cost model
+        // the chip already accepted.
+        filterBar.httpTextOf = { event -> correlation.textOf(event) }
+        refreshDevicePickerLabel()
 
         val listScroll = JBScrollPane(list).apply {
             border = JBUI.Borders.empty(); viewport.isOpaque = true; viewport.background = Theme.bg0
@@ -494,6 +524,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             isOpaque = false
             add(statusDot)
             add(toolbar.component)
+            // The device selector: a quiet link, because with 0 or 1 devices it has nothing to
+            // say — "auto" is correct and identical to before it existed. It earns attention only
+            // when a second device makes the choice real, and then it names the choice.
+            add(devicePicker)
         }
         val toolbarRow = JPanel(BorderLayout()).apply {
             isOpaque = true; background = Theme.bg0
@@ -523,15 +557,41 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         }
     }
 
+    /**
+     * Bumped by every start *and* stop, and checked when the off-EDT serial resolution hops back:
+     * a start whose resolution is still in flight when the user stops (or stops and starts again)
+     * must not attach its reader — without this, a quick stop/start could leave two readers
+     * tailing, one of them orphaned by the `reader` var reassignment.
+     */
+    private var captureGeneration = 0
+
     private fun startCapture() {
         parser.reset()
         captureActive = true
+        val generation = ++captureGeneration
         reattachAttempts = 0
         statusDot.capturing = true
-        mocksController.onCaptureStarted()
-        refreshMocksBar()
-        attachReader()
-        scheduleRefresh()
+        // Which device to tail can require `adb devices -l` (two attached devices and no explicit
+        // choice would make a bare `adb logcat` fail), so the serial is resolved on a pooled
+        // thread first, and only then — back on the EDT — do the reader attach and the mock push
+        // go out, both against the same serial.
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            val ready = Adb.devices().filter { it.ready }
+            val choice = DeviceSelection.choose(selectedDeviceSerial, ready)
+            SwingUtilities.invokeLater {
+                // Stopped (or stopped-and-restarted) before the serial resolved.
+                if (!captureActive || generation != captureGeneration) return@invokeLater
+                knownDevices = ready
+                refreshDevicePickerLabel()
+                mocksController.deviceSerial = choice.serial
+                reader = LogcatReader(deviceSerial = choice.serial)
+                mocksController.onCaptureStarted()
+                refreshMocksBar()
+                attachReader()
+                scheduleRefresh()
+                choice.notice?.let { LogPoseNotifications.info(project, "LogPose: device", it) }
+            }
+        }
     }
 
     /**
@@ -577,6 +637,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     private fun stopCapture() {
         captureActive = false
+        captureGeneration++ // invalidates any start still resolving its device off the EDT
         statusDot.capturing = false
         reader.stop()
         // Fail-safe: clear any rules the device is holding so a forgotten mock can't linger
@@ -589,6 +650,83 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         // scheduling onto a disposed panel's alarm is exactly the kind of thing that logs a stack
         // trace at IDE shutdown.
         refreshMocksBar()
+    }
+
+    // ---- device picker ------------------------------------------------------------------------
+
+    /** What the toolbar link says: the chosen device (by model when known), or nothing loud. */
+    private fun refreshDevicePickerLabel() {
+        val serial = selectedDeviceSerial
+        devicePicker.text = when (serial) {
+            null -> "device: auto ▾"
+            else -> "device: ${knownDevices.firstOrNull { it.serial == serial }?.label ?: serial} ▾"
+        }
+    }
+
+    /** Lists devices off the EDT — the list refreshes on every open, never on a timer. */
+    private fun openDevicePicker() {
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            val devices = Adb.devices()
+            SwingUtilities.invokeLater {
+                knownDevices = devices.filter { it.ready }
+                refreshDevicePickerLabel()
+                showDevicePopup(devices)
+            }
+        }
+    }
+
+    private fun showDevicePopup(devices: List<Adb.DeviceInfo>) {
+        val checked = AllIcons.Actions.Checked
+        val group = DefaultActionGroup().apply {
+            add(
+                act("Auto — first attached device", if (selectedDeviceSerial == null) checked else null) {
+                    selectDevice(null, "the default device")
+                }
+            )
+            val ready = devices.filter { it.ready }
+            if (ready.isNotEmpty()) addSeparator("Attached")
+            ready.forEach { device ->
+                add(
+                    act(device.label, if (device.serial == selectedDeviceSerial) checked else null) {
+                        selectDevice(device.serial, device.label)
+                    }
+                )
+            }
+            // Not selectable — adb can't run commands against them — but silently hiding a phone
+            // that is plugged in and merely unauthorized would read as a broken picker.
+            devices.filterNot { it.ready }.takeIf { it.isNotEmpty() }?.let { rest ->
+                addSeparator("Not ready")
+                rest.forEach { add(act("${it.label} — ${it.state}", null) {}) }
+            }
+            if (devices.isEmpty()) {
+                addSeparator()
+                add(act("No devices attached", null) {})
+            }
+        }
+        val popup = JBPopupFactory.getInstance().createActionGroupPopup(
+            null, group, DataContext.EMPTY_CONTEXT,
+            JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
+        )
+        if (devicePicker.isShowing) popup.showUnderneathOf(devicePicker) else popup.showInFocusCenter()
+    }
+
+    /**
+     * Applies a device choice. Order matters when capturing: stop first — that clears the mock
+     * rules still held by the *old* device — then move the serial, then start again, which pushes
+     * the rules to the new one and says so.
+     */
+    private fun selectDevice(serial: String?, label: String) {
+        if (serial == selectedDeviceSerial) return
+        val wasCapturing = captureActive
+        if (wasCapturing) stopCapture()
+        selectedDeviceSerial = serial
+        DeviceSelection.setSerial(project, serial)
+        mocksController.deviceSerial = serial
+        refreshDevicePickerLabel()
+        if (wasCapturing) {
+            LogPoseNotifications.info(project, "LogPose: device changed", "Capture restarting on $label.")
+            startCapture()
+        }
     }
 
     private fun scheduleRefresh() {
@@ -1731,11 +1869,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private inner class CaptureToggleAction :
         AnAction("Capture", "Start/stop reading logcat", AllIcons.Actions.Execute), Toggleable {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        // Keyed on captureActive, not reader.isRunning(): the reader now attaches a beat after
+        // Start (the serial resolves off the EDT first), and the toggle must not read that gap
+        // as "not capturing" — a double-click would start two captures.
         override fun actionPerformed(e: AnActionEvent) {
-            if (reader.isRunning()) stopCapture() else startCapture()
+            if (captureActive) stopCapture() else startCapture()
         }
         override fun update(e: AnActionEvent) {
-            val running = reader.isRunning()
+            val running = captureActive
             Toggleable.setSelected(e.presentation, running)
             e.presentation.icon = if (running) AllIcons.Actions.Suspend else AllIcons.Actions.Execute
             e.presentation.text = if (running) "Stop Capture" else "Start Capture"
@@ -1991,8 +2132,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     }
 
     /**
-     * Copies the one-line command that points a coding agent at this project's capture, so the
-     * agent can read what the app actually did instead of being told about it second-hand.
+     * The Connect Coding Agent flow: copy the one-line command that points an MCP client at this
+     * project's capture, and — in the same small popup, because this is where the decision is
+     * made — whether that client may read response bodies at all. The toggle is the UI for
+     * [McpSessions.setExposeBodies], which `plugin.xml` has advertised since 1.6 but nothing
+     * offered; it applies immediately (the handler reads the flag per request).
      */
     private inner class ConnectAgentAction : AnAction(
         "Connect Coding Agent",
@@ -2001,11 +2145,68 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     ) {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
         override fun actionPerformed(e: AnActionEvent) {
-            val port = BuiltInServerManager.getInstance().port
-            val command = "claude mcp add --transport http logpose " +
-                "http://localhost:$port${LogPoseMcpHandler.PATH} " +
-                "--header \"${LogPoseMcpHandler.TOKEN_HEADER}: $mcpToken\""
-            copyToClipboard(command, "MCP connect command copied — paste it in your terminal")
+            showConnectAgentPopup(e.inputEvent?.component)
         }
+    }
+
+    private fun showConnectAgentPopup(near: Component?) {
+        lateinit var popup: com.intellij.openapi.ui.popup.JBPopup
+
+        val copy = io.github.siddharthjaswal.logpose.ui.PillButton("Copy connect command", filled = true).apply {
+            addActionListener {
+                val port = BuiltInServerManager.getInstance().port
+                val command = "claude mcp add --transport http logpose " +
+                    "http://localhost:$port${LogPoseMcpHandler.PATH} " +
+                    "--header \"${LogPoseMcpHandler.TOKEN_HEADER}: $mcpToken\""
+                popup.cancel()
+                copyToClipboard(command, "MCP connect command copied — paste it in your terminal")
+            }
+        }
+
+        // Bound directly to the persisted per-project flag; no staging, no OK button.
+        lateinit var expose: io.github.siddharthjaswal.logpose.ui.ToggleSwitch
+        expose = io.github.siddharthjaswal.logpose.ui.ToggleSwitch(McpSessions.exposeBodies(project)) {
+            McpSessions.setExposeBodies(project, expose.on)
+        }
+
+        val exposeLabel = JBLabel("Expose response bodies to agents").apply {
+            foreground = Theme.text
+            font = JBUI.Fonts.label(12f).asBold()
+            border = JBUI.Borders.emptyLeft(8)
+        }
+        val explanation = JBLabel(
+            "<html>When off, agents still see every request, status and timing —<br/>" +
+                "bodies come back as <code>payload_withheld</code> over MCP.</html>",
+        ).apply {
+            foreground = Theme.textMuted
+            font = JBUI.Fonts.label(11f)
+        }
+
+        fun left(c: JComponent) = c.apply { alignmentX = LEFT_ALIGNMENT }
+        val content = JPanel().apply {
+            isOpaque = true
+            background = Theme.bg1
+            layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS)
+            border = JBUI.Borders.empty(12)
+            add(left(copy))
+            add(javax.swing.Box.createVerticalStrut(JBUI.scale(12)))
+            add(left(JPanel().apply {
+                isOpaque = false
+                layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
+                add(expose)
+                add(exposeLabel)
+            }))
+            add(javax.swing.Box.createVerticalStrut(JBUI.scale(6)))
+            add(left(explanation))
+        }
+
+        popup = JBPopupFactory.getInstance()
+            .createComponentPopupBuilder(content, null)
+            .setRequestFocus(true)
+            .setResizable(false)
+            .setMovable(false)
+            .setCancelOnClickOutside(true)
+            .createPopup()
+        if (near != null && near.isShowing) popup.showUnderneathOf(near) else popup.showInCenterOf(this)
     }
 }

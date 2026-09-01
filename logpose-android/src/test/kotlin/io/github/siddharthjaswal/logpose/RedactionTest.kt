@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose
 
 import io.github.siddharthjaswal.logpose.internal.BodyCapture
 import okhttp3.Headers
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -64,6 +65,48 @@ class RedactionTest {
         assertEquals("application/json", out["Accept"])
         assertEquals("gandalf/1.0", out["User-Agent"])
         assertEquals("req-42", out["X-Request-Id"])
+    }
+
+    // ---- query parameters: the same leak, one line lower in the request ------------------------
+
+    private fun redactUrl(url: String, config: LogPoseConfig = LogPoseConfig()): String =
+        BodyCapture.redactUrl(url.toHttpUrl(), config)
+
+    @Test
+    fun `redacts credential query params by exact name, keeping the name visible`() {
+        assertEquals(
+            "https://ex.com/v1/orders?api_key=██&page=2",
+            redactUrl("https://ex.com/v1/orders?api_key=sk_live_51H8&page=2"),
+        )
+    }
+
+    @Test
+    fun `redacts vendor query params the exact list cannot enumerate`() {
+        // Same reason header patterns exist: every vendor invents its own credential param.
+        assertEquals(
+            "https://ex.com/dl?shop_token=██&x-goog-signature=██&file=a.png",
+            redactUrl("https://ex.com/dl?shop_token=shpat_9&x-goog-signature=YWJj&file=a.png"),
+        )
+    }
+
+    @Test
+    fun `query param case does not matter`() {
+        assertEquals(
+            "https://ex.com/a?API_KEY=██&Token=██",
+            redactUrl("https://ex.com/a?API_KEY=k&Token=t"),
+        )
+    }
+
+    @Test
+    fun `leaves an ordinary query string alone`() {
+        val url = "https://ex.com/search?q=shoes&page=2&sort=price_asc"
+        assertEquals(url, redactUrl(url))
+    }
+
+    @Test
+    fun `a url with no query comes through untouched`() {
+        val url = "https://ex.com/v1/orders"
+        assertEquals(url, redactUrl(url))
     }
 
     @Test
