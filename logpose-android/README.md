@@ -26,9 +26,10 @@ it exceeds logcat's limit). It also:
 > stays empty, with no error to tell you why. Plugin **1.6.0+** additionally renders db, worker
 > and config as first-class rows, **1.7.0+** splits a capture that spans an app restart into
 > separate sessions, **1.8.0+** is required for push injection, scenarios and the new mock
-> matchers/steps, and **1.9.0+** sends an injection id this version can collapse an injected
-> push's re-log onto (below). On a newer plugin an older library still works: legacy payloads are
-> recognised and wrapped.
+> matchers/steps, **1.9.0+** sends an injection id this version can collapse an injected
+> push's re-log onto (below), and **1.9.1+** renders the worker queue-wait / run-duration split
+> that `v1.7.2` puts on the wire. On a newer plugin an older library still works: legacy
+> payloads are recognised and wrapped.
 
 ```kotlin
 // settings.gradle.kts
@@ -39,9 +40,9 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.1")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.2")
     // Release builds: a zero-overhead no-op with the same API (no logcat, no extra deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.1")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.2")
 }
 ```
 
@@ -197,7 +198,12 @@ Notes worth knowing:
   a busy screen can outproduce every other kind combined. They're always captured and always
   visible to a coding agent over MCP.
 - A worker event is keyed by `workId`, so a request's states collapse into one updating row.
-  Durations derive from `WorkInfo` state changes and therefore include queue time.
+- **Queue wait vs run time (v1.7.2+).** The library remembers when each request was enqueued and
+  when its run actually started, and stamps both instants onto every emission — so the IDE
+  (plugin 1.9.1+) can say `queued 6.2s` and show the true run duration instead of queue + run.
+  **Upgrading the dependency is the whole integration**: `WorkerEventInfo` is unchanged and the
+  observer above needs no edits. Null means "not observed", never a guess — attach mid-flight or
+  restart the process and the fields stay empty rather than showing a plausible-looking number.
 - The first config snapshot in a process is a baseline; only later activations report changes.
 - `dbEnabled` / `workersEnabled` on `LogPoseConfig` switch these off — a query callback on a
   busy screen can emit hundreds of events a minute.

@@ -46,10 +46,12 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
   **MCP**, so Claude Code (or any MCP client) can answer "what did the app actually request,
   and why did it fail?" from real traffic instead of a pasted log line — and can create a mock
   to reproduce or unblock a state. See [Connect a coding agent](#connect-a-coding-agent).
-- **Database, background work and remote config, first class** — Room queries show their
-  operation and table, a WorkManager request occupies one row that updates as it runs (and
-  badges its retries), and a config activation reports exactly which flags changed, with
-  before → after. See [Database, workers and config](#database-workers-and-config).
+- **Database, background work and remote config, first class** — DB rows lead with the verb and
+  the table (`[SELECT] orders`), transaction ceremony folds into one muted row, a WorkManager
+  request occupies one row that states its state (`● running` counts up live, `RETRY ×N`,
+  `queued 6.2s` beside the true run duration), and a config activation reports exactly which
+  flags changed, with before → after. See
+  [Database, workers and config](#database-workers-and-config).
 - **Log anything else too** — `LogPose.event("PaymentSheet") { … }` puts any other subsystem on
   the same timeline. Events carry their own presentation, so they render with no plugin
   changes. See [Log your own events](#log-your-own-events).
@@ -76,12 +78,19 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
 - **FCM in the same timeline** — Firebase pushes and token refreshes appear inline with HTTP
   traffic, so you can read push → API call → UI as one story. Notification, metadata and data
   payload are all inspectable.
-- **Modern "Studio" tool window** — a master/detail view where one axis owns hue: a per-kind
-  row glyph, a semantic status pill (2xx/3xx neutral, 4xx amber, 5xx red), a method label
-  weighted rather than colored, a hero **Overview** card (status, URL, duration/size/started/
-  host/id stat chips), and side-by-side **Request** / **Response** cards.
-- **Duplicate detection** — repeated calls in a burst get a `DUP ×N` tag; overlapping
-  non-idempotent calls (likely double-submits) are flagged in red.
+- **Modern "Studio" tool window** — a master/detail view where **one axis owns hue**: kind hue
+  appears only on the row glyph, the TYPE chip, the detail-header kind pill and waterfall lane
+  marks. Status carries semantics (2xx/3xx neutral, 4xx amber, 5xx red), methods are weighted
+  rather than colored, and anything LogPose itself caused (**MOCK** / **INJ** / **MERGE**) is
+  the only solid-accent fill in a row. Plus a hero **Overview** card (status, URL,
+  duration/size/started/host/id stat chips) and side-by-side **Request** / **Response** cards.
+- **A polling wall collapses to one line** — three or more consecutive same-method, same-path
+  2xx calls fold into a single row with a `×N` pill and the median duration; double-click
+  expands, the detail card gets an `occurrence ‹ n/N ›` stepper, and a failed poll always
+  stands alone. Collapsing is presentation only — the store, MCP and export keep every event.
+- **Duplicate detection** — repeated calls in a burst get an outlined `DUP ×N` pill; overlapping
+  non-idempotent calls (likely double-submits) are flagged in red, and are never folded into a
+  polling collapse.
 - **Copy the timeline** — multi-select rows (`⇧↑/↓`) and copy the call sequence as plain
   text, ideal for pasting into a bug report.
 - **Collapsible JSON trees** — request/response bodies are parsed back into navigable,
@@ -89,8 +98,10 @@ touching backend or app code. HTTP traffic and **FCM pushes** land in one unifie
   Raw** (raw is syntax-highlighted too).
 - **Find in body** — `⌘F` / `Ctrl+F` inside either card highlights all matches with
   next/prev navigation and an `n/total` counter.
-- **One-click filter bar** — a compact URL search box plus Method (GET/POST/PUT/DELETE)
-  and Status (2xx–5xx) toggles, and a **Hide noise** switch. No typing required.
+- **One-click filter bar** — a compact search box, the seven TYPE chips and a **Filters**
+  popover (method, status, hide noise, duplicates only) with a count badge; every active choice
+  echoes as a removable chip on a second row. Filtered to nothing? The empty state names the
+  filter responsible and offers the loosener that would reveal the most events.
 - **Mute noisy endpoints** — right-click → mute; muted calls stay visible but fade into
   the background (numeric path segments are normalized, so one mute covers all ids).
   Persists across restarts.
@@ -233,17 +244,24 @@ for the canonical schema. Plugin 1.6.0 still reads the pre-envelope format emitt
 
 ## Filtering
 
-Filtering is a one-line, zero-typing bar (all conditions AND-ed):
+Filtering is a zero-typing bar (all conditions AND-ed). The permanent row keeps only what earns
+its space — search, the kind chips, a **Filters** button with a count badge, and the shown/total
+count:
 
 | Control | Effect |
 |---|---|
 | **Search box** | URL/path contains the text (case-insensitive); also matches event titles, kinds and trace ids |
-| **TYPE** NET / FCM / DB / WORK / CONF / APP | multi-select; show only the picked kinds of event |
-| **METHOD** GET / POST / PUT / DELETE | multi-select; show only the picked methods |
-| **STATUS** 2xx / 3xx / 4xx / 5xx | multi-select; show only the picked status classes |
-| **Hide noise** switch | hide muted/noise endpoints entirely (right-click a row → mute to mark it noise) |
-| **`order_id 21053953 ✕`** chip | shown while the timeline is narrowed to a [correlation key](#correlate-a-flow); click it to remove |
-| **⋯** overflow | **Find by value…** and **Correlation keys…** — the two actions that need the whole capture, not a row |
+| **TYPE** NET / FCM / DB / WORK / CONF / ANLY / APP | multi-select; show only the picked kinds of event (below ~440px the chips become glyphs) |
+| **Filters** popover → **Method** GET / POST / PUT / DELETE | multi-select; show only the picked methods (HTTP-only — an active selection hides other kinds, and the echo row says so) |
+| **Filters** popover → **Status** 2xx / 3xx / 4xx / 5xx | multi-select; show only the picked status classes |
+| **Filters** popover → **Hide noise** | hide muted/noise endpoints entirely (right-click a row → mute to mark it noise) |
+| **Filters** popover → **Duplicates only** | show only rows flagged by [duplicate detection](#features) |
+| **Filters** popover → **Find by value…** / **Correlation keys…** | the two actions that need the whole capture, not a row — see [Correlate a flow](#correlate-a-flow) |
+| **Echo row** | appears only while a popover filter or a correlation chip is active: one removable chip per filter (`order_id 21053953 ✕`), the previously-silent mode switches explained out loud (*"status filter → showing HTTP only"*, *"db hidden by default"*), and **Clear all** |
+
+Filter everything away and the empty state doesn't pretend the capture is empty: it names the
+count, the filter actually narrowing the list, and offers the loosener that would reveal the
+most events — measured, not guessed.
 
 ## Getting started
 
@@ -252,14 +270,16 @@ version independently:
 
 | Half | What it does | Where it comes from | Version |
 |---|---|---|---|
-| **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.9.0 |
-| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.7.1` |
+| **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.9.1 (Marketplace currently carries 1.9.0) |
+| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.7.2` |
 
 Install the plugin but not the library and the timeline stays empty — there's nothing being
-emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.7.1` needs
+emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.7.2` needs
 plugin 1.5.0+ to render at all (1.8.0 for push injection and the new mock matchers), and on an
-older plugin rows are dropped silently, with no error saying why. Correlation keys are a plugin
-feature only — they read the payloads your app already emits, so any library version works.
+older plugin rows are dropped silently, with no error saying why. Version skew is what actually
+bites, so the tool window header shows both versions — the plugin's, and the device library's
+once a device has said hello. Correlation keys are a plugin feature only — they read the
+payloads your app already emits, so any library version works.
 
 ### 1. Install the plugin
 
@@ -285,9 +305,10 @@ cd logpose
 ### 2. Add the interceptor to your app
 
 The interceptor is distributed via [JitPack](https://jitpack.io/#siddharthjaswal/logpose).
-**Library `v1.7.1` needs plugin 1.5.0+** (1.6.0+ for db/worker/config rows, 1.8.0 for push
-injection, scenarios and the new mock matchers, 1.9.0 to pair with this version's injected-row
-collapse) — on an older plugin the timeline stays empty with no error explaining why:
+**Library `v1.7.2` needs plugin 1.5.0+** (1.6.0+ for db/worker/config rows, 1.8.0 for push
+injection, scenarios and the new mock matchers, 1.9.0 for injected-row collapse, 1.9.1 to render
+this version's worker queue-wait/run split) — on an older plugin the timeline stays empty with
+no error explaining why:
 
 ```kotlin
 // settings.gradle.kts
@@ -298,10 +319,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.1")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.2")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.1")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.2")
 }
 ```
 
@@ -326,7 +347,7 @@ val client = OkHttpClient.Builder()
 With the `debug`/`release` split above, the release build links against the no-op stub, so
 LogPose is gone from production by construction. `enabled = BuildConfig.DEBUG` is then just
 belt-and-suspenders. (Prefer a single artifact in all variants? Use plain
-`implementation("…:logpose-android:v1.7.1")` everywhere and rely on the `enabled` flag — but then
+`implementation("…:logpose-android:v1.7.2")` everywhere and rely on the `enabled` flag — but then
 the real artifact, including its auto-init provider and DUMP-gated receivers, ships in release too.)
 See
 [`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
@@ -397,7 +418,7 @@ touching backend or app code.
      `logpose-android` ≥ 1.2.0).
 3. The rule appears in the **Mocks** strip under the filter bar (toggle, edit, delete, live
    hit counts, "Disable all"). While capture is running, matching requests are served locally
-   and the row shows a purple **MOCK** pill — the timeline always reflects what the app
+   and the row shows a solid-accent **MOCK** pill — the timeline always reflects what the app
    actually received.
 
 ### Match on more than the path
@@ -550,8 +571,8 @@ trace at all. The `order_id` in the payloads grouped all five, and needed nothin
 
 So tell LogPose the ids you think in.
 
-**1. Define your keys.** Filter bar **⋯ → Correlation keys…** (also linked from the waterfall
-header). The first time, the list opens **seeded with suggestions** — id-ish names actually present
+**1. Define your keys.** Filter bar **Filters → Correlation keys…** (also linked from the
+waterfall header). The first time, the list opens **seeded with suggestions** — id-ish names actually present
 in the capture, each carrying its evidence (`groups 5 events · largest 5 · latest 21053953`) —
 and you tick the ones that matter; **Suggest from capture** re-offers them later. Suggestions
 arrive unticked and inert: nothing groups until a key is enabled. Keys are stored **per project**,
@@ -581,8 +602,8 @@ because `order_id` is your app's vocabulary; LogPose ships none of its own.
 | **Row context menu** | `Show waterfall — order_id 21053953` and `Filter by order_id 21053953`, one pair per key the row carries, with the trace actions below (now labelled `— trace d107086f`) |
 | **Row hover** | a `⇉ flow` glyph beside `⧉ cURL` — one click opens the row's best grouping (key first, trace as fallback) |
 | **Waterfall header** | states the grouping, and offers a switcher (`order_id` / `trip_id` / `trace`) when the row belongs to more than one |
-| **Filter bar** | a removable chip while the timeline is narrowed to a key value |
-| **⋯ → Find by value…** | no row needed: paste `21053953` or `order_id=21053953` |
+| **Filter bar** | a removable chip on the echo row while the timeline is narrowed to a key value |
+| **Filters → Find by value…** | no row needed: paste `21053953` or `order_id=21053953` |
 
 **Find by value…** is the one you'll reach for with an id from a ticket, a backend log or a QA
 report. It trims whitespace and strips surrounding quotes (ids arrive copied out of JSON as often
@@ -618,9 +639,12 @@ Room.databaseBuilder(app, AppDb::class.java, "app-db")
     .build()
 ```
 
-The row reads `users · SELECT id, name FROM users WHERE id = ?` — operation and table are parsed
-from the statement, so nothing extra has to be passed. Reads are toned quietly and writes stand
-out. Pass `durationMillis` if you measure it; Room's callback doesn't provide one.
+The row reads `[SELECT] users  SELECT id, name FROM users WHERE id = ?` — a neutral verb tag
+(reads regular, writes bold), the table as the primary text, the full statement greyed behind
+it; operation and table are parsed from the statement, so nothing extra has to be passed.
+Transaction ceremony (`BEGIN` / `TRANSACTION SUCCESSFUL` / `END`) folds into one muted row
+while the wrapped statements stay as normal rows. Pass `durationMillis` if you measure it;
+Room's callback doesn't provide one.
 
 **Background work** — one observer covers every worker, including ones written later:
 
@@ -641,8 +665,13 @@ WorkManager.getInstance(this)
 ```
 
 Because the event carries the request's `workId`, enqueued → running → succeeded update **one
-row** instead of stacking up three. Durations come from state changes, so they include queue
-time — the detail says so.
+row** instead of stacking up three. The row states its state — `✓ succeeded` neutral,
+`● running` with a live count-up, `✕ failed` red, `RETRY ×N` as an outlined amber pill,
+`cancelled` struck through — and with library `v1.7.2` it also says how long the request
+*waited* as opposed to how long it *ran*: the fact column reads `queued 6.2s` and the time
+column is the true run duration. Both gate on the data being present — attach mid-flight or
+replay from WorkManager's store and the fields stay null, so the UI shows nothing rather than
+a guess.
 
 **Remote config** — hand over the whole snapshot and LogPose reports the diff, since Firebase
 gives you a map and a boolean, not a list of what changed:
@@ -766,7 +795,9 @@ bare pasted value, or an `event_id` to group by what that row carries, and it re
 flow in `get_trace`'s shape with a `grouped_by` field — across traces, including events with none.
 It matches by [value](#correlate-a-flow), so it needs no cooperation from the app.
 `list_correlation_keys` reports the configured vocabulary plus inert suggestions; a `get_trace`
-that comes back empty now says why and points here.
+that comes back empty now says why and points here. `worker_history` reports a worker's queue
+and run phases separately (`queued_ms` / `run_ms`, library `v1.7.2`+), so "why was this slow"
+can tell waiting from running.
 
 That last row is what makes an agent's loop deterministic. Instead of triggering something and
 polling `list_events` until the result shows up, it's **trigger → await → assert**:
@@ -818,6 +849,8 @@ for the device-side setup.
 - [x] Push injection — deliver a synthetic FCM data message into the running app
 - [x] Trace waterfall — a whole flow on one time axis
 - [x] Correlation keys — group a flow by `order_id`, across traces and rows with no trace
+- [x] Per-kind rows — polling collapse (`×N`), DB verb/table + transaction fold, worker states
+      with queue wait split from run duration; one axis owns hue across the whole window
 - [x] MCP server for coding agents, including trigger → await → assert (`inject_fcm` +
       `await_event`) and `get_related` for one business id
 
@@ -825,9 +858,9 @@ for the device-side setup.
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.7.1`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.7.2`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.1`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.2`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).
@@ -841,15 +874,16 @@ for the device-side setup.
 - [x] **`CHANGELOG.md`** + `<change-notes>` in `plugin.xml`; semantic versioning.
 - [x] **Security/privacy**: documented — runs on *debug/staging* only, `Authorization` &
       cookies redacted on-device, bodies never leave logcat.
-- [x] **Tests for the pure logic** — ~550 across the two halves (348 plugin, 206 library):
+- [x] **Tests for the pure logic** — ~585 across the two halves (468 plugin, 117 library):
       `TransactionParser` (incl. chunk reassembly), the MCP tool surface, duplicate detection, SQL
       summarising, the event store and its waiters, mock matching/serving/steps, scenario snapshot
       + store, push wire round-trips, the waterfall layout, correlation (nested-JSON extraction,
-      delimiter-bounded matching, suggestion ranking, the key store and its cache), redaction and
-      body decoding. A reflection **API-parity test** keeps the no-op an exact mirror of the real
-      library.
-- [ ] Still untested: `CurlBuilder` quoting, `FilterState` matching, `MutedEndpoints.normalize`,
-      and body capture's multipart/binary/gzip/truncation paths.
+      delimiter-bounded matching, suggestion ranking, the key store and its cache), row
+      collapsing (polling runs, transaction folds), the filter bar's presentation logic, worker
+      queue/run timing, redaction and body decoding. A reflection **API-parity test** keeps the
+      no-op an exact mirror of the real library.
+- [ ] Still untested: `CurlBuilder` quoting, `MutedEndpoints.normalize`, and body capture's
+      multipart/binary/gzip/truncation paths.
 
 ### Polish / nice-to-have
 
