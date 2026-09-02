@@ -18,6 +18,7 @@ import java.awt.Dimension
 import java.awt.datatransfer.StringSelection
 import javax.swing.JComponent
 import javax.swing.JPanel
+import io.github.siddharthjaswal.logpose.presentation.CurlBuilder
 
 /**
  * Detail pane: a hero Overview card on top, with Request and Response cards

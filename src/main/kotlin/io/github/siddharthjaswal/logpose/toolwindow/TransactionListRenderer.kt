@@ -8,14 +8,14 @@ import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
-import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
-import io.github.siddharthjaswal.logpose.ui.RowContent
+import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
+import io.github.siddharthjaswal.logpose.presentation.RowContent
 import io.github.siddharthjaswal.logpose.ui.RowGeometry
 import io.github.siddharthjaswal.logpose.ui.RunLabel
 import io.github.siddharthjaswal.logpose.ui.TagLabel
 import io.github.siddharthjaswal.logpose.ui.TypeIcons
 import io.github.siddharthjaswal.logpose.ui.Theme
-import io.github.siddharthjaswal.logpose.ui.WaterfallPresentation
+import io.github.siddharthjaswal.logpose.presentation.WaterfallPresentation
 import io.github.siddharthjaswal.logpose.ui.isPending
 import io.github.siddharthjaswal.logpose.ui.spinnerChar
 import io.github.siddharthjaswal.logpose.ui.statusText
@@ -37,6 +37,7 @@ import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.ListCellRenderer
 import javax.swing.SwingConstants
+import io.github.siddharthjaswal.logpose.presentation.KindPresenter
 
 /**
  * Studio list row for the unified stream.
@@ -504,16 +505,19 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         when {
             // A running worker's live count-up outranks the affordance, exactly as a pending HTTP
             // row's timer does; the flow action stays reachable from the context menu.
-            content.time is RowContent.TimeCell.LiveCountUp ->
+            content.time is RowContent.TimeCell.LiveCountUp -> {
+                // `content.time` is declared in :core, so it needs a local to narrow on.
+                val countUp = content.time as RowContent.TimeCell.LiveCountUp
                 workTime.meta(
                     // The provider's age runs from the row's first sighting, which for a worker
                     // includes the queue. Subtracting the device-reported queue leaves the run —
                     // floored at zero, because a device clock adjusted mid-run can overshoot.
                     eventElapsedProvider(event.id)
-                        ?.let { formatDuration((it - content.time.offsetMillis).coerceAtLeast(0)) }
+                        ?.let { formatDuration((it - countUp.offsetMillis).coerceAtLeast(0)) }
                         ?: "…",
                     Theme.accent,
                 )
+            }
             armed && canGroup(event) -> workTime.action(FLOW)
             else -> workTime.meta(timeText(content.time), Theme.textMuted)
         }
@@ -707,8 +711,8 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
     private fun fcmSummary(msg: FcmMessage): String = when {
         msg.event == "token" -> "Registration token refreshed"
         msg.notification != null ->
-            msg.notification.title?.takeIf { it.isNotBlank() }
-                ?: msg.notification.body?.takeIf { it.isNotBlank() }
+            msg.notification?.title?.takeIf { it.isNotBlank() }
+                ?: msg.notification?.body?.takeIf { it.isNotBlank() }
                 ?: "(notification)"
         // A data message's most meaningful label is its channel (apps commonly carry one in the
         // data map); the raw `from` is just an FCM sender/project number, so it's the last resort.

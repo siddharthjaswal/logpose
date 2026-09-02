@@ -21,6 +21,7 @@ import javax.swing.BoxLayout
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingConstants
+import io.github.siddharthjaswal.logpose.presentation.MockRuleForm
 
 /**
  * Collapsible strip under the filter bar listing active mock rules — styled to match the

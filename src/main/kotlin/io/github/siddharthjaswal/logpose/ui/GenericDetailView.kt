@@ -22,6 +22,8 @@ import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JComponent
 import javax.swing.JPanel
+import io.github.siddharthjaswal.logpose.presentation.KindPresenter
+import io.github.siddharthjaswal.logpose.presentation.RowContent
 
 /**
  * Detail pane for every kind without a bespoke view — database queries, background work,

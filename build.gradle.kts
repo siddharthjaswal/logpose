@@ -24,6 +24,12 @@ dependencies {
         // Bundled JSON support — powers the Raw view's editor (highlighting + folding).
         bundledPlugin("com.intellij.modules.json")
     }
+    // The IDE-free half of LogPose. `intellijPlatformPluginModule` is IJPGP's first-class way to
+    // fold a plain-JVM submodule into the plugin: :core's classes land in the composed plugin jar
+    // (one jar in the Marketplace zip, exactly as before), and the wrapped `implementation(...)`
+    // also puts it on the compile/runtime classpath here.
+    intellijPlatformPluginModule(implementation(project(":core"))!!)
+
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")

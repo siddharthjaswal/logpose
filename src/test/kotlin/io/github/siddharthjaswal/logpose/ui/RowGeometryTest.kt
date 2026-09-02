@@ -137,4 +137,14 @@ class RowGeometryTest {
         assertTrue(narrow.first > RowGeometry.contentEdge(x1), "meta pair collided with the content edge")
         assertTrue(narrow.last < narrowTime.first)
     }
+
+    /** Moved here with the :core split — [RowGeometry] keeps its JBUI-scaled defaults, so it
+     *  stays plugin-side while the rest of the row's content model went to `presentation`. */
+    @Test fun `only analytics widens the fact column`() {
+        assertEquals(150, RowGeometry.fact(Envelope.KIND_ANALYTICS))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_DB))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_WORKER))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_CONFIG))
+        assertEquals(120, RowGeometry.fact(Envelope.KIND_EVENT))
+    }
 }

@@ -32,6 +32,10 @@ import javax.swing.Scrollable
 import javax.swing.ScrollPaneConstants
 import javax.swing.Timer
 import javax.swing.ToolTipManager
+import io.github.siddharthjaswal.logpose.presentation.KindPresenter
+import io.github.siddharthjaswal.logpose.presentation.RowContent
+import io.github.siddharthjaswal.logpose.presentation.WaterfallLayout
+import io.github.siddharthjaswal.logpose.presentation.WaterfallPresentation
 
 /**
  * The fourth detail card: one flow, drawn as a waterfall.

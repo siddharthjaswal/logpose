@@ -1,0 +1,295 @@
+package io.github.siddharthjaswal.logpose.presentation
+
+import io.github.siddharthjaswal.logpose.analysis.SqlSummary
+import io.github.siddharthjaswal.logpose.model.Badge
+import io.github.siddharthjaswal.logpose.model.ConfigUpdate
+import io.github.siddharthjaswal.logpose.model.DbQuery
+import io.github.siddharthjaswal.logpose.model.Envelope
+import io.github.siddharthjaswal.logpose.model.FcmMessage
+import io.github.siddharthjaswal.logpose.model.GenericEvent
+import io.github.siddharthjaswal.logpose.model.LogEvent
+import io.github.siddharthjaswal.logpose.model.Section
+import io.github.siddharthjaswal.logpose.model.WorkerEvent
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/**
+ * Turns a structured event into the presentation the row and detail pane render.
+ *
+ * This is the counterpart to the wire decision that db/worker/config carry **structure, not
+ * presentation**: the device says what happened, and this decides how it reads. Keeping it here
+ * means the wire never encodes a theme choice, and the same [GenericEvent] shape that a
+ * self-describing app event supplies for itself is produced here for the kinds LogPose knows —
+ * so one row renderer and one detail view serve all of them.
+ */
+object KindPresenter {
+
+    /** Short label for the kind column. Never truncated, so it can't read as junk. */
+    fun kindLabel(event: LogEvent): String = when (event) {
+        is LogEvent.Db -> "DB"
+        is LogEvent.Worker -> "WORK"
+        is LogEvent.Config -> "CONF"
+        is LogEvent.Generic -> when (event.kind) {
+            Envelope.KIND_ANALYTICS -> "ANLY"
+            Envelope.KIND_EVENT -> "EVENT"
+            else -> "APP"
+        }
+        else -> event.kind.uppercase()
+    }
+
+    /**
+     * The one-line name of an event, without its kind — what a copied timeline line, a waterfall
+     * lane and any other compact listing all call it. Kept here so those never drift apart.
+     *
+     * HTTP includes its method because "POST /orders" *is* the name of the call; the other kinds
+     * are named by whatever they're about, since their kind is already stated by the glyph or
+     * label beside them.
+     */
+    fun rowLabel(event: LogEvent): String = when (event) {
+        is LogEvent.Http ->
+            "${event.tx.request.method} ${event.tx.request.path.ifBlank { event.tx.request.url }}"
+        is LogEvent.Fcm -> fcmLabel(event.msg)
+        else -> present(event)?.title ?: event.id
+    }
+
+    /** A push names itself by its channel, then whatever else identifies it. */
+    private fun fcmLabel(msg: FcmMessage): String =
+        msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
+            ?.value?.takeIf { it.isNotBlank() }
+            ?: msg.collapseKey?.takeIf { it.isNotBlank() }
+            ?: msg.from?.takeIf { it.isNotBlank() }
+            ?: if (msg.event == "token") "token refreshed" else "data message"
+
+    /**
+     * True when a badge only repeats the row's own kind — `ANALYTICS` on an analytics event.
+     *
+     * The kind is already stated by the glyph beside it and by the detail header's kind pill, so
+     * echoing it in a badge spends a row's most contested space saying nothing. The detail card has
+     * always dropped these; the row is now held to the same rule, from this one predicate so the
+     * two cannot drift.
+     */
+    fun isKindEcho(badge: Badge, event: LogEvent): Boolean =
+        badge.text.equals(event.kind, ignoreCase = true) ||
+            badge.text.equals(kindLabel(event), ignoreCase = true)
+
+    /** The event's badges with the kind echo removed — what both the row and the card show. */
+    fun rowBadges(event: LogEvent): List<Badge> = rowBadges(event, present(event))
+
+    /**
+     * The same, for a caller that already has the presentation.
+     *
+     * [present] rebuilds a [GenericEvent] on every call — for a config update that means building
+     * its sections' JSON — and a row painter asks several of these questions about the same event,
+     * so handing the presentation back in keeps a repaint to one construction rather than four.
+     */
+    fun rowBadges(event: LogEvent, presentation: GenericEvent?): List<Badge> =
+        presentation?.badges.orEmpty().filterNot { isKindEcho(it, event) }
+
+    /**
+     * The presentation for a structured event, or the device's own for a self-describing one.
+     * Null when the kind has a bespoke view instead (HTTP, FCM).
+     */
+    fun present(event: LogEvent): GenericEvent? = when (event) {
+        is LogEvent.Db -> db(event.query)
+        is LogEvent.Worker -> worker(event)
+        is LogEvent.Config -> config(event.update)
+        is LogEvent.Generic -> event.event
+        else -> null
+    }
+
+    // ---- db ---------------------------------------------------------------------------------
+
+    private fun db(query: DbQuery): GenericEvent {
+        val summary = SqlSummary.of(query.sql)
+        val operation = query.operation ?: summary.operation
+        val table = query.table ?: summary.table
+
+        return GenericEvent(
+            title = table ?: operation,
+            subtitle = compact(query.sql),
+            badges = buildList {
+                add(Badge(operation.uppercase(), dbTone(operation, query.error)))
+                query.rows?.let { add(Badge(if (it == 1) "1 row" else "$it rows", Badge.TONE_MUTED)) }
+                query.database?.let { add(Badge(it, Badge.TONE_MUTED)) }
+                query.error?.let { add(Badge("ERROR", Badge.TONE_ERROR)) }
+            },
+            sections = buildList {
+                add(Section("SQL", Section.TYPE_CODE, JsonPrimitive(query.sql)))
+                if (query.args.isNotEmpty()) {
+                    add(
+                        Section(
+                            "Bound arguments", Section.TYPE_KV,
+                            buildJsonObject {
+                                // Positional, so number them — "?" alone tells you nothing.
+                                query.args.forEachIndexed { i, arg -> put("${i + 1}", arg) }
+                            },
+                        )
+                    )
+                }
+                query.error?.let { add(Section("Error", Section.TYPE_TEXT, JsonPrimitive(it))) }
+            },
+        )
+    }
+
+    /**
+     * Reads stay quiet and mutations stand out — a busy screen is mostly SELECTs, and colouring
+     * those would make the timeline shout at its least interesting rows.
+     */
+    private fun dbTone(operation: String, error: String?): String = when {
+        error != null -> Badge.TONE_ERROR
+        operation == SqlSummary.DELETE -> Badge.TONE_WARN
+        operation == SqlSummary.INSERT || operation == SqlSummary.UPDATE -> Badge.TONE_INFO
+        else -> Badge.TONE_MUTED
+    }
+
+    // ---- worker -----------------------------------------------------------------------------
+
+    private fun worker(event: LogEvent.Worker): GenericEvent {
+        val work = event.work
+        return GenericEvent(
+            title = work.worker,
+            subtitle = work.uniqueName ?: work.error ?: work.state,
+            badges = buildList {
+                add(Badge(work.state.uppercase(), workerTone(work.state)))
+                // Attempt 1 is just "it ran"; anything above is a retry and worth flagging.
+                if (work.runAttempt > 1) add(Badge("attempt ${work.runAttempt}", Badge.TONE_WARN))
+                // Replayed history from WorkManager's store on attach — not a run this session. Muted
+                // so it reads as "prior", and it's the answer to "why did this worker 'run' 20 times?".
+                if (work.replayedAtAttach) add(Badge("replayed", Badge.TONE_MUTED))
+            },
+            sections = buildList {
+                if (work.inputData.isNotEmpty()) {
+                    add(Section("Input", Section.TYPE_KV, jsonOf(work.inputData)))
+                }
+                if (work.outputData.isNotEmpty()) {
+                    add(Section("Output", Section.TYPE_KV, jsonOf(work.outputData)))
+                }
+                work.error?.let { add(Section("Error", Section.TYPE_TEXT, JsonPrimitive(it))) }
+                if (work.tags.isNotEmpty()) {
+                    add(Section("Tags", Section.TYPE_TEXT, JsonPrimitive(work.tags.joinToString("\n"))))
+                }
+                workerTiming(event, work)?.let { add(it) }
+                add(
+                    Section(
+                        "Request", Section.TYPE_KV,
+                        buildJsonObject {
+                            work.workId?.let { put("workId", it) }
+                            work.uniqueName?.let { put("unique", it) }
+                            put("attempt", work.runAttempt.toString())
+                            // Without an observed run start the row's duration really is queue + run,
+                            // and this line is the only thing that says so. Kept verbatim for captures
+                            // from a library that never sent the split, so an old capture still
+                            // explains its own number.
+                            if (work.runStartedAtMillis == null) {
+                                put("timing", "includes queue time (from WorkInfo state changes)")
+                            }
+                        },
+                    )
+                )
+            },
+        )
+    }
+
+    /**
+     * The queue/run split, once the device reports where the run began — which is exactly when the
+     * `timing` line above stops being true, since the row's duration is no longer queue + run.
+     *
+     * Null (so the old line stands) whenever the run start was never observed: a library older than
+     * 1.7.2, a request already running when capture attached, a replayed row. Nothing here is
+     * derived from arrival times, so an unobserved wait is simply absent rather than approximated.
+     */
+    private fun workerTiming(event: LogEvent.Worker, work: WorkerEvent): Section? {
+        work.runStartedAtMillis ?: return null
+        val queue = RowContent.workerQueueMillis(work)
+        val run = RowContent.workerRunMillis(event)
+        val notes = buildList {
+            // A retry re-enters the queue, so both numbers describe the backoff and the attempt it
+            // preceded — not the original enqueue. A reader who isn't told will misread a 30s
+            // backoff as a 30s queue.
+            if (work.runAttempt > 1) add("queued/ran describe attempt ${work.runAttempt}")
+            if (queue == null) add("queue wait not observed (capture attached mid-flight)")
+        }
+        return Section(
+            "Timing", Section.TYPE_KV,
+            buildJsonObject {
+                queue?.let { put("queued", RowContent.shortDuration(it)) }
+                put("ran", run?.let { RowContent.shortDuration(it) } ?: "still running")
+                event.durationMillis?.let { put("total", RowContent.shortDuration(it)) }
+                put("source", "observed WorkInfo state changes")
+                if (notes.isNotEmpty()) put("note", notes.joinToString(" · "))
+            },
+        )
+    }
+
+    private fun workerTone(state: String): String = when (state.lowercase()) {
+        WorkerEvent.STATE_FAILED -> Badge.TONE_ERROR
+        WorkerEvent.STATE_CANCELLED -> Badge.TONE_WARN
+        WorkerEvent.STATE_RUNNING, WorkerEvent.STATE_SUCCEEDED -> Badge.TONE_INFO
+        else -> Badge.TONE_MUTED
+    }
+
+    // ---- config -----------------------------------------------------------------------------
+
+    private fun config(update: ConfigUpdate): GenericEvent {
+        val changed = update.changes.size
+        return GenericEvent(
+            title = when {
+                update.baseline -> "Config baseline"
+                changed == 1 -> update.changes.single().key
+                else -> "$changed flags changed"
+            },
+            subtitle = when {
+                update.baseline -> "${update.totalKeys} flags recorded"
+                changed == 1 -> valueTransition(update.changes.single())
+                else -> update.changes.take(4).joinToString(", ") { it.key } +
+                    if (changed > 4) " +${changed - 4} more" else ""
+            },
+            badges = buildList {
+                if (update.baseline) add(Badge("BASELINE", Badge.TONE_MUTED))
+                else add(Badge("$changed CHANGED", Badge.TONE_INFO))
+                update.source?.let { add(Badge(it.uppercase(), Badge.TONE_MUTED)) }
+                update.changes.count { it.isNew }.takeIf { it > 0 }
+                    ?.let { add(Badge("$it new", Badge.TONE_MUTED)) }
+            },
+            sections = buildList {
+                if (update.changes.isNotEmpty()) {
+                    add(
+                        Section(
+                            "Changes", Section.TYPE_KV,
+                            buildJsonObject {
+                                update.changes.forEach { put(it.key, valueTransition(it)) }
+                            },
+                        )
+                    )
+                }
+                add(
+                    Section(
+                        "Fetch", Section.TYPE_KV,
+                        buildJsonObject {
+                            update.source?.let { put("source", it) }
+                            update.fetchStatus?.let { put("status", it) }
+                            put("keys in config", update.totalKeys.toString())
+                        },
+                    )
+                )
+            },
+        )
+    }
+
+    /** `old → new`, or just the value when it's newly defined. */
+    private fun valueTransition(change: io.github.siddharthjaswal.logpose.model.ConfigChange): String =
+        if (change.previous == null) change.value else "${change.previous} → ${change.value}"
+
+    // ---- shared -----------------------------------------------------------------------------
+
+    private fun jsonOf(values: Map<String, String>) = buildJsonObject {
+        values.forEach { (k, v) -> put(k, v) }
+    }
+
+    /** One-line preview for a row; the full text is always in the detail section. */
+    private fun compact(text: String, max: Int = 120): String {
+        val single = text.trim().replace(Regex("\\s+"), " ")
+        return if (single.length <= max) single else single.take(max - 1) + "…"
+    }
+}

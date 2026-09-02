@@ -128,8 +128,7 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
         val items = buildList {
             fcmChannel(msg)?.let { add(StatChip("channel", ellipsize(it), tip = it)) }
             if (receivedAt > 0) add(StatChip("at", timeFmt.format(Date(receivedAt))))
-            if (msg.sentTimeMillis != null && msg.sentTimeMillis > 0)
-                add(StatChip("sent", timeFmt.format(Date(msg.sentTimeMillis))))
+            msg.sentTimeMillis?.takeIf { it > 0 }?.let { add(StatChip("sent", timeFmt.format(Date(it)))) }
             msg.from?.takeIf { it.isNotBlank() }?.let { add(StatChip("from", ellipsize(it), tip = it)) }
             msg.priority?.let { add(StatChip("priority", priorityName(it))) }
             msg.ttlSeconds?.let { add(StatChip("ttl", "${it}s")) }
@@ -170,8 +169,8 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
     private fun summaryOf(msg: FcmMessage): String = when {
         msg.event == "token" -> msg.token ?: "(token)"
         msg.notification != null -> listOfNotNull(
-            msg.notification.title?.takeIf { it.isNotBlank() },
-            msg.notification.body?.takeIf { it.isNotBlank() },
+            msg.notification?.title?.takeIf { it.isNotBlank() },
+            msg.notification?.body?.takeIf { it.isNotBlank() },
         ).joinToString("\n").ifBlank { "(notification)" }
         else -> fcmChannel(msg)
             ?: msg.from?.takeIf { it.isNotBlank() }?.let { "from $it" }

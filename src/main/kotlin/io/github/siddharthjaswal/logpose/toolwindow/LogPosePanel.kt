@@ -35,6 +35,7 @@ import io.github.siddharthjaswal.logpose.analysis.Suggestion
 import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
 import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
+import io.github.siddharthjaswal.logpose.logcat.DeviceChoice
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
 import io.github.siddharthjaswal.logpose.mcp.LogPoseMcpHandler
@@ -57,24 +58,24 @@ import io.github.siddharthjaswal.logpose.model.WorkerEvent
 import io.github.siddharthjaswal.logpose.store.EventStore
 import io.github.siddharthjaswal.logpose.ui.ComposePushDialog
 import io.github.siddharthjaswal.logpose.ui.CorrelationKeysDialog
-import io.github.siddharthjaswal.logpose.ui.CorrelationSettings
-import io.github.siddharthjaswal.logpose.ui.CurlBuilder
-import io.github.siddharthjaswal.logpose.ui.EventType
+import io.github.siddharthjaswal.logpose.settings.CorrelationSettings
+import io.github.siddharthjaswal.logpose.presentation.CurlBuilder
+import io.github.siddharthjaswal.logpose.presentation.EventType
 import io.github.siddharthjaswal.logpose.ui.FindByValueDialog
 import io.github.siddharthjaswal.logpose.ui.FcmDetailView
 import io.github.siddharthjaswal.logpose.ui.FilterBar
-import io.github.siddharthjaswal.logpose.ui.FilterPresentation
-import io.github.siddharthjaswal.logpose.ui.FilterState
+import io.github.siddharthjaswal.logpose.presentation.FilterPresentation
+import io.github.siddharthjaswal.logpose.presentation.FilterState
 import io.github.siddharthjaswal.logpose.ui.FilteredToNothingPanel
 import io.github.siddharthjaswal.logpose.ui.GenericDetailView
-import io.github.siddharthjaswal.logpose.ui.KindPresenter
+import io.github.siddharthjaswal.logpose.presentation.KindPresenter
 import io.github.siddharthjaswal.logpose.ui.isPending
 import io.github.siddharthjaswal.logpose.ui.LinkLabel
 import io.github.siddharthjaswal.logpose.ui.LogPoseNotifications
 import io.github.siddharthjaswal.logpose.ui.MockDiff
 import io.github.siddharthjaswal.logpose.ui.MockRuleDialog
 import io.github.siddharthjaswal.logpose.ui.MocksBar
-import io.github.siddharthjaswal.logpose.ui.MutedEndpoints
+import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.SaveScenarioDialog
 import io.github.siddharthjaswal.logpose.ui.StatusDot
 import io.github.siddharthjaswal.logpose.ui.Theme
@@ -102,9 +103,17 @@ import javax.swing.JPanel
 import javax.swing.KeyStroke
 import javax.swing.ListSelectionModel
 import javax.swing.SwingUtilities
+import io.github.siddharthjaswal.logpose.presentation.RowContent
 
 /** The LogPose tool window: a master/detail view over captured HTTP transactions. */
 class LogPosePanel(private val project: com.intellij.openapi.project.Project) : JPanel(BorderLayout()), Disposable {
+
+    /**
+     * Where this project's persisted settings live. Core takes a [io.github.siddharthjaswal.logpose.settings.KeyValueStore]
+     * rather than a `Project` so the same controllers run headless; in the IDE it is the same
+     * `PropertiesComponent` those settings have always been written to.
+     */
+    private val projectStore = IdeKeyValueStore.forProject(project)
 
     private val store = EventStore()
     private val parser = TransactionParser()
@@ -140,7 +149,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * O(payload) — so every read path here goes through the index, and the renderer uses its
      * paint-safe read, which answers "not cached" instead of scanning.
      */
-    private val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(project)) }
+    private val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(projectStore)) }
 
     private val renderer = TransactionListRenderer()
     // Latest duplicate-burst marks, keyed by transaction id; recomputed each refresh and read
@@ -263,7 +272,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         verticalAlignment = javax.swing.SwingConstants.CENTER
     }
 
-    private val mocksController = MocksController(project)
+    private val mocksController = MocksController(projectStore)
 
     /**
      * Push injection: the same reverse channel as mocks, a different state machine (a one-shot
@@ -304,7 +313,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     // Lets a coding agent read this project's capture over MCP. The token both authenticates
     // the caller and selects which open project's capture to serve.
-    private val mcpToken = McpSessions.tokenFor(project)
+    private val mcpToken = McpSessions.tokenFor(projectStore)
 
     // Whether logcat is being tailed right now — read from the MCP (Netty) thread, so an agent
     // can tell "no matching events" from "capture isn't running". Kept off the UI's statusDot,
@@ -315,6 +324,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private val REATTACH_DELAY_MS = 2_000
 
     init {
+        // Idempotent, and belt-and-braces with the tool window factory: nothing may read a mute
+        // through core's in-memory fallback while the IDE has the real ones on disk.
+        MutedEndpoints.store = IdeKeyValueStore.application()
+
         isOpaque = true
         background = Theme.bg0
 
@@ -324,7 +337,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 projectName = project.name,
                 store = store,
                 hostAgeMillis = { id -> store.elapsedMillis(id) },
-                exposeBodies = { McpSessions.exposeBodies(project) },
+                exposeBodies = { McpSessions.exposeBodies(projectStore) },
                 captureRunning = { captureActive },
                 clearCapture = { store.clear() },
                 mocks = McpMocks(),
@@ -577,7 +590,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         // go out, both against the same serial.
         com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
             val ready = Adb.devices().filter { it.ready }
-            val choice = DeviceSelection.choose(selectedDeviceSerial, ready)
+            val choice = DeviceChoice.choose(selectedDeviceSerial, ready)
             SwingUtilities.invokeLater {
                 // Stopped (or stopped-and-restarted) before the serial resolved.
                 if (!captureActive || generation != captureGeneration) return@invokeLater
@@ -1022,7 +1035,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun editCorrelationKeys() {
         val events = store.snapshot()
         val before = correlation.keys()
-        val firstTime = !CorrelationSettings.configured(project)
+        val firstTime = !CorrelationSettings.configured(projectStore)
         com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
             val suggestions: List<Suggestion> = runCatching { Correlation.suggest(events) }.getOrDefault(emptyList())
             SwingUtilities.invokeLater {
@@ -1040,7 +1053,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * off the EDT (it's a payload scan per event) and the list is refreshed once it's done.
      */
     private fun applyCorrelationKeys(keys: List<CorrelationKey>) {
-        CorrelationSettings.setKeys(project, keys)
+        CorrelationSettings.setKeys(projectStore, keys)
         correlation.setKeys(keys)
         // A grouping by a key that no longer exists would keep filtering by a value nobody can
         // see the reason for, so it's dropped with the key.
@@ -2165,8 +2178,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
         // Bound directly to the persisted per-project flag; no staging, no OK button.
         lateinit var expose: io.github.siddharthjaswal.logpose.ui.ToggleSwitch
-        expose = io.github.siddharthjaswal.logpose.ui.ToggleSwitch(McpSessions.exposeBodies(project)) {
-            McpSessions.setExposeBodies(project, expose.on)
+        expose = io.github.siddharthjaswal.logpose.ui.ToggleSwitch(McpSessions.exposeBodies(projectStore)) {
+            McpSessions.setExposeBodies(projectStore, expose.on)
         }
 
         val exposeLabel = JBLabel("Expose response bodies to agents").apply {

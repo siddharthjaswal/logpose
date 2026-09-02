@@ -37,6 +37,7 @@ import javax.swing.JComponent
 import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.SwingConstants
+import io.github.siddharthjaswal.logpose.presentation.MockRuleForm
 
 /**
  * Create/edit dialog for a [MockRule], reading top-to-bottom as a sentence: **when** a request
