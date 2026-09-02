@@ -216,15 +216,16 @@ shape — parity is the product.
 
 ## Status
 
-**M1–M4 complete.** The daemon runs, both transports work, and the plugin's behavior is
-unchanged throughout.
+**Complete.** The daemon runs, both transports work, the plugin's behavior is unchanged
+throughout, and M5 proved the whole thing against a real app with no IDE in the process.
 
 | Milestone | Commit | Gate |
 |---|---|---|
 | M1 — `:core` extraction | `aad7650` | plugin builds, tests green in new homes, `verifyPlugin` clean |
 | M2 — `McpRpc` extraction | `a4e9daa` | golden-file equivalence against the old handler; `McpToolsTest` untouched |
 | M3 — daemon HTTP | `2bdd24a` | live run against emulator-5554, 1,121 real events, no IDE |
-| M4 — stdio + packaging + docs | *(this change)* | 582 tests; scripted stdio session against the fat jar |
+| M4 — stdio + packaging + docs | `dc11f11` | 582 tests; scripted stdio session against the fat jar |
+| M5 — dogfood | *(this change)* | live gandalf capture through the daemon only; the agent loop; `scripts/ci-capture-check.sh` green; 586 tests, `verifyPlugin` Compatible ×4 |
 
 ### M4 as built
 
@@ -255,7 +256,102 @@ files under `.logpose/scenarios`. Making keys shared means moving the plugin's s
 under `.logpose/`, a plugin-visible change deliberately not made inside a "behavior unchanged"
 milestone; it is a candidate for its own change, not for M5.
 
-### Remaining
+### M5 as run
 
-**M5 — dogfood.** gandalf capture through the daemon only, plus a CI-shaped run (start daemon,
-run the mocked Maestro tier, export verdicts) to prove the 1.6.0 promise end to end.
+Against `emulator-5554` running `in.shadowfax.gandalf.debug` on library 1.7.0, with **no IDE
+open at any point**. ~1,170 real events per session — HTTP, db, analytics, worker, config, fcm.
+
+1. **Read-only session** (`serve --project-dir /tmp/logpose-m5 --port 63999`). `/health`
+   answered `{"status":"ok","events":1151,"capture":"attached"}`; `session_summary` reported four
+   app runs and the endpoint tally; `list_events` returned real rows for all six kinds;
+   `worker_history` (15 workers, 5 replayed at attach), `query_hotspots` (400 queries, 17 distinct,
+   `SELECT payload FROM hl_orders` ×223) and `find_failures` (0) all answered off real data.
+2. **The full agent loop** (`--mocks`). `create_mock` on `PUT /app/v3/*/location/` — an endpoint
+   gandalf polls every 10s — came back `active: true, synced rev 1`, and `list_mocks` showed
+   `served` climbing (0 → 3 → 11) with the mocked body on the wire. Then `create_mock` →
+   `inject_fcm` → `await_event` → assert, and `delete_mock` to clean up.
+3. **CI-shaped run.** `scripts/ci-capture-check.sh` starts the daemon, waits on `/health` until
+   `capture=attached` (bounded), asserts an event count and that `session_summary` and
+   `find_failures` answer over MCP, then kills it. Green in 20s against the emulator; it fails at
+   the health gate with no device, which is the point.
+4. **Coexistence.** `adb logcat -c` was never issued — `--clear` is off by default, so
+   `LogcatReader(clearOnStart = false)`, and no run printed `(clearing logcat)`. The proof is
+   positive as well as negative: every fresh daemon start replayed the *pre-existing* backlog
+   (0 → 1,170 events in seconds), which a clear would have destroyed. Three daemons tailed the
+   same device simultaneously with no interference.
+
+### Dogfood findings
+
+Four real things the run surfaced. Two were bugs, and both are fixed here.
+
+- **An injected push lost its trace and its INJ marking seconds after injection.** *(fixed —
+  `core/store/EventStore.kt`)* LogPose injects, the app's `FirebaseMessagingService` re-logs the
+  same push 4 ms later under the same envelope id — deliberately, so the two become one row — and
+  the re-log carries the app's *ambient* trace. The store took it verbatim, so `get_trace` on the
+  trace `inject_fcm` had just returned came back empty, and `get_event` disagreed with
+  `await_event` about the same row's trace. `EventStore` now refuses to let an update un-inject an
+  injected FCM row: the injection's trace and flag survive, the payload is re-serialized to agree,
+  and everything else the re-log brings is taken. This also repairs the `injected` flag on
+  device libraries before 1.7.1, which do not preserve it themselves. Verified live: `get_trace`
+  finds the injected row, `injected: true` sticks.
+- **`--device SERIAL` silently captured a different device.** *(fixed — `daemon/Capture.kt`)*
+  `DeviceChoice` is written for a serial *remembered* from a previous session, where falling back
+  to whatever is attached is right — a stale preference should not cost a user their capture. A
+  serial typed on the command line an instant ago is the opposite claim, and quietly tailing
+  another device would hand a CI job another device's verdicts. The daemon now refuses the
+  mismatch before the choice is made and retries like any other absent device, naming what adb
+  actually reports.
+- **A taken port said only "Address already in use".** *(fixed — `daemon/Main.kt`)* Never a stack
+  trace, but it named neither the port nor the way out. `explain()` now names both and says
+  plainly that one-daemon-per-device is a rule about `--mocks`, not about reading.
+- **`agent-flow-check.sh` step 3 cannot pass against gandalf, for an environmental reason.**
+  Steps 0–2 pass against the daemon unchanged: capture healthy, mock created and active, push
+  `delivered: "service"` with a `trace_id`. Step 3 (`await_event kind=http trace_id=…`) times out,
+  because gandalf's `FirebaseMessagingService` does not route a synthetic `order_assigned` channel
+  into a downstream HTTP call — nothing to do with the daemon. What *is* provable was proved
+  instead, and holds: `inject_fcm` reports `delivered: service`, and `await_event(kind=fcm)`
+  parked before the injection matches the injected row with the same `trace_id` the injection
+  returned. That is the same four-step loop, closed on the FCM row rather than a downstream one.
+  The script itself needed no mechanical change for the daemon — same path, same JSON-RPC, the
+  port comes from `LOGPOSE_PORT` — only its prose, which assumed an IDE; it now names both
+  endpoints.
+
+Two smaller observations, filed rather than fixed:
+
+- **Correlation keys still are not shared with the IDE**, as M3 predicted. The daemon's
+  vocabulary is seeded by hand in `.logpose/daemon.properties`; see the recipe below. Moving the
+  plugin's storage to a file under `.logpose/` remains a change of its own.
+- **`list_events(contains=…)` does not search bodies**, by design — its haystack is URL, title and
+  subtitle, and `get_related(value=…)` is the body-reaching search. Worth noting because the
+  plugin's *filter bar* haystack does include bodies since 1.9.2, so the two searches named
+  "contains" no longer mean the same thing. Not changed here; an asymmetry to decide on.
+
+### Configuring correlation keys in the daemon
+
+The vocabulary lives in `<project-dir>/.logpose/daemon.properties`, in `CorrelationKeys`' own
+pipe-separated format (`name|enabled|minLength|allowShortValues`), one key per line — and since
+this is a `java.util.Properties` file, the line breaks between keys are the literal escape `\n`:
+
+```properties
+logpose.correlation.keys=order_id|1|4|0\nchain_vehicle_id|1|4|0
+logpose.correlation.configured=true
+```
+
+Write it while the daemon is stopped (it rewrites the file wholesale) and restart. `configured`
+only suppresses re-seeding from suggestions; the keys work without it. `list_correlation_keys`
+then reports them as configured, and `get_related(key=…, value=…)` groups on them — in the
+dogfood, `chain_vehicle_id` grouped the four `GET /app/v1/rider-details/` calls that carry it.
+
+### Open questions — resolved
+
+1. **Distribution.** GitHub Releases fat jar first: shipped (`:daemon:distJar`). A **Homebrew tap
+   is still open** — nobody has asked yet, and M5 gives no evidence either way. Revisit on the
+   first request.
+2. **A read-only `/health` for CI liveness.** Shipped, and M5 justified it twice over: it is the
+   whole gate in `ci-capture-check.sh`, and it is the only endpoint that works before a script has
+   a token. Answered.
+3. **Mac GUI timing.** Still deliberately open, and M5 sharpens rather than settles it. The
+   daemon plus curl covered every question asked of it here without a window, which is evidence
+   *against* urgency; but everyone who ran it in M5 was a script, so it says nothing about a human
+   who wants a timeline. **Revisit when someone runs the daemon by hand and wants to look at
+   something** — that, not a date, is the trigger.

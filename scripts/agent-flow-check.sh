@@ -13,20 +13,30 @@
 # ---------------------------------------------------------------------------------------------
 # THIS CANNOT RUN IN CI, and it is not meant to.
 #
-# It needs four live things: an IDE with the LogPose tool window open and **capture running**, a
-# connected device or emulator, a debug build of the app with `logpose-android` >= 1.7.0, and that
-# app having registered `LogPose.onPushInject { }` (or having a FirebaseMessagingService in its
-# manifest for the reflective fallback). Run it by hand against a running app.
+# It needs three live things: a **running LogPose capture** with an MCP endpoint, a connected
+# device or emulator, and a debug build of the app with `logpose-android` >= 1.7.0 that has
+# registered `LogPose.onPushInject { }` (or keeps a FirebaseMessagingService in its manifest for
+# the reflective fallback). Run it by hand against a running app.
 #
-# For the parts that *are* CI-runnable with no IDE, see `scripts/push-mocks.sh` (push mock rules
-# over adb) and `scripts/export-capture.sh` (dump the capture as NDJSON).
+# The endpoint can be either half of LogPose, and this script does not care which:
+#   * the IDE plugin  — tool window open, capture running (default port 63342);
+#   * the daemon      — `logpose serve --mocks --port 63343` (LOGPOSE_PORT=63343), no IDE at all.
+# Both speak the same JSON-RPC on the same path, so the only difference is the port and where the
+# token came from. Note `--mocks`: without it the daemon is deliberately not the device's mock
+# writer, and step 1 declines rather than fighting an IDE for the rule set.
+#
+# For the parts that *are* CI-runnable, see `scripts/ci-capture-check.sh` (start the daemon and
+# assert on the capture), `scripts/push-mocks.sh` (push mock rules over adb) and
+# `scripts/export-capture.sh` (dump the capture as NDJSON).
 # ---------------------------------------------------------------------------------------------
 #
 # Environment:
-#   LOGPOSE_TOKEN   required. The per-project token — click "⚡ Connect Coding Agent" in the
-#                   LogPose tool window; it copies a command containing it.
-#   LOGPOSE_PORT    the IDE's built-in web server port (default 63342; a second open IDE gets the
-#                   next free port, so check the copied command).
+#   LOGPOSE_TOKEN   required. Against the IDE: click "⚡ Connect Coding Agent" in the LogPose
+#                   tool window; it copies a command containing the token. Against the daemon:
+#                   it prints the same command on startup (or you passed --token yourself).
+#   LOGPOSE_PORT    where the MCP endpoint listens. Default 63342 (the IDE's built-in web server;
+#                   a second open IDE gets the next free port, so check the copied command). The
+#                   daemon defaults to 63343.
 #   LOGPOSE_HOST    default 127.0.0.1. The endpoint is localhost-only by design.
 #   PUSH_CHANNEL    the value put in the push's `data.channel` (default "order_assigned") — change
 #                   it to whatever your app actually routes on.
@@ -46,7 +56,8 @@ URL="http://$HOST:$PORT/api/logpose/mcp"
 
 if [[ -z "$TOKEN" ]]; then
   echo "LOGPOSE_TOKEN is not set." >&2
-  echo "Open the LogPose tool window → ⚡ Connect Coding Agent; the copied command contains it." >&2
+  echo "IDE:    open the LogPose tool window → ⚡ Connect Coding Agent; the copied command has it." >&2
+  echo "Daemon: it is in the 'claude mcp add' line \`logpose serve\` prints on startup." >&2
   exit 2
 fi
 command -v jq >/dev/null || { echo "This script needs jq (brew install jq)." >&2; exit 2; }
@@ -98,7 +109,8 @@ summary=$(call session_summary '{}')
 jq '{capture, total_events, sessions}' <<<"$summary"
 
 if [[ "$(jq -r '.capture.running' <<<"$summary")" != "true" ]]; then
-  echo "Capture is not running — press ▶ in the LogPose tool window and rerun." >&2
+  echo "Capture is not running — press ▶ in the LogPose tool window (or start \`logpose serve\`)" >&2
+  echo "and rerun." >&2
   exit 1
 fi
 
@@ -124,6 +136,8 @@ mock_id=$(jq -r '.created.id // empty' <<<"$mock")
 
 # The rule exists locally whether or not the device took it. `active: false` means it is NOT
 # serving — usually because the app hasn't announced itself to this capture (restart the app).
+# A daemon started without --mocks refuses this step outright, by design: only one process may
+# write the device's rule set.
 if [[ "$(jq -r '.active' <<<"$mock")" != "true" ]]; then
   echo "WARNING: the mock is not active on the device — see .warning above. Continuing anyway." >&2
 fi
@@ -210,7 +224,8 @@ if [[ "$mocked" != "true" ]]; then
 fi
 
 say "PASS — mock → inject → await → assert, with no clicks."
-echo "Trace $trace is on the timeline; open any of its rows → \"Show waterfall\" to read it."
+echo "Trace $trace is on the timeline — get_trace(trace_id=$trace) reads it, and in the IDE any"
+echo "of its rows → \"Show waterfall\"."
 echo
 echo "Clean up when you're done:"
 echo "  delete_mock  id=$mock_id      (or just stop capture — rules clear from the device)"

@@ -108,7 +108,27 @@ class Capture(
         if (!active.get()) return
 
         val ready = Adb.devices().filter { it.ready }
-        val choice = DeviceChoice.choose(options.device, ready)
+
+        // `--device` is not the plugin's saved preference, and must not behave like one.
+        //
+        // [DeviceChoice] is written for a serial remembered from a previous session: when that
+        // device is gone it falls back to what *is* attached, silently when there is only one,
+        // because a stale preference should never cost a user their capture. A serial typed on
+        // this command line an instant ago is the opposite kind of claim — the caller named a
+        // device, and quietly tailing a different one would hand a CI job another device's
+        // verdicts. So the mismatch is refused here, before the choice is made, and retried like
+        // any other absent device (the named one may still be booting).
+        val wanted = options.device
+        if (wanted != null && ready.isNotEmpty() && ready.none { it.serial == wanted }) {
+            log.stateChange(
+                "--device $wanted is not attached (adb reports ${ready.joinToString { it.serial }})" +
+                    " — waiting for it, retrying in ${backoffMillis / 1000}s"
+            )
+            retryLater()
+            return
+        }
+
+        val choice = DeviceChoice.choose(wanted, ready)
         choice.notice?.let { log.info(it) }
 
         if (ready.isEmpty()) {

@@ -1,7 +1,9 @@
 package io.github.siddharthjaswal.logpose.store
 
 import io.github.siddharthjaswal.logpose.model.Envelope
+import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
+import kotlinx.serialization.json.Json
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executor
@@ -90,12 +92,47 @@ class EventStore(
         // First seen wins: a response landing on its request's row keeps the request's session,
         // which is what stops a call that straddles a restart from being counted twice.
         sessionOf.getOrPut(event.id) { sessionList.lastOrNull()?.index ?: 0 }
-        all[event.id] = event
+        all[event.id] = keepInjection(all[event.id], event)
         // The chatty kinds (a geofence-happy analytics feed, a busy Room callback) would otherwise
         // fill the whole buffer and evict the HTTP calls and the one accept/reject you opened
         // LogPose to see. Cap them per-kind so they can only crowd out their own kind's history.
         if (isNew) PER_KIND_CAP[event.kind]?.let { cap -> evictOldestOfKind(event.kind, cap) }
         listeners.forEach { it() }
+    }
+
+    /**
+     * An injected push may not be un-injected by the app's own re-log of it.
+     *
+     * LogPose delivers an injected push by handing it to the app, so the app's messaging service
+     * normally calls `logFcmMessage` for it moments later. That re-log shares the injected row's
+     * envelope id on purpose — one updating row, not an unmarked twin — but it is emitted from the
+     * app's own call site, so it carries the app's ambient trace (usually none) and, on device
+     * libraries before 1.7.1, `injected = false`. Taking it verbatim would erase both: the row
+     * would stop saying it was injected, and `get_trace(trace_id)` on the trace `inject_fcm`
+     * returned would come back empty a few milliseconds after the injection.
+     *
+     * So an update to an injected FCM row keeps the injection's own trace and flag, and takes
+     * everything else the re-log brings (the app's view of the message). Narrow on purpose: it
+     * only fires for an FCM row already marked injected, which only the injector emits — no other
+     * in-place update (a response landing on its request, a worker changing state) is affected.
+     */
+    private fun keepInjection(existing: LogEvent?, incoming: LogEvent): LogEvent {
+        if (existing !is LogEvent.Fcm || incoming !is LogEvent.Fcm) return incoming
+        if (!existing.msg.injected) return incoming
+        val trace = existing.envelope.traceId ?: incoming.envelope.traceId
+        if (incoming.msg.injected && incoming.envelope.traceId == trace) return incoming
+        val msg = incoming.msg.copy(injected = true)
+        return incoming.copy(
+            msg = msg,
+            envelope = incoming.envelope.copy(
+                traceId = trace,
+                // Re-serialized, not left as the device sent it: `get_event` hands the raw payload
+                // back, and a row that reads `injected: true` above a payload saying `false` is
+                // worse than either answer alone.
+                payload = runCatching { PAYLOAD_JSON.encodeToJsonElement(FcmMessage.serializer(), msg) }
+                    .getOrDefault(incoming.envelope.payload),
+            ),
+        )
     }
 
     /** Drops the oldest event of [kind] once that kind exceeds [cap], leaving other kinds alone. */
@@ -226,6 +263,9 @@ class EventStore(
 
     companion object {
         /** Per-kind ceilings for the chattiest kinds, so a flood can't evict everything else. */
+        /** Only used to re-encode a corrected FCM payload; the wire's own settings, not new ones. */
+        private val PAYLOAD_JSON = Json { encodeDefaults = true; explicitNulls = false }
+
         private val PER_KIND_CAP = mapOf(
             Envelope.KIND_ANALYTICS to 400,
             Envelope.KIND_DB to 400,

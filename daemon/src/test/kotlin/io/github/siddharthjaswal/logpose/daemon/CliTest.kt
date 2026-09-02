@@ -171,4 +171,21 @@ class CliTest {
         assertTrue(usage.contains("LOGPOSE_TOKEN"))
         assertTrue(usage.contains("--stdio"))
     }
+
+    // Found in the M5 dogfood: a second daemon on a taken port said only "Address already in use",
+    // which names neither the port nor the fix.
+    @Test
+    fun `a taken port is explained, not just reported`() {
+        val message = explain(java.net.BindException("Address already in use"), serve("--port", "63999"))
+        assertTrue(message.contains("63999"), "names the port: $message")
+        assertTrue(message.contains("--port"), "names the way out: $message")
+        assertFalse(message.contains("\n"), "one line, not a stack trace: $message")
+    }
+
+    @Test
+    fun `any other startup failure keeps its own message`() {
+        assertEquals("adb went missing", explain(IllegalStateException("adb went missing"), serve()))
+        // A throwable with no message still says something rather than "null".
+        assertEquals("IllegalStateException", explain(IllegalStateException(), serve()))
+    }
 }

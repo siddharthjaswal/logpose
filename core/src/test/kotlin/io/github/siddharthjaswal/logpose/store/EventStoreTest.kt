@@ -37,6 +37,19 @@ class EventStoreTest {
         return LogEvent.Generic(ev, Envelope(kind = Envelope.KIND_ANALYTICS, id = id, at = 1, payload = json.encodeToJsonElement(ev)))
     }
 
+    private fun fcm(id: String, traceId: String?, injected: Boolean): LogEvent.Fcm {
+        val msg = io.github.siddharthjaswal.logpose.model.FcmMessage(
+            id = id, messageId = id, injected = injected, data = mapOf("channel" to "order_assigned"),
+        )
+        return LogEvent.Fcm(
+            msg,
+            Envelope(
+                kind = Envelope.KIND_FCM, id = id, at = 1, traceId = traceId,
+                payload = json.encodeToJsonElement(msg),
+            ),
+        )
+    }
+
     private fun store() = EventStore()
 
     @Test fun `a flood of analytics can't evict other kinds`() {
@@ -161,6 +174,34 @@ class EventStoreTest {
         store.add(event("a"))
         assertTrue(!future.isDone)
         assertEquals(1, store.snapshot().size, "the event is still recorded")
+    }
+
+    // Found in the M5 dogfood: LogPose injects a push, the app's FirebaseMessagingService re-logs
+    // it 4ms later under the same envelope id, and the re-log carries the app's ambient trace (and,
+    // before library 1.7.1, injected=false). Taken verbatim it erased the injection: get_trace on
+    // the trace inject_fcm had just returned came back empty.
+    @Test fun `the app's re-log of an injected push cannot erase its trace or its marking`() {
+        val store = store()
+        store.add(fcm("inj-1", traceId = "trc-abc", injected = true))
+        store.add(fcm("inj-1", traceId = "app-ambient", injected = false))
+
+        val row = store.snapshot().single() as LogEvent.Fcm
+        assertEquals("trc-abc", row.traceId, "the injection's trace survives the re-log")
+        assertTrue(row.msg.injected, "an injected push is never passed off as a real one")
+        assertTrue(
+            row.envelope.payload.toString().contains("\"injected\":true"),
+            "the raw payload get_event hands back agrees with the row",
+        )
+    }
+
+    @Test fun `an ordinary fcm row still updates in place`() {
+        val store = store()
+        store.add(fcm("m-1", traceId = "t1", injected = false))
+        store.add(fcm("m-1", traceId = "t2", injected = false))
+
+        val row = store.snapshot().single() as LogEvent.Fcm
+        assertEquals("t2", row.traceId, "nothing is preserved for a row that was never injected")
+        assertTrue(!row.msg.injected)
     }
 
     @Test fun `clear drops sessions along with events`() {

@@ -37,6 +37,34 @@ plugin changes — it is the same code, now reachable two more ways.
   daemon's in `.logpose/daemon.properties`.
 - `GET /health` answers a token-free `{"status":"ok","events":N,"capture":"attached"}` for CI
   liveness, and `--no-bodies`, `--device`, `--token`, `--name` mirror the plugin's controls.
+- **`scripts/ci-capture-check.sh`** — the CI shape of all of it, in one exit code: start the
+  daemon, wait on `/health` until the capture attaches, assert the app produced events and that
+  `session_summary` and `find_failures` answer over MCP, tear it down. curl only, no jq, and
+  honest in its header that it needs a device and an instrumented app. It does **not** pass
+  `--mocks`, so it is safe to run beside anything that writes rules.
+- `scripts/agent-flow-check.sh` now names both endpoints it can drive — the IDE's port and the
+  daemon's — instead of assuming a tool window. No mechanical change: it was already only
+  `LOGPOSE_PORT` away from working against either.
+
+### Fixed
+
+- **An injected push no longer loses its trace, or its INJ marking, moments after injection.**
+  LogPose injects a push; the app's own `FirebaseMessagingService` re-logs it milliseconds later
+  under the same envelope id — deliberately, so the two land on one row — but from the app's call
+  site, carrying the app's ambient trace. The store took that verbatim, so `get_trace` on the
+  trace `inject_fcm` had just handed back came up empty, and `get_event` and `await_event`
+  disagreed about the same row. An update to an injected FCM row now keeps the injection's trace
+  and flag (and re-serializes the payload to agree), while taking everything else the re-log
+  brings. On device libraries older than 1.7.1 this restores the `injected` flag too. Found by
+  running the agent loop against a real app in the M5 dogfood; it affects the IDE identically.
+- **`logpose serve --device SERIAL` no longer captures a different device in silence.** The
+  device choice is written for a serial *remembered* from a previous session, where falling back
+  to whatever is attached is right. A serial typed on the command line is not that, and quietly
+  tailing another device would hand a CI job the wrong verdicts — so the daemon now refuses the
+  mismatch, names what `adb` actually reports, and waits for the device it was told about.
+- **A taken port is explained rather than reported.** `Address already in use` named neither the
+  port nor the fix; the message now does both, and says that one-writer-per-device is a rule
+  about `--mocks`, not about reading.
 
 ## [1.9.2] - 2026-09-02
 

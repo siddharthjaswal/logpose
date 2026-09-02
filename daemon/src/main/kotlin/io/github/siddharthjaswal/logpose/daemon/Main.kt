@@ -40,7 +40,7 @@ private fun serve(options: Cli.ServeOptions) {
     )
 
     runCatching { daemon.start() }.onFailure { e ->
-        log.warn("could not start: ${e.message ?: e::class.java.simpleName}")
+        log.warn("could not start: " + explain(e, options))
         daemon.stop()
         exitProcess(1)
     }
@@ -55,6 +55,24 @@ private fun serve(options: Cli.ServeOptions) {
         stop.await()
     }
 }
+
+/**
+ * Why the daemon could not start, in one line a human can act on.
+ *
+ * The only startup failure anyone actually hits is a taken port — a second daemon, or an IDE on
+ * the same number — and the JDK's own text for it is "Address already in use", which names
+ * neither. Everything else falls through to the exception's own message (never a stack trace:
+ * the caller gets a sentence and exit 1, and a supervisor's log stays readable).
+ */
+internal fun explain(e: Throwable, options: Cli.ServeOptions): String =
+    if (e is java.net.BindException) {
+        "port ${options.port} is already in use (${e.message}). Another logpose daemon is " +
+            "probably serving it — check with `lsof -nP -iTCP:${options.port}` — or pick another " +
+            "with --port. Note that one daemon per device is the rule for mocks (--mocks), not " +
+            "for reading: several captures can tail the same device safely."
+    } else {
+        e.message ?: e::class.java.simpleName
+    }
 
 /**
  * One process, one capture, one MCP session — assembled here.
