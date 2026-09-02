@@ -127,6 +127,41 @@ class CliTest {
     }
 
     @Test
+    fun `--stdio is off by default and sets the flag when asked for`() {
+        val plain = Cli.parse(listOf("serve"), cwd) as Cli.Command.Serve
+        assertFalse(plain.options.stdio)
+
+        val stdio = Cli.parse(listOf("serve", "--stdio"), cwd) as Cli.Command.Serve
+        assertTrue(stdio.options.stdio)
+        // The port field keeps its default; nothing binds it under --stdio.
+        assertEquals(Cli.DEFAULT_PORT, stdio.options.port)
+    }
+
+    @Test
+    fun `--stdio with --port is a usage error, in either order`() {
+        listOf(
+            listOf("serve", "--stdio", "--port", "63343"),
+            listOf("serve", "--port=63343", "--stdio"),
+        ).forEach { args ->
+            val command = Cli.parse(args, cwd) as Cli.Command.Exit
+            assertEquals(2, command.exitCode, "for $args")
+            assertTrue(command.message.contains("mutually exclusive"), command.message)
+        }
+        // Naming the default port explicitly is still naming it — the check is on the flag.
+        assertTrue(Cli.parse(listOf("serve", "--stdio", "--port", "1"), cwd) is Cli.Command.Exit)
+    }
+
+    @Test
+    fun `--stdio composes with the flags that are not about transport`() {
+        val command = Cli.parse(
+            listOf("serve", "--stdio", "--project-dir", cwd.path, "--mocks", "--no-bodies"), cwd,
+        ) as Cli.Command.Serve
+        assertTrue(command.options.stdio)
+        assertTrue(command.options.mocks)
+        assertFalse(command.options.exposeBodies)
+    }
+
+    @Test
     fun `usage names the single-writer rule and the logcat-clear default`() {
         // These two sentences are the daemon's whole coexistence story; if they ever vanish from
         // --help, someone will run two writers against one device and spend an afternoon on it.
@@ -134,5 +169,6 @@ class CliTest {
         assertTrue(usage.contains("Only ONE process"))
         assertTrue(usage.contains("OFF by default"))
         assertTrue(usage.contains("LOGPOSE_TOKEN"))
+        assertTrue(usage.contains("--stdio"))
     }
 }

@@ -33,6 +33,12 @@ object Cli {
         val clear: Boolean = false,
         /** `--name`: what the session calls itself over MCP. Defaults to the project dir's name. */
         val name: String? = null,
+        /**
+         * `--stdio`: speak MCP over stdin/stdout instead of binding a port, for a client that
+         * launches the daemon itself. Mutually exclusive with `--port` — a process can't be both
+         * the thing you connect to and the thing that was spawned for you.
+         */
+        val stdio: Boolean = false,
     ) {
         /** The session's display name — the flag, else the directory's own name. */
         val projectName: String
@@ -63,6 +69,9 @@ object Cli {
     private fun parseServe(args: List<String>, cwd: File): Command {
         var options = ServeOptions(projectDir = cwd)
         var i = 0
+        // Tracked separately from the value: --port 63343 is still "asked for a port", and pairing
+        // it with --stdio is a mistake worth naming rather than silently resolving.
+        var portGiven = false
 
         // `--flag value` and `--flag=value` both work: the first is what a human types, the second
         // is what scripts and `claude mcp add` recipes tend to produce.
@@ -87,6 +96,7 @@ object Cli {
                         return Command.Exit(2, "logpose serve: --port must be 1-65535, got $port")
                     }
                     options = options.copy(port = port)
+                    portGiven = true
                 }
                 "--project-dir" -> {
                     val v = valueFor(flag, inline) ?: return Command.Exit(2, missing(flag))
@@ -104,6 +114,7 @@ object Cli {
                     val v = valueFor(flag, inline) ?: return Command.Exit(2, missing(flag))
                     options = options.copy(name = v)
                 }
+                "--stdio" -> options = options.copy(stdio = true)
                 "--no-bodies" -> options = options.copy(exposeBodies = false)
                 "--mocks" -> options = options.copy(mocks = true)
                 "--clear" -> options = options.copy(clear = true)
@@ -111,6 +122,14 @@ object Cli {
                 else -> return Command.Exit(2, "logpose serve: unknown flag '$flag'\n\n" + usage())
             }
             i++
+        }
+        if (options.stdio && portGiven) {
+            return Command.Exit(
+                2,
+                "logpose serve: --stdio and --port are mutually exclusive. --stdio speaks MCP on " +
+                    "stdin/stdout for a client that launched this process; --port binds a socket " +
+                    "for a client that connects to it. Pick one.\n\n" + usage(),
+            )
         }
         return Command.Serve(options)
     }
@@ -126,6 +145,9 @@ object Cli {
 
         Options:
           --port N            MCP HTTP port on 127.0.0.1 (default $DEFAULT_PORT)
+          --stdio             Speak MCP over stdin/stdout instead of binding a port, for a client
+                              that launches this process itself. No token (the pipe is the
+                              authentication); every log line goes to stderr. Not with --port.
           --project-dir DIR   Anchors .logpose/ — scenarios and daemon settings (default: cwd)
           --device SERIAL     Which attached device to tail (default: adb's own choice)
           --token T           MCP token; else ${'$'}LOGPOSE_TOKEN, else saved, else generated

@@ -6,6 +6,38 @@ format may still change.
 
 ## [Unreleased]
 
+### Added — headless daemon (`logpose serve`)
+
+LogPose's capture and all 21 MCP tools, with no IDE in the process. A plain JVM binary an agent,
+a QA laptop or a CI box can point at a device: `java -jar logpose-daemon-<version>.jar serve`
+tails logcat, serves MCP, and prints the exact `claude mcp add` line to paste. Nothing about the
+plugin changes — it is the same code, now reachable two more ways.
+
+- **`:core` and `:daemon`, one build.** 42% of the plugin already had zero IntelliJ imports: the
+  wire model, parser, store, all 21 tools, adb, mock sync, push injection, correlation and every
+  presentation model moved into a shared `:core` module, which the plugin consumes through
+  `intellijPlatformPluginModule` and the daemon consumes as a plain jar. The IntelliJ-only seam
+  turned out to be one interface (`KeyValueStore` — `PropertiesComponent` in the plugin, a
+  properties file in the daemon). The JSON-RPC envelope came out of the Netty handler into
+  `McpRpc`, which both transports and the plugin now share. **All of it is invisible from the
+  plugin side**: same responses, same behavior, the existing tests moved houses unchanged.
+- **Two transports.** HTTP on `127.0.0.1:63343` (JDK's own server, no framework), or
+  `serve --stdio` for a client that launches the daemon itself — newline-delimited JSON-RPC on
+  stdin/stdout, no port and no token, since the pipe is the authentication. Under `--stdio`
+  stdout carries JSON-RPC and nothing else; every log line, banner included, goes to stderr.
+- **Safe beside a running IDE, by default.** The sharp edges are specified rather than
+  discovered: the daemon does **not** run `adb logcat -c` (the clear is global and would wipe the
+  IDE's backlog — `--clear` opts in), and it starts **read-only on mocks**, because the device
+  holds one wholesale rule set and two writers overwrite each other. `--mocks` makes it the
+  writer, and says so in `--help`. Read-only is per tool, not per surface: `list_mocks`,
+  `list_scenarios` and `save_scenario` still answer; the four write tools decline with a message
+  naming `--mocks` instead of the IDE's "open the tool window".
+- **Scenarios are shared with the IDE** (plain files under `.logpose/scenarios`, same
+  `--project-dir`). Correlation keys are not yet — the plugin's live in the IDE's settings, the
+  daemon's in `.logpose/daemon.properties`.
+- `GET /health` answers a token-free `{"status":"ok","events":N,"capture":"attached"}` for CI
+  liveness, and `--no-bodies`, `--device`, `--token`, `--name` mirror the plugin's controls.
+
 ## [1.9.2] - 2026-09-02
 
 Plugin **1.9.2**, library **v1.7.3**. Three of the oldest items on the backlog: secrets stop

@@ -823,11 +823,76 @@ copied command, since a second IDE gets the next free port). A few things worth 
 - **Response bodies can be withheld** while still exposing request shape, statuses, and
   timings — set `logpose.mcp.exposeBodies` to `false` in the project's properties.
 
+## Run headless (`logpose serve`)
+
+Everything above assumes an IDE is open. It doesn't have to be. `logpose serve` is the same
+capture and the **same 21 MCP tools** in a plain JVM process — no tool window, no timeline, no
+IntelliJ on the classpath — for an agent driving a device from a terminal, a QA laptop, or CI.
+
+Build it, then run it against the directory you want `.logpose/` anchored in:
+
+```bash
+./gradlew :daemon:distJar          # → daemon/build/dist/logpose-daemon-<version>.jar
+java -jar logpose-daemon-<version>.jar serve --project-dir /path/to/your/app
+```
+
+Needs **JDK 17+**, and `adb` on your `PATH` (or in a standard Android SDK location — the same
+resolution the plugin does). The jar is self-contained; copy it anywhere.
+
+**Two transports.** Pick by who starts the process.
+
+```bash
+# HTTP — the daemon runs, clients connect. It prints this line itself, token included:
+claude mcp add --transport http logpose http://localhost:63343/api/logpose/mcp \
+  --header "X-LogPose-Token: <the token it printed>"
+
+# stdio — your MCP client launches the daemon and owns its pipes. No port, no token:
+claude mcp add logpose -- java -jar logpose-daemon.jar serve --stdio --project-dir /path/to/your/app
+```
+
+Over stdio, stdout carries newline-delimited JSON-RPC and **nothing else** — every log line,
+including the connect banner, goes to stderr. `--stdio` and `--port` are mutually exclusive.
+
+`GET http://127.0.0.1:63343/health` answers `{"status":"ok","events":N,"capture":"attached"}`
+without a token, so a CI script can wait for the daemon before it has one. Both transports bind
+**127.0.0.1 only**, like the plugin.
+
+### Running it beside the IDE
+
+A daemon and an open LogPose tool window can watch the same device — with three rules, which
+are the defaults, so mostly you just don't think about them:
+
+| Surface | Rule | Why |
+|---|---|---|
+| **logcat clear** | daemon does **not** clear; `--clear` opts in | `adb logcat -c` is global to the device — clearing wipes the other process's backlog and truncates its half-reassembled chunks. One clearer per device. |
+| **Mock rules** | daemon is **read-only**; `--mocks` makes it the writer | The device holds one wholesale rule set keyed by a revision counter. Two writers overwrite each other, and a shutdown pushes an *empty* set — a read-only daemon exiting must not delete the IDE's live mocks. |
+| **MCP port** | daemon defaults to **63343** | The IDE's built-in server owns 63342. `--port` overrides; the resolved port is printed. |
+
+Read-only is per tool, not per surface: `list_mocks`, `list_scenarios` and `save_scenario`
+answer normally, while `create_mock`, `set_mock_enabled`, `delete_mock`, `load_scenario` and
+`inject_fcm` decline with a message naming `--mocks`.
+
+### What it honestly doesn't have
+
+No UI — no timeline, no filter bar, no waterfall rendering, no mock dialog, no diff view, no
+endpoint muting. Everything else is there: all 21 tools, mocks, push injection, correlation and
+`await_event`.
+
+Two seams are worth knowing:
+
+- **Scenarios are shared with the IDE.** They're plain files under `.logpose/scenarios`, so a
+  scenario saved in the tool window loads in the daemon and vice versa, as long as
+  `--project-dir` points at the same directory.
+- **Correlation keys are not, yet.** The plugin keeps its vocabulary in the IDE's own settings;
+  the daemon keeps its own in `.logpose/daemon.properties`. Configure them twice for now.
+
 ## Repository layout
 
 ```
 logpose/
 ├── src/…                 # the IntelliJ / Android Studio plugin (this build)
+├── core/                 # the IDE-free half: wire model, parser, store, analysis, MCP tools
+├── daemon/               # `logpose serve` — capture + MCP with no IDE (plain JVM, fat jar)
 └── logpose-android/      # the drop-in OkHttp interceptor (separate Gradle build)
 ```
 

@@ -101,6 +101,34 @@ object McpTools {
             "reattach, then wait again."
 
     /**
+     * What a caller is told when a surface can't serve them, and — crucially — **what to do about
+     * it**, which is the one part of an MCP result that is host-specific: the plugin's fix is to
+     * open a tool window, a headless daemon's is to restart with `--mocks`.
+     *
+     * The wire shape stays identical either way (an `{"error": …}` payload); only the sentence
+     * changes. [Ide] is what the plugin sends and must not drift — every host that isn't the IDE
+     * passes its own, so no host has to speak another's vocabulary.
+     */
+    data class Unavailable(
+        val mocks: String,
+        val waits: String,
+        val push: String,
+        val scenarios: String,
+        val correlations: String,
+    ) {
+        companion object {
+            val Ide = Unavailable(
+                mocks = "Mocking isn't available — open the LogPose tool window for this project.",
+                waits = "Waiting isn't available — open the LogPose tool window for this project.",
+                push = "Push injection isn't available — open the LogPose tool window for this project.",
+                scenarios = "Scenarios aren't available — open the LogPose tool window for a project with a " +
+                    "directory on disk (scenarios live in .logpose/scenarios).",
+                correlations = "Correlation isn't available — open the LogPose tool window for this project.",
+            )
+        }
+    }
+
+    /**
      * The write surface, kept as an interface so this file stays free of IntelliJ types and
      * unit-testable. Implemented over `MocksController` by the tool window.
      *
@@ -122,6 +150,15 @@ object McpTools {
          * when it just wrote one.
          */
         fun deviceLibVersion(): String? = null
+
+        /**
+         * False when this host may **read** mock state but must not change it — the headless
+         * daemon without `--mocks`, which still answers `list_mocks` from the device handshake it
+         * ingests, but declines the three writes because only one process may own the device's
+         * rule set (see the daemon's `--mocks` help). Defaults true: a host that offers this
+         * surface at all normally owns it.
+         */
+        fun writable(): Boolean = true
         fun create(rule: MockRule, baseBody: String?)
         fun setEnabled(id: String, enabled: Boolean)
         fun delete(id: String)
@@ -184,6 +221,14 @@ object McpTools {
         ) {
             val saved: Boolean get() = error == null
         }
+
+        /**
+         * False when scenarios may be listed and saved but not **loaded**: loading pushes a rule
+         * set to the device, which is the single-writer channel a read-only daemon must not touch.
+         * Listing and saving are a directory read and a file write under `.logpose/scenarios`,
+         * shared with the IDE by design and safe from either process.
+         */
+        fun writable(): Boolean = true
 
         fun list(onResult: (List<Info>) -> Unit)
         fun load(name: String, replace: Boolean, onResult: (LoadReport) -> Unit)
@@ -614,6 +659,7 @@ object McpTools {
         sessionOf: (String) -> Int = { 0 },
         captureRunning: () -> Boolean = { true },
         clearCapture: () -> Unit = {},
+        unavailable: Unavailable = Unavailable.Ide,
     ): JsonElement = when (name) {
         "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf, captureRunning)
         "get_event" -> getEvent(args, events, includeBodies)
@@ -625,17 +671,22 @@ object McpTools {
         "config_changes" -> configChanges(args, events)
         "analytics_events" -> analyticsEvents(args, events, sessionOf)
         "clear_capture" -> clearCaptureTool(clearCapture, events.size)
-        "list_mocks" -> mocks.orError { listMocks(it, events) }
-        "create_mock" -> mocks.orError { createMock(args, events, it) }
-        "set_mock_enabled" -> mocks.orError { setMockEnabled(args, it) }
-        "delete_mock" -> mocks.orError { deleteMock(args, it) }
+        // Reading the rule set is a read: it reports what the device was told and how often each
+        // rule hit, and a host that can only read still knows both.
+        "list_mocks" -> mocks.orError(unavailable.mocks, write = false) { listMocks(it, events) }
+        "create_mock" -> mocks.orError(unavailable.mocks, write = true) { createMock(args, events, it) }
+        "set_mock_enabled" -> mocks.orError(unavailable.mocks, write = true) { setMockEnabled(args, it) }
+        "delete_mock" -> mocks.orError(unavailable.mocks, write = true) { deleteMock(args, it) }
         else -> buildJsonObject { put("error", "Unknown tool '$name'") }
     }
 
-    private inline fun Mocks?.orError(block: (Mocks) -> JsonElement): JsonElement =
-        this?.let(block) ?: buildJsonObject {
-            put("error", "Mocking isn't available — open the LogPose tool window for this project.")
-        }
+    private inline fun Mocks?.orError(
+        message: String,
+        write: Boolean,
+        block: (Mocks) -> JsonElement,
+    ): JsonElement =
+        this?.takeIf { !write || it.writable() }?.let(block)
+            ?: buildJsonObject { put("error", message) }
 
     // ---- deferred tools ---------------------------------------------------------------------
 
@@ -672,6 +723,7 @@ object McpTools {
         correlations: Correlations? = null,
         captureRunning: () -> Boolean = { true },
         now: () -> Long = { System.currentTimeMillis() },
+        unavailable: Unavailable = Unavailable.Ide,
         onResult: (JsonElement) -> Unit,
     ) {
         // One answer per call, whichever path gets there first: a push that acks after its own
@@ -682,34 +734,29 @@ object McpTools {
 
         when (name) {
             "await_event" ->
-                if (waits == null) fail(UNAVAILABLE) else awaitEvent(args, waits, captureRunning, now, answer)
+                if (waits == null) fail(unavailable.waits)
+                else awaitEvent(args, waits, captureRunning, now, answer)
             "inject_fcm" ->
-                if (push == null) fail(PUSH_UNAVAILABLE) else injectFcm(args, events, push, now, answer)
+                if (push == null) fail(unavailable.push) else injectFcm(args, events, push, now, answer)
+            // Listing reads the scenarios directory and saving writes a file into it — both are
+            // shared with the IDE by design and safe from a read-only host. Loading is the one
+            // that pushes rules to the device, so it is the one the writable() gate covers.
             "list_scenarios" ->
-                if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else listScenarios(scenarios, answer)
+                if (scenarios == null) fail(unavailable.scenarios) else listScenarios(scenarios, answer)
             "load_scenario" ->
-                if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else loadScenario(args, scenarios, answer)
+                if (scenarios == null || !scenarios.writable()) fail(unavailable.scenarios)
+                else loadScenario(args, scenarios, answer)
             "save_scenario" ->
-                if (scenarios == null) fail(SCENARIOS_UNAVAILABLE) else saveScenario(args, scenarios, answer)
+                if (scenarios == null) fail(unavailable.scenarios) else saveScenario(args, scenarios, answer)
             "get_related" ->
-                if (correlations == null) fail(CORRELATION_UNAVAILABLE)
+                if (correlations == null) fail(unavailable.correlations)
                 else getRelated(args, events, correlations, answer)
             "list_correlation_keys" ->
-                if (correlations == null) fail(CORRELATION_UNAVAILABLE)
+                if (correlations == null) fail(unavailable.correlations)
                 else listCorrelationKeys(args, events, correlations, answer)
             else -> fail("Unknown tool '$name'")
         }
     }
-
-    private const val UNAVAILABLE =
-        "Waiting isn't available — open the LogPose tool window for this project."
-    private const val PUSH_UNAVAILABLE =
-        "Push injection isn't available — open the LogPose tool window for this project."
-    private const val SCENARIOS_UNAVAILABLE =
-        "Scenarios aren't available — open the LogPose tool window for a project with a " +
-            "directory on disk (scenarios live in .logpose/scenarios)."
-    private const val CORRELATION_UNAVAILABLE =
-        "Correlation isn't available — open the LogPose tool window for this project."
 
     // ---- tools ---------------------------------------------------------------------------
 

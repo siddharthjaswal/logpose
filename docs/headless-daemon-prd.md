@@ -211,3 +211,51 @@ the code as of commit 91b14b3 — re-verify file:line claims before relying on t
 moved). Work milestone-by-milestone; each gate green before the next. The `McpToolsTest` fakes
 are the spec for the daemon's glue implementations. Never let the plugin's MCP responses change
 shape — parity is the product.
+
+---
+
+## Status
+
+**M1–M4 complete.** The daemon runs, both transports work, and the plugin's behavior is
+unchanged throughout.
+
+| Milestone | Commit | Gate |
+|---|---|---|
+| M1 — `:core` extraction | `aad7650` | plugin builds, tests green in new homes, `verifyPlugin` clean |
+| M2 — `McpRpc` extraction | `a4e9daa` | golden-file equivalence against the old handler; `McpToolsTest` untouched |
+| M3 — daemon HTTP | `2bdd24a` | live run against emulator-5554, 1,121 real events, no IDE |
+| M4 — stdio + packaging + docs | *(this change)* | 582 tests; scripted stdio session against the fat jar |
+
+### M4 as built
+
+- `serve --stdio`: newline-delimited JSON-RPC on stdin/stdout, mutually exclusive with `--port`.
+  Auth is bypassed by a `SessionLookup` that answers any token (`StdioTransport.anySession`)
+  rather than a flag inside `McpRpc` — the transport decides who may call, and the plugin's
+  dispatch is untouched. Notifications write nothing at all; every reply, including a deferred
+  one completing on a foreign thread, goes out whole under one write lock; EOF on stdin is the
+  same shutdown as SIGTERM. Under `--stdio` the `claude mcp add` banner moves to stderr, because
+  stdout is the stream.
+- **Read-only is per tool, not per surface** (M3 gated the surfaces wholesale). `McpTools.Mocks`
+  and `McpTools.Scenarios` gained a defaulted `writable()`, so `list_mocks`, `list_scenarios` and
+  `save_scenario` answer in read-only mode — none of the three touches the single-writer channel —
+  while `create_mock`, `set_mock_enabled`, `delete_mock` and `load_scenario` decline. The refusal
+  wording is now `McpTools.Unavailable`, defaulted to today's exact IDE strings and overridden by
+  the daemon so it names `--mocks` instead of a tool window.
+- Packaging: `:daemon:distJar` → `daemon/build/dist/logpose-daemon-<version>.jar`. JDK 17+, `adb`
+  on `PATH` or in a standard SDK location.
+
+### Correlation-keys sharing — the M3 verdict
+
+PRD §6 assumed the daemon could read the project's correlation vocabulary from
+`.logpose/correlation.json`. It can't, because the *plugin* never wrote one: the keys live in
+`PropertiesComponent`, i.e. the IDE's own workspace file, which is what `KeyValueStore` abstracts
+over. The daemon therefore keeps its own vocabulary in `.logpose/daemon.properties` and the two
+must be configured separately. **Scenarios are shared as promised** — they were always plain
+files under `.logpose/scenarios`. Making keys shared means moving the plugin's storage to a file
+under `.logpose/`, a plugin-visible change deliberately not made inside a "behavior unchanged"
+milestone; it is a candidate for its own change, not for M5.
+
+### Remaining
+
+**M5 — dogfood.** gandalf capture through the daemon only, plus a CI-shaped run (start daemon,
+run the mocked Maestro tier, export verdicts) to prove the 1.6.0 promise end to end.

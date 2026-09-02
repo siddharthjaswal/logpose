@@ -47,11 +47,93 @@ class DaemonSessionTest {
     )
 
     @Test
-    fun `read-only by default — the write surfaces are simply absent`() {
+    fun `read-only by default — push is absent, mocks and scenarios are present but not writable`() {
         val session = sessionFor(mocks = false)
-        assertNull(session.mocks, "create_mock must not be able to write without --mocks")
+        // Every push tool is a write, so the surface goes entirely.
         assertNull(session.push, "inject_fcm must not be able to write without --mocks")
-        assertNull(session.scenarios, "load_scenario must not be able to write without --mocks")
+        // These two also serve reads (list_mocks, list_scenarios, save_scenario), so they stay —
+        // and say they can't write.
+        assertNotNull(session.mocks, "list_mocks is a read and must still answer")
+        assertNotNull(session.scenarios, "list_scenarios is a read and must still answer")
+        assertFalse(session.mocks!!.writable(), "create_mock must not be able to write without --mocks")
+        assertFalse(session.scenarios!!.writable(), "load_scenario must not push rules without --mocks")
+    }
+
+    @Test
+    fun `create_mock declines in read-only mode, with the daemon's wording`() {
+        val session = sessionFor(mocks = false)
+        val payload = McpTools.call(
+            name = "create_mock",
+            args = kotlinx.serialization.json.buildJsonObject {},
+            events = emptyList(),
+            hostAgeMillis = session.hostAgeMillis,
+            includeBodies = true,
+            mocks = session.mocks,
+            captureRunning = session.captureRunning,
+            clearCapture = session.clearCapture,
+            unavailable = DaemonSession.Unavailable,
+        ).jsonObject
+        val error = payload["error"]!!.jsonPrimitive.content
+        assertTrue(error.contains("--mocks"), "was: $error")
+        assertFalse(error.contains("tool window"), "the daemon must not send the IDE's fix: $error")
+    }
+
+    @Test
+    fun `list_mocks answers in read-only mode instead of declining`() {
+        val session = sessionFor(mocks = false)
+        val payload = McpTools.call(
+            name = "list_mocks",
+            args = kotlinx.serialization.json.buildJsonObject {},
+            events = emptyList(),
+            hostAgeMillis = session.hostAgeMillis,
+            includeBodies = true,
+            mocks = session.mocks,
+            captureRunning = session.captureRunning,
+            clearCapture = session.clearCapture,
+            unavailable = DaemonSession.Unavailable,
+        ).jsonObject
+        assertNull(payload["error"], "a read must not be gated by the single-writer rule: $payload")
+        assertNotNull(payload["rules"] ?: payload["mocks"], "was: $payload")
+    }
+
+    @Test
+    fun `list_scenarios reads the shared directory in read-only mode, load_scenario declines`() {
+        val session = sessionFor(mocks = false)
+
+        val listed = awaitAsync(session, "list_scenarios")
+        assertNull(listed["error"], "list_scenarios reads .logpose/scenarios and is never gated: $listed")
+
+        val loaded = awaitAsync(
+            session, "load_scenario",
+            kotlinx.serialization.json.buildJsonObject {
+                put("name", kotlinx.serialization.json.JsonPrimitive("anything"))
+            },
+        )
+        val error = loaded["error"]!!.jsonPrimitive.content
+        assertTrue(error.contains("--mocks"), "was: $error")
+        assertFalse(error.contains("tool window"), "was: $error")
+    }
+
+    private fun awaitAsync(
+        session: io.github.siddharthjaswal.logpose.mcp.McpSessions.Session,
+        name: String,
+        args: JsonObject = kotlinx.serialization.json.buildJsonObject {},
+    ): JsonObject {
+        val latch = CountDownLatch(1)
+        var payload: JsonObject? = null
+        McpTools.callAsync(
+            name = name,
+            args = args,
+            events = emptyList(),
+            push = session.push,
+            waits = session.waits,
+            scenarios = session.scenarios,
+            correlations = session.correlations,
+            captureRunning = session.captureRunning,
+            unavailable = DaemonSession.Unavailable,
+        ) { result -> payload = result.jsonObject; latch.countDown() }
+        assertTrue(latch.await(5, TimeUnit.SECONDS), "$name never answered")
+        return payload!!
     }
 
     @Test
@@ -117,6 +199,15 @@ class DaemonSessionTest {
     @Test
     fun `the name a session reports is the flag, else the directory`() {
         assertEquals(dir.name, sessionFor(mocks = false).projectName)
+    }
+
+    @Test
+    fun `the daemon's not-available wording never mentions the tool window`() {
+        val words = DaemonSession.Unavailable
+        listOf(words.mocks, words.push, words.scenarios, words.waits, words.correlations)
+            .forEach { assertFalse(it.contains("tool window"), "was: $it") }
+        listOf(words.mocks, words.push, words.scenarios)
+            .forEach { assertTrue(it.contains("--mocks"), "a write refusal must name the flag: $it") }
     }
 
     @Test

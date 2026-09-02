@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 class McpRpc(
     private val sessions: SessionLookup = GlobalSessions,
     private val hint: AuthHint = AuthHint.Ide,
+    /** What a tool says when this host can't serve it — see [McpTools.Unavailable]. */
+    private val unavailable: McpTools.Unavailable = McpTools.Unavailable.Ide,
 ) {
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
@@ -168,6 +170,7 @@ class McpRpc(
                 sessionOf = { id -> session.store.sessionOf(id) },
                 captureRunning = session.captureRunning,
                 clearCapture = session.clearCapture,
+                unavailable = unavailable,
             )
         }.getOrElse { e -> return failed(name, e) }
         return toolResult(json.encodeToString(JsonElement.serializer(), payload), isError = false)
@@ -205,6 +208,7 @@ class McpRpc(
                 scenarios = session.scenarios,
                 correlations = session.correlations,
                 captureRunning = session.captureRunning,
+                unavailable = unavailable,
             ) { payload ->
                 answer(toolResult(json.encodeToString(JsonElement.serializer(), payload), isError = false))
             }

@@ -45,8 +45,15 @@ private fun serve(options: Cli.ServeOptions) {
         exitProcess(1)
     }
 
-    // Park the main thread; everything real happens on the reader, scheduler and HTTP threads.
-    stop.await()
+    if (options.stdio) {
+        // The client owns this process, so the main thread *is* the transport: it reads stdin
+        // until EOF, which is the same shutdown SIGTERM triggers.
+        daemon.serveStdio()
+        daemon.stop()
+    } else {
+        // Park the main thread; everything real happens on the reader, scheduler and HTTP threads.
+        stop.await()
+    }
 }
 
 /**
@@ -69,6 +76,7 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
     val token: String = resolveToken(options.token, System.getenv(TOKEN_ENV), settings)
 
     private var transport: HttpTransport? = null
+    private var stdio: StdioTransport? = null
     @Volatile private var boundPort: Int = options.port
 
     fun start() {
@@ -77,26 +85,41 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
         val glue = DaemonSession(capture, options, scenarios, pool, log)
         val session = glue.session()
         val rpc = McpRpc(
-            sessions = glue.Lookup(token, session),
+            // Over stdio the pipe is the credential — the client started this process — so the
+            // lookup answers any token; over HTTP anything on the machine can knock, so it doesn't.
+            sessions = if (options.stdio) StdioTransport.anySession(session) else glue.Lookup(token, session),
             hint = DaemonSession.AuthHint,
+            unavailable = DaemonSession.Unavailable,
         )
 
-        val server = HttpTransport(
-            port = options.port,
-            rpc = rpc,
-            log = log,
-            health = { HttpTransport.Health(capture.store.snapshot().size, capture.state()) },
-        )
-        boundPort = server.start()
-        transport = server
+        if (options.stdio) {
+            stdio = StdioTransport(rpc, System.`in`, System.out, log)
+        } else {
+            val server = HttpTransport(
+                port = options.port,
+                rpc = rpc,
+                log = log,
+                health = { HttpTransport.Health(capture.store.snapshot().size, capture.state()) },
+            )
+            boundPort = server.start()
+            transport = server
+        }
 
         capture.start()
         announce()
     }
 
+    /** Reads stdin until EOF on the calling thread. Only meaningful after a `--stdio` [start]. */
+    fun serveStdio() {
+        stdio?.run()
+    }
+
     /**
      * The daemon's Connect-Coding-Agent: the exact command to paste, printed on **stdout** because
      * it is the output of the command rather than commentary about it.
+     *
+     * Except under `--stdio`, where stdout belongs to the JSON-RPC stream and every last line —
+     * the recipe included — goes to stderr instead.
      */
     private fun announce() {
         log.info("project ${options.projectName} · dir ${options.projectDir}")
@@ -110,6 +133,16 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
         )
         if (!options.clear) log.info("logcat backlog left intact (--clear to wipe it at start)")
         if (!options.exposeBodies) log.info("bodies withheld from MCP results (--no-bodies)")
+        if (options.stdio) {
+            // Not one byte of this may reach stdout: the client is reading JSON-RPC there, and a
+            // banner in the middle of the stream is a parse error, not a nicety.
+            log.info("MCP on stdin/stdout (no token — the pipe is the authentication)")
+            log.info(
+                "Recipe: claude mcp add logpose -- java -jar logpose-daemon.jar serve --stdio " +
+                    "--project-dir ${options.projectDir}"
+            )
+            return
+        }
         log.info("MCP listening on http://127.0.0.1:$boundPort${HttpTransport.PATH}")
         log.out("")
         log.out("Connect a coding agent:")

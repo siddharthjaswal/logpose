@@ -42,11 +42,14 @@ kotlin {
  * do, no signed jars whose signatures would need stripping (the excludes below are belt and
  * braces). Adding a plugin to save six lines would be a worse trade.
  */
-val fatJar by tasks.registering(Jar::class) {
+val distJar by tasks.registering(Jar::class) {
     group = "distribution"
     description = "Self-contained runnable jar: java -jar logpose-daemon-<version>.jar serve"
     archiveBaseName.set("logpose-daemon")
     archiveClassifier.set("")
+    // A predictable spot to point an install line at, and away from `jar`'s own output so the two
+    // can never be confused for each other: daemon/build/dist/logpose-daemon-<version>.jar.
+    destinationDirectory.set(layout.buildDirectory.dir("dist"))
 
     manifest {
         attributes(
@@ -69,4 +72,4 @@ val fatJar by tasks.registering(Jar::class) {
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
-tasks.named("assemble") { dependsOn(fatJar) }
+tasks.named("assemble") { dependsOn(distJar) }

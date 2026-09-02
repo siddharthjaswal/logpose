@@ -27,11 +27,18 @@ import java.util.concurrent.ExecutorService
  *
  * ### The single-writer gate
  *
- * Without `--mocks`, [mocks], [push] and [scenarios] are simply **null**. That is not a shortcut:
- * `McpTools` already answers a null write surface with a specific "isn't available" result for
- * every one of those tools, which is the same shape a caller gets from an IDE session that can't
- * serve them. Building the gate out of the existing nullability means there is one code path for
- * "this capture can't write", not two that could drift.
+ * Without `--mocks` this daemon must not touch the device's rule set (PRD §7) — but "can't write"
+ * is not "can't answer". The gate is therefore drawn per tool, not per surface:
+ *
+ *  - `push` is **null**: every push tool is a write, so there is nothing to keep.
+ *  - `mocks` and `scenarios` are present but report `writable() == false`. `list_mocks` answers
+ *    from the device handshake this daemon ingests anyway, `list_scenarios` reads the
+ *    `.logpose/scenarios` directory the IDE shares with it, and `save_scenario` writes a file
+ *    there — none of the three goes near the single-writer channel. `create_mock`,
+ *    `set_mock_enabled`, `delete_mock` and `load_scenario` decline.
+ *
+ * Either way the refusal is `McpTools`' own result shape, worded for this host by [Unavailable]:
+ * an IDE session says "open the tool window", a daemon says "restart with --mocks".
  */
 class DaemonSession(
     private val capture: Capture,
@@ -48,11 +55,12 @@ class DaemonSession(
         exposeBodies = { options.exposeBodies },
         captureRunning = { capture.isRunning() },
         clearCapture = { capture.store.clear() },
-        // The single-writer gate (PRD §7). Null here is what makes create_mock, load_scenario,
-        // save_scenario and inject_fcm decline with McpTools' own wording.
-        mocks = if (options.mocks) DaemonMocks() else null,
+        // The single-writer gate (PRD §7), drawn per tool: these two surfaces answer their read
+        // tools always and decline their write tools unless --mocks was passed.
+        mocks = DaemonMocks(),
+        scenarios = scenarioStore?.let { DaemonScenarios(it) },
+        // Every push tool is a write, so this surface is all-or-nothing.
         push = if (options.mocks) DaemonPush() else null,
-        scenarios = if (options.mocks) scenarioStore?.let { DaemonScenarios(it) } else null,
         // Reads, so never gated: correlation groups a flow, it doesn't touch the device.
         correlations = DaemonCorrelations(),
         waits = McpTools.Waits { timeout, predicate -> capture.store.addWaiter(timeout, predicate) },
@@ -70,6 +78,7 @@ class DaemonSession(
     // ---- the four write/read surfaces ----------------------------------------------------------
 
     private inner class DaemonMocks : McpTools.Mocks {
+        override fun writable() = options.mocks
         override fun list() = capture.mocks.rules()
         override fun hits() = capture.mocks.deviceState().hits
         override fun deviceHint(): String {
@@ -158,6 +167,10 @@ class DaemonSession(
 
     private inner class DaemonScenarios(private val scenarios: ScenarioStore) : McpTools.Scenarios {
 
+        /** Gates `load_scenario` only — see the class comment; list and save touch files, not the
+         *  device. */
+        override fun writable() = options.mocks
+
         override fun list(onResult: (List<McpTools.Scenarios.Info>) -> Unit) = offThread {
             onResult(
                 runCatching {
@@ -245,6 +258,26 @@ class DaemonSession(
     }
 
     companion object {
+        /** The daemon's not-available texts: same wire shape as the IDE's, different fix — there
+         *  is no tool window to open, so they name the flag that would grant the write. */
+        val Unavailable = McpTools.Unavailable(
+            mocks = "Mocking isn't writable — this LogPose daemon is running read-only. Restart it " +
+                "with --mocks to let it write rules. Only ONE process may: the device holds a " +
+                "single rule set, so a daemon and an IDE writing it together overwrite each " +
+                "other. list_mocks still reads.",
+            waits = "Waiting isn't available — this LogPose daemon has no capture wired. Check its " +
+                "stderr.",
+            push = "Push injection isn't available — this LogPose daemon is running read-only. " +
+                "Restart it with --mocks to let it deliver injected pushes (only one process may " +
+                "write to a device).",
+            scenarios = "Scenarios can't be loaded — this LogPose daemon is running read-only. " +
+                "Restart it with --mocks to let load_scenario push a scenario's rules to the " +
+                "device. list_scenarios and save_scenario work either way; they read and write " +
+                ".logpose/scenarios, which is shared with the IDE.",
+            correlations = "Correlation isn't available — this LogPose daemon has no capture " +
+                "wired. Check its stderr.",
+        )
+
         /** The daemon's 401 texts: same wire shape as the IDE's, different fix — there is no tool
          *  window to open, so they name the flag and the startup line instead. */
         val AuthHint = McpRpc.AuthHint(
