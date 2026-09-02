@@ -22,6 +22,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 class LogcatReader(
     private val tag: String = DEFAULT_TAG,
     private val deviceSerial: String? = null,
+    /**
+     * Whether to run `adb logcat -c` before streaming. True for the IDE, whose Stop→Start must not
+     * replay the backlog. **The headless daemon passes false by default**: the clear is global to
+     * the device, so a second reader would wipe a running IDE's backlog and truncate its
+     * half-reassembled chunks (PRD §7 — one clearer per device).
+     */
+    private val clearOnStart: Boolean = true,
 ) {
     private val running = AtomicBoolean(false)
     @Volatile private var process: Process? = null
@@ -52,7 +59,7 @@ class LogcatReader(
         try {
             // Clear the backlog here (background thread), not in start() — `adb logcat -c`
             // can block while the device is transitioning.
-            clearBuffer(adb)
+            if (clearOnStart) clearBuffer(adb)
 
             val cmd = baseCmd(adb) + listOf("logcat", "-v", "raw", "-s", "$tag:V")
             // Merge stderr so adb's error output is drained by our single reader.

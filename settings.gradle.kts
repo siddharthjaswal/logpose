@@ -21,3 +21,8 @@ rootProject.name = "logpose"
 // the presentation models. Merged into the plugin's composed jar via `intellijPlatformPluginModule`
 // (see the root build), and consumable by a headless daemon without the IntelliJ Platform.
 include(":core")
+
+// The headless half: `logpose serve` — capture and all 21 MCP tools with no IDE in the picture.
+// A plain JVM application module; its only runtime deps are :core, kotlinx-serialization and the
+// Kotlin stdlib, which is what lets it ship as a jar you can `java -jar`.
+include(":daemon")
