@@ -32,9 +32,12 @@ plugin changes — it is the same code, now reachable two more ways.
   writer, and says so in `--help`. Read-only is per tool, not per surface: `list_mocks`,
   `list_scenarios` and `save_scenario` still answer; the four write tools decline with a message
   naming `--mocks` instead of the IDE's "open the tool window".
-- **Scenarios are shared with the IDE** (plain files under `.logpose/scenarios`, same
-  `--project-dir`). Correlation keys are not yet — the plugin's live in the IDE's settings, the
-  daemon's in `.logpose/daemon.properties`.
+- **Scenarios and correlation keys are shared with the IDE** (same `--project-dir`). Scenarios are
+  plain files under `.logpose/scenarios`; the correlation vocabulary lives in
+  `.logpose/correlation.properties`, which both halves read and write, so a key configured in the
+  tool window is the one the daemon's `get_related`/`list_correlation_keys` group on. A vocabulary
+  from an older plugin (IDE settings) or a hand-seeded `daemon.properties` is migrated into the
+  shared file once, automatically, on first use.
 - `GET /health` answers a token-free `{"status":"ok","events":N,"capture":"attached"}` for CI
   liveness, and `--no-bodies`, `--device`, `--token`, `--name` mirror the plugin's controls.
 - **`scripts/ci-capture-check.sh`** — the CI shape of all of it, in one exit code: start the

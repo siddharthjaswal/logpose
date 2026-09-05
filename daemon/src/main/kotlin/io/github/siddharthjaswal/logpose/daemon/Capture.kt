@@ -40,12 +40,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 class Capture(
     private val options: Cli.ServeOptions,
     private val settings: KeyValueStore,
+    // The correlation vocabulary reads from the project-shared `.logpose/correlation.properties`,
+    // not the daemon's own settings — so a key configured in the IDE is the one the daemon groups on.
+    private val correlationSettings: KeyValueStore,
     private val log: Log,
 ) {
 
     val store = EventStore()
     private val parser = TransactionParser()
-    val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(settings)) }
+    val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(correlationSettings)) }
     val workerLifecycle = WorkerLifecycle()
 
     /** Mock state and the device handshake. Always constructed — the handshake and hit counts are

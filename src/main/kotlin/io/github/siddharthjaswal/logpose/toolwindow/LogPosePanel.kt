@@ -115,6 +115,24 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      */
     private val projectStore = IdeKeyValueStore.forProject(project)
 
+    /**
+     * Where this project's correlation vocabulary lives — the one setting that must be **shared**
+     * with a headless `logpose serve` on the same project, so a key configured in this dialog is the
+     * one the daemon's `list_correlation_keys`/`get_related` groups on, and vice versa. That means a
+     * committable file under `.logpose/` (exactly the seam scenarios already use), not the IDE's
+     * private `PropertiesComponent`. On first access the old private vocabulary is copied across once
+     * (see [io.github.siddharthjaswal.logpose.settings.CorrelationSettings.migrateIfNeeded]) so no
+     * one loses keys on upgrade. A project with no directory on disk (rare) keeps the old store.
+     *
+     * The write in [applyCorrelationKeys] happens on the EDT, as it always has — a single small
+     * `.logpose/` properties file, the same discipline the scenario dialog uses for its file I/O.
+     */
+    private val correlationStore = project.basePath?.takeIf { it.isNotBlank() }?.let { base ->
+        io.github.siddharthjaswal.logpose.settings.FileKeyValueStore.sharedCorrelation(java.io.File(base)).also {
+            CorrelationSettings.migrateIfNeeded(from = projectStore, to = it)
+        }
+    } ?: projectStore
+
     private val store = EventStore()
     private val parser = TransactionParser()
 
@@ -149,7 +167,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * O(payload) — so every read path here goes through the index, and the renderer uses its
      * paint-safe read, which answers "not cached" instead of scanning.
      */
-    private val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(projectStore)) }
+    private val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(correlationStore)) }
 
     private val renderer = TransactionListRenderer()
     // Latest duplicate-burst marks, keyed by transaction id; recomputed each refresh and read
@@ -1035,7 +1053,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun editCorrelationKeys() {
         val events = store.snapshot()
         val before = correlation.keys()
-        val firstTime = !CorrelationSettings.configured(projectStore)
+        val firstTime = !CorrelationSettings.configured(correlationStore)
         com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
             val suggestions: List<Suggestion> = runCatching { Correlation.suggest(events) }.getOrDefault(emptyList())
             SwingUtilities.invokeLater {
@@ -1053,7 +1071,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * off the EDT (it's a payload scan per event) and the list is refreshed once it's done.
      */
     private fun applyCorrelationKeys(keys: List<CorrelationKey>) {
-        CorrelationSettings.setKeys(projectStore, keys)
+        CorrelationSettings.setKeys(correlationStore, keys)
         correlation.setKeys(keys)
         // A grouping by a key that no longer exists would keep filtering by a value nobody can
         // see the reason for, so it's dropped with the key.

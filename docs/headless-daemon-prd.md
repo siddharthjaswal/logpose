@@ -137,8 +137,11 @@ selects the project). `McpSessions.Session` already takes lambdas, not a `Projec
 - Token priority: `--token` → `LOGPOSE_TOKEN` env → config file → auto-generate and **print the
   ready-made `claude mcp add …` line on startup** (the daemon's ConnectAgentAction).
 - `--no-bodies` maps to the existing `exposeBodies` (`payload_withheld` over MCP).
-- Correlation keys: read from `.logpose/correlation.json` (same `CorrelationKeys.parse/serialize`
+- Correlation keys: read from `.logpose/correlation.properties` (same `CorrelationKeys.parse/serialize`
   the dialog uses) — the vocabulary is shared with the plugin when run in the same project dir.
+  *(Shipped: both halves back `CorrelationSettings` with `FileKeyValueStore.sharedCorrelation`. The
+  original plan named `correlation.json`; the file is a `Properties` one because that is what the
+  `KeyValueStore` the dialog and the daemon both go through already produces.)*
 - `--project-dir` (default cwd) anchors `.logpose/` — scenarios made in the IDE load in the
   daemon and vice versa, because `ScenarioStore` is already plain `java.io.File`.
 
@@ -320,27 +323,40 @@ Two smaller observations, filed rather than fixed:
 
 - **Correlation keys still are not shared with the IDE**, as M3 predicted. The daemon's
   vocabulary is seeded by hand in `.logpose/daemon.properties`; see the recipe below. Moving the
-  plugin's storage to a file under `.logpose/` remains a change of its own.
+  plugin's storage to a file under `.logpose/` remains a change of its own. *(Resolved after M5:
+  both halves now read and write `.logpose/correlation.properties` via
+  `FileKeyValueStore.sharedCorrelation`, so a vocabulary configured in the tool window is the one
+  the daemon groups on. See "Configuring correlation keys" below.)*
 - **`list_events(contains=…)` does not search bodies**, by design — its haystack is URL, title and
   subtitle, and `get_related(value=…)` is the body-reaching search. Worth noting because the
   plugin's *filter bar* haystack does include bodies since 1.9.2, so the two searches named
   "contains" no longer mean the same thing. Not changed here; an asymmetry to decide on.
 
-### Configuring correlation keys in the daemon
+### Configuring correlation keys
 
-The vocabulary lives in `<project-dir>/.logpose/daemon.properties`, in `CorrelationKeys`' own
-pipe-separated format (`name|enabled|minLength|allowShortValues`), one key per line — and since
-this is a `java.util.Properties` file, the line breaks between keys are the literal escape `\n`:
+The vocabulary now lives in `<project-dir>/.logpose/correlation.properties`, **shared** between the
+IDE plugin and the daemon exactly as scenarios are shared under `.logpose/scenarios`. The normal way
+to set it is the tool window's *Correlation keys…* dialog: a daemon started against the same
+`--project-dir` reads whatever the IDE wrote there, and vice versa — no hand-seeding, no second
+vocabulary to keep in sync. (A vocabulary previously hand-seeded into `daemon.properties`, or
+configured in an older plugin's `PropertiesComponent`, is copied into the shared file once on first
+access, so nothing is lost on upgrade.)
+
+The daemon has **no interactive config UI**, so to configure keys without opening the IDE you edit
+the file directly. It is a `java.util.Properties` file in `CorrelationKeys`' own pipe-separated
+format (`name|enabled|minLength|allowShortValues`), one key per line — and because it is a
+`Properties` file, the line breaks between keys are the literal escape `\n`:
 
 ```properties
 logpose.correlation.keys=order_id|1|4|0\nchain_vehicle_id|1|4|0
 logpose.correlation.configured=true
 ```
 
-Write it while the daemon is stopped (it rewrites the file wholesale) and restart. `configured`
-only suppresses re-seeding from suggestions; the keys work without it. `list_correlation_keys`
-then reports them as configured, and `get_related(key=…, value=…)` groups on them — in the
-dogfood, `chain_vehicle_id` grouped the four `GET /app/v1/rider-details/` calls that carry it.
+Write it while nothing is running (both halves rewrite the file wholesale) and restart the daemon.
+`configured` only suppresses re-seeding from suggestions; the keys work without it.
+`list_correlation_keys` then reports them as configured, and `get_related(key=…, value=…)` groups on
+them — in the dogfood, `chain_vehicle_id` grouped the four `GET /app/v1/rider-details/` calls that
+carry it.
 
 ### Open questions — resolved
 

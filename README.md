@@ -883,8 +883,11 @@ Two seams are worth knowing:
 - **Scenarios are shared with the IDE.** They're plain files under `.logpose/scenarios`, so a
   scenario saved in the tool window loads in the daemon and vice versa, as long as
   `--project-dir` points at the same directory.
-- **Correlation keys are not, yet.** The plugin keeps its vocabulary in the IDE's own settings;
-  the daemon keeps its own in `.logpose/daemon.properties`. Configure them twice for now.
+- **Correlation keys are shared too.** The vocabulary lives in `.logpose/correlation.properties`,
+  so a key configured in the tool window's *Correlation keys…* dialog is the one the daemon's
+  `list_correlation_keys`/`get_related` groups on — as long as `--project-dir` points at the same
+  directory. Configure it once, in either half. (A vocabulary from an older plugin or a
+  hand-seeded `daemon.properties` is migrated into the shared file automatically on first use.)
 
 ## Repository layout
 

@@ -32,7 +32,7 @@ class DaemonSessionTest {
         options(mocks, exposeBodies).let { options ->
             val settings: KeyValueStore = KeyValueStore.InMemory()
             DaemonSession(
-                capture = Capture(options, settings, log),
+                capture = Capture(options, settings, KeyValueStore.InMemory(), log),
                 options = options,
                 scenarioStore = io.github.siddharthjaswal.logpose.mock.ScenarioStore(File(dir, "scenarios")),
                 pool = pool,

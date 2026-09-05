@@ -68,6 +68,49 @@ class PersistedKeysTest {
         assertNull(s.get("logpose.correlation.keys"))
     }
 
+    @Test fun `correlation keys migrate once from the old private store to the shared file`() {
+        // A user who configured keys before sharing has them in the IDE's private store…
+        val old = store()
+        CorrelationSettings.setKeys(old, listOf(CorrelationKey("order_id"), CorrelationKey("rider_id")))
+
+        // …and the first shared-file access copies them across.
+        val shared = store()
+        CorrelationSettings.migrateIfNeeded(from = old, to = shared)
+        assertEquals(listOf("order_id", "rider_id"), CorrelationSettings.keys(shared).map { it.name })
+        assertTrue(CorrelationSettings.configured(shared))
+        // The old store is left intact — a downgrade must not lose the vocabulary.
+        assertEquals(listOf("order_id", "rider_id"), CorrelationSettings.keys(old).map { it.name })
+    }
+
+    @Test fun `migration is idempotent and never clobbers keys already in the shared file`() {
+        val old = store().apply { CorrelationSettings.setKeys(this, listOf(CorrelationKey("order_id"))) }
+        val shared = store().apply { CorrelationSettings.setKeys(this, listOf(CorrelationKey("chain_vehicle_id"))) }
+
+        // The shared file already has a vocabulary — migration must leave it exactly as-is.
+        CorrelationSettings.migrateIfNeeded(from = old, to = shared)
+        assertEquals(listOf("chain_vehicle_id"), CorrelationSettings.keys(shared).map { it.name })
+    }
+
+    @Test fun `migration of a 'configured but empty' project carries the configured flag`() {
+        // A user who opened the dialog and ticked nothing is "configured" with no keys — that
+        // decision (don't re-seed suggestions) must survive the move.
+        val old = store().apply { CorrelationSettings.setKeys(this, emptyList()) }
+        assertTrue(CorrelationSettings.configured(old))
+        assertNull(old.get("logpose.correlation.keys"))
+
+        val shared = store()
+        CorrelationSettings.migrateIfNeeded(from = old, to = shared)
+        assertTrue(CorrelationSettings.configured(shared))
+    }
+
+    @Test fun `a never-configured project migrates nothing`() {
+        val old = store()
+        val shared = store()
+        CorrelationSettings.migrateIfNeeded(from = old, to = shared)
+        assertFalse(CorrelationSettings.configured(shared))
+        assertNull(shared.get("logpose.correlation.keys"))
+    }
+
     @Test fun `endpoint mutes keep their application-level key`() {
         val s = store()
         MutedEndpoints.store = s

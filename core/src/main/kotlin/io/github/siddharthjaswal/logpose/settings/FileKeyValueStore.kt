@@ -1,25 +1,24 @@
-package io.github.siddharthjaswal.logpose.daemon
+package io.github.siddharthjaswal.logpose.settings
 
-import io.github.siddharthjaswal.logpose.settings.KeyValueStore
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.Properties
 
 /**
- * The daemon's answer to core's [KeyValueStore]: a `java.util.Properties` file at
- * `<project-dir>/.logpose/daemon.properties`, beside the `scenarios/` directory the IDE already
- * writes there.
+ * A file-backed [KeyValueStore]: a `java.util.Properties` file under `<project-dir>/.logpose/`,
+ * beside the `scenarios/` directory the IDE already writes there. This is the headless host's
+ * answer to the store [KeyValueStore] describes — "A headless host backs it with a properties
+ * file instead; nothing in core knows the difference."
  *
  * Semantics are copied from the platform's `PropertiesComponent`, not invented — a null value
  * removes the key, and `setInt`/`setBoolean` store nothing when the value equals the default —
- * because core's controllers were written against those rules and read back through them.
- *
- * **This is not the IDE's store.** The plugin persists the same keys in `PropertiesComponent`,
- * which lives in the IDE's own workspace file, so a token or a correlation vocabulary configured
- * in the tool window is not visible here (see the note on [io.github.siddharthjaswal.logpose.settings.CorrelationSettings]
- * in the daemon's README-facing docs). Scenarios, which are plain files under `.logpose/`, *are*
- * shared — that is the seam the PRD actually promised.
+ * because core's controllers were written against those rules and read back through them. That
+ * exact match is what lets a single file be a **shared** seam between the IDE and the daemon:
+ * [sharedCorrelation] backs a project's correlation vocabulary with `.logpose/correlation.properties`,
+ * which both halves read and write, exactly as `ScenarioStore` shares `.logpose/scenarios`. The
+ * daemon's own private settings (token, mock rules, revision) still live in [forProject]'s
+ * `daemon.properties`, which the plugin does not read.
  *
  * Thread-safety: every method is synchronized on the instance. Writes are whole-file, which is
  * fine for a store this size (a token, a rule set, a revision counter) and is what makes the
@@ -72,7 +71,7 @@ class FileKeyValueStore(private val file: File) : KeyValueStore {
         runCatching {
             file.parentFile?.mkdirs()
             val temp = File.createTempFile("daemon", ".properties", file.parentFile)
-            temp.outputStream().use { props.store(it, "LogPose daemon settings — do not edit while running") }
+            temp.outputStream().use { props.store(it, "LogPose settings — do not edit while a session is running") }
             runCatching {
                 Files.move(
                     temp.toPath(),
@@ -87,8 +86,17 @@ class FileKeyValueStore(private val file: File) : KeyValueStore {
     }
 
     companion object {
-        /** `<project-dir>/.logpose/daemon.properties`, the directory created on demand. */
+        /** `<project-dir>/.logpose/daemon.properties` — the daemon's own private settings. */
         fun forProject(projectDir: File): FileKeyValueStore =
             FileKeyValueStore(File(File(projectDir, ".logpose"), "daemon.properties"))
+
+        /**
+         * `<project-dir>/.logpose/correlation.properties` — the project's correlation vocabulary,
+         * shared between the IDE plugin and the daemon. Both construct this over the same file, so a
+         * key configured in the tool window is visible to `list_correlation_keys`/`get_related` in a
+         * daemon run against the same project dir, and vice versa. Committable, like scenarios.
+         */
+        fun sharedCorrelation(projectDir: File): FileKeyValueStore =
+            FileKeyValueStore(File(File(projectDir, ".logpose"), "correlation.properties"))
     }
 }

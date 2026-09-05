@@ -3,6 +3,8 @@ package io.github.siddharthjaswal.logpose.daemon
 import io.github.siddharthjaswal.logpose.mcp.McpRpc
 import io.github.siddharthjaswal.logpose.mcp.McpSessions
 import io.github.siddharthjaswal.logpose.mock.ScenarioStore
+import io.github.siddharthjaswal.logpose.settings.CorrelationSettings
+import io.github.siddharthjaswal.logpose.settings.FileKeyValueStore
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -85,10 +87,20 @@ internal fun explain(e: Throwable, options: Cli.ServeOptions): String =
 class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
 
     private val settings = FileKeyValueStore.forProject(options.projectDir)
+
+    /**
+     * The correlation vocabulary lives in `.logpose/correlation.properties`, shared with the IDE —
+     * not in the daemon's own `daemon.properties`. A project that already has keys hand-seeded into
+     * `daemon.properties` (the pre-sharing recipe) has them moved across once, so no run loses its
+     * vocabulary on upgrade; after that the shared file is the single source.
+     */
+    private val correlationSettings = FileKeyValueStore.sharedCorrelation(options.projectDir).also {
+        CorrelationSettings.migrateIfNeeded(from = settings, to = it)
+    }
     private val pool = Executors.newCachedThreadPool { r ->
         Thread(r, "logpose-work").apply { isDaemon = true }
     }
-    private val capture = Capture(options, settings, log)
+    private val capture = Capture(options, settings, correlationSettings, log)
     private val scenarios = ScenarioStore.forProject(options.projectDir.absolutePath)
 
     val token: String = resolveToken(options.token, System.getenv(TOKEN_ENV), settings)

@@ -1,6 +1,5 @@
-package io.github.siddharthjaswal.logpose.daemon
+package io.github.siddharthjaswal.logpose.settings
 
-import io.github.siddharthjaswal.logpose.settings.KeyValueStore
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -67,6 +66,25 @@ class FileKeyValueStoreTest {
         val s = FileKeyValueStore(file)
         s.set("k", "v")
         assertEquals("v", FileKeyValueStore(file).get("k"))
+    }
+
+    @Test
+    fun `the shared correlation store is its own file, separate from daemon settings`() {
+        FileKeyValueStore.sharedCorrelation(dir).set("logpose.correlation.keys", "order_id|1|4|0")
+        assertTrue(File(dir, ".logpose/correlation.properties").isFile)
+        // It must not be the daemon's own settings file — those stay private.
+        assertNull(FileKeyValueStore.forProject(dir).get("logpose.correlation.keys"))
+    }
+
+    @Test
+    fun `two halves reading the same project dir agree on the correlation vocabulary`() {
+        // What the plugin writes (one FileKeyValueStore.sharedCorrelation over the project dir)…
+        val ide = FileKeyValueStore.sharedCorrelation(dir)
+        CorrelationSettings.setKeys(ide, listOf(io.github.siddharthjaswal.logpose.analysis.CorrelationKey("order_id")))
+        // …is what a daemon opening the same dir reads back — the whole point of sharing.
+        val daemon = FileKeyValueStore.sharedCorrelation(dir)
+        assertEquals(listOf("order_id"), CorrelationSettings.keys(daemon).map { it.name })
+        assertTrue(CorrelationSettings.configured(daemon))
     }
 
     @Test
