@@ -167,6 +167,30 @@ class McpToolsTest {
         )
     }
 
+    @Test fun `contains searches HTTP response bodies, not just the URL`() {
+        // Parity with the plugin's filter bar (1.9.2): a value that appears only in the body is
+        // reachable, while the URL match keeps working exactly as before.
+        val events = listOf(
+            http("a", path = "/feed", code = 200, body = """{"orderId":"21053953","state":"assigned"}"""),
+            http("b", path = "/health", code = 200, body = """{"ok":true}"""),
+        )
+        assertEquals(
+            listOf("a"),
+            call("list_events", events, buildJsonObject { put("contains", "21053953") }).ids(),
+            "an id living only in the response body is now findable",
+        )
+        assertEquals(
+            listOf("b"),
+            call("list_events", events, buildJsonObject { put("contains", "/health") }).ids(),
+            "URL match still works",
+        )
+        assertEquals(
+            listOf("b"),
+            call("list_events", events, buildJsonObject { put("exclude", "21053953") }).ids(),
+            "exclude searches the same broadened haystack, so the body match is dropped",
+        )
+    }
+
     @Test fun `failures cover both error responses and transport errors`() {
         val events = listOf(
             http("ok", code = 200),

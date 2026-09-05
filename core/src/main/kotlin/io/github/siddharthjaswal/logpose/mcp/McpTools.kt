@@ -306,7 +306,13 @@ object McpTools {
                 ))
                 put("method", stringProp("HTTP method filter, e.g. 'POST'."))
                 put("status_class", intProp("HTTP status class: 2, 3, 4 or 5."))
-                put("contains", stringProp("Substring match on URL, title, or subtitle."))
+                put("contains", stringProp(
+                    "Substring match (case-insensitive) over an event's full searchable text. For " +
+                        "HTTP that includes the request and response BODIES, not just the URL — the " +
+                        "same body search the plugin's filter bar does; for other kinds it covers " +
+                        "the fields the row is built from (db sql/args, FCM data, worker input/" +
+                        "output, config values, event sections). Headers are not searched.",
+                ))
                 put("exclude", stringProp("Drop events whose text matches this — e.g. 'SFX_GEOFENCE' to hide a chatty location feed."))
                 put("failed_only", boolProp("Only failures: non-2xx responses and errors."))
                 put("since_seconds", intProp("Only events captured in the last N seconds."))
@@ -387,7 +393,7 @@ object McpTools {
                 put("kind", stringProp("Only this kind: 'http', 'fcm', 'db', 'worker', 'config', 'event', or an app-defined kind."))
                 put("method", stringProp("HTTP method, e.g. 'POST'."))
                 put("status_class", intProp("HTTP status class: 2, 3, 4 or 5."))
-                put("contains", stringProp("Substring of the URL, title or subtitle — same matching as list_events."))
+                put("contains", stringProp("Substring of the event's full searchable text, bodies included for HTTP — same matching as list_events."))
                 put("trace_id", stringProp(
                     "Only events carrying this trace id. Pair it with inject_fcm's returned " +
                         "trace_id to wait for what that push set off.",
@@ -2315,21 +2321,32 @@ object McpTools {
         is LogEvent.Generic -> event?.badges?.any { it.tone == "error" } == true
     }
 
+    /**
+     * The text a `contains:` / `exclude:` query matches against — the **broad** searchable
+     * haystack, request/response bodies included.
+     *
+     * This is the MCP side catching up to the plugin's filter bar, which since 1.9.2 searches HTTP
+     * request/response bodies (see `presentation.FilterState`, whose body search reads the very
+     * same [Correlation.searchableText] through a [io.github.siddharthjaswal.logpose.analysis.CorrelationIndex]
+     * cache). Routing both through [Correlation.searchableText] means an agent's `contains` and a
+     * developer's filter box now agree on what "contains" means. Headers stay out of it, exactly as
+     * the plugin's body search does — [Correlation.searchableText] excludes them on purpose.
+     *
+     * The old per-kind haystack (HTTP = url only; DB = sql/database/table; …) is a **subset** of
+     * this for every kind, so every query that matched before still matches; the gain is that
+     * bodies, db args, worker input/output data, config values and generic section bodies are now
+     * reachable too. The one field [Correlation.searchableText] omits that the old row-search had
+     * is a Generic event's kind, restored below so nothing an agent could match before is lost.
+     *
+     * **No cache, on purpose.** [CorrelationIndex] exists to keep this off the EDT's 150ms repaint
+     * tick; MCP is request-scoped — an agent calls list_events occasionally, never per keystroke —
+     * so a direct [Correlation.searchableText] per matched event is the right cost here, and it
+     * keeps this file free of the plugin's cache plumbing.
+     */
     private fun LogEvent.haystack(): String = when (this) {
-        is LogEvent.Http -> tx.request.url
-        // Data-message pushes often carry their meaning only in the data map ("channel":
-        // "order-assigned"), so the payload is part of the haystack — keys and values both.
-        is LogEvent.Fcm -> (
-            listOfNotNull(msg.notification?.title, msg.notification?.body, msg.from) +
-                msg.data.flatMap { listOf(it.key, it.value) }
-            ).joinToString(" ")
-        // Searching the SQL itself matters here — "contains: orders" should find the query that
-        // touches that table even when the row shows only the table name.
-        is LogEvent.Db -> listOfNotNull(query.sql, query.database, query.table).joinToString(" ")
-        is LogEvent.Worker -> listOfNotNull(work.worker, work.uniqueName, work.state).joinToString(" ") +
-            " " + work.tags.joinToString(" ")
-        is LogEvent.Config -> update.changes.joinToString(" ") { it.key }
-        is LogEvent.Generic -> listOfNotNull(event?.title, event?.subtitle, kind).joinToString(" ")
+        // searchableText omits a Generic event's kind; the old contains/exclude matched it, so keep it.
+        is LogEvent.Generic -> Correlation.searchableText(this) + " " + kind
+        else -> Correlation.searchableText(this)
     }
 
     /** Strip bodies but keep the shape, for when body exposure is turned off. */
