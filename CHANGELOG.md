@@ -69,6 +69,18 @@ plugin changes — it is the same code, now reachable two more ways.
   port nor the fix; the message now does both, and says that one-writer-per-device is a rule
   about `--mocks`, not about reading.
 
+### Improved
+
+- **`worker_history` now reports the observed state sequence, closing an IDE/MCP asymmetry.** The
+  tool window could already expand a worker's full transition history (*Show state transitions*),
+  but the same query over MCP saw only the single surviving state — the library reuses `workId` as
+  the envelope id, so enqueued → running → terminal collapse to one mutating row in the store. Each
+  `worker_history` entry now carries `observed_transitions` (state · timestamp · attempt), read from
+  the very `WorkerLifecycle` side index the popup uses and wired into **both** hosts, so an agent
+  and a human see the same sequence. Framed honestly as what LogPose observed, not WorkManager's
+  authoritative history — an observer can miss a state that changed twice between emissions. Every
+  existing field is unchanged.
+
 ## [1.9.2] - 2026-09-02
 
 Plugin **1.9.2**, library **v1.7.3**. Three of the oldest items on the backlog: secrets stop

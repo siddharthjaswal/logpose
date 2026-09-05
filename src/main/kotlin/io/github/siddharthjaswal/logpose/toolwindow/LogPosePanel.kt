@@ -369,6 +369,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 // The store's own waiter registry: an agent parks a predicate and the reader
                 // thread wakes it, instead of the agent polling list_events in a loop.
                 waits = McpTools.Waits { timeout, predicate -> store.addWaiter(timeout, predicate) },
+                // The same side index "Show state transitions" reads, so an agent's worker_history
+                // reports the observed enqueued → running → terminal sequence a human already sees.
+                workerTransitions = McpTools.WorkerTransitions {
+                    workerLifecycle.transitions(workerLifecycle.keyOf(it))
+                },
             ),
         )
 

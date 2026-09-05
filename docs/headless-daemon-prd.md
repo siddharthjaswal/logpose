@@ -319,8 +319,18 @@ Four real things the run surfaced. Two were bugs, and both are fixed here.
   port comes from `LOGPOSE_PORT` — only its prose, which assumed an IDE; it now names both
   endpoints.
 
-Two smaller observations, filed rather than fixed:
+Three smaller observations, filed rather than fixed:
 
+- **`worker_history` saw less than a human did.** The tool window can expand a worker's full
+  observed state sequence (*Show state transitions*, backed by `analysis/WorkerLifecycle.kt`), but
+  MCP's `worker_history` read only the single surviving state in the store — the library reuses
+  `workId` as the envelope id, so enqueued → running → terminal collapse to one mutating row. An
+  agent asking about a worker got one state where a human got the sequence. *(Resolved: `McpTools`
+  now takes an injected read-only `WorkerTransitions` seam — defaulted to empty, wired over the same
+  `WorkerLifecycle` in **both** hosts (the plugin's `LogPosePanel`, the daemon's
+  `Capture`/`DaemonSession`) — and each `worker_history` entry carries `observed_transitions`
+  (state · timestamp · attempt), framed as LogPose's sightings, not WorkManager's authoritative
+  history, exactly as the plugin popup says.)*
 - **Correlation keys still are not shared with the IDE**, as M3 predicted. The daemon's
   vocabulary is seeded by hand in `.logpose/daemon.properties`; see the recipe below. Moving the
   plugin's storage to a file under `.logpose/` remains a change of its own. *(Resolved after M5:

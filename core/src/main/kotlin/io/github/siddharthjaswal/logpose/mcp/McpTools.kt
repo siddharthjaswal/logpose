@@ -9,6 +9,7 @@ import io.github.siddharthjaswal.logpose.analysis.Groupings
 import io.github.siddharthjaswal.logpose.analysis.KeyValue
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
 import io.github.siddharthjaswal.logpose.analysis.Suggestion
+import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
 import io.github.siddharthjaswal.logpose.mock.DeviceCapability
 import io.github.siddharthjaswal.logpose.mock.DeviceFeature
 import io.github.siddharthjaswal.logpose.mock.PushReplay
@@ -286,6 +287,24 @@ object McpTools {
         fun await(timeoutMillis: Long, predicate: (LogEvent) -> Boolean): CompletableFuture<LogEvent?>?
     }
 
+    /**
+     * The observed state sequence for a background-work request, injected so this file needs no
+     * stateful side index of its own — the host owns the [WorkerLifecycle] and passes a read of it.
+     *
+     * This exists because the store cannot answer the question: the device reuses a request's
+     * `workId` as the envelope id, so enqueued → running → succeeded collapse to one mutating row
+     * and the earlier payloads are gone. Only something that remembers each sighting — the same
+     * [WorkerLifecycle] the tool window's "Show state transitions" reads — can give `worker_history`
+     * the sequence, so an agent asking about a worker sees what a human does.
+     *
+     * These are the transitions LogPose **observed**, not WorkManager's authoritative history — the
+     * caller stamps every entry with that framing. Defaulted to empty so a host that wires no
+     * lifecycle (and every existing test) simply reports the single surviving state as before.
+     */
+    fun interface WorkerTransitions {
+        fun of(event: LogEvent.Worker): List<WorkerLifecycle.Transition>
+    }
+
     /** The tool catalogue, in MCP's `tools/list` shape. */
     fun catalogue(): JsonArray = buildJsonArray {
         add(
@@ -439,7 +458,12 @@ object McpTools {
                     "to 'did SyncWorker run, and did it retry?'. Each request appears once, in " +
                     "its latest known state. When the device reported the transitions, each entry " +
                     "also splits how long the request waited in the queue (queued_ms) from how " +
-                    "long it actually ran (run_ms), so 'slow' can be told apart from 'waiting'.",
+                    "long it actually ran (run_ms), so 'slow' can be told apart from 'waiting', " +
+                    "and carries observed_transitions: the state sequence LogPose actually saw " +
+                    "the request pass through (enqueued → running → succeeded), each with its " +
+                    "state, timestamp and attempt. Those are LogPose's SIGHTINGS, not " +
+                    "WorkManager's authoritative history — an observer can miss a state that " +
+                    "changed twice between emissions.",
             ) {
                 put("worker", stringProp("Filter by worker name, e.g. 'SyncWorker'."))
                 put("state", stringProp("Filter by state: enqueued, running, succeeded, failed, cancelled."))
@@ -665,6 +689,7 @@ object McpTools {
         sessionOf: (String) -> Int = { 0 },
         captureRunning: () -> Boolean = { true },
         clearCapture: () -> Unit = {},
+        workerTransitions: WorkerTransitions = WorkerTransitions { emptyList() },
         unavailable: Unavailable = Unavailable.Ide,
     ): JsonElement = when (name) {
         "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf, captureRunning)
@@ -673,7 +698,7 @@ object McpTools {
         "find_failures" -> findFailures(args, events)
         "session_summary" -> summary(events, sessions, sessionOf, hostAgeMillis, captureRunning)
         "query_hotspots" -> queryHotspots(args, events)
-        "worker_history" -> workerHistory(args, events)
+        "worker_history" -> workerHistory(args, events, workerTransitions)
         "config_changes" -> configChanges(args, events)
         "analytics_events" -> analyticsEvents(args, events, sessionOf)
         "clear_capture" -> clearCaptureTool(clearCapture, events.size)
@@ -1209,7 +1234,11 @@ object McpTools {
         }
     }
 
-    private fun workerHistory(args: JsonObject, events: List<LogEvent>): JsonElement {
+    private fun workerHistory(
+        args: JsonObject,
+        events: List<LogEvent>,
+        workerTransitions: WorkerTransitions,
+    ): JsonElement {
         val worker = args.str("worker")
         val state = args.str("state")?.lowercase()
         val limit = args.int("limit") ?: 20
@@ -1223,6 +1252,11 @@ object McpTools {
         }
 
         val replayed = matched.count { it.work.replayedAtAttach }
+        // The observed state sequence per request, from the host's WorkerLifecycle side index — the
+        // one thing the collapsed store cannot reconstruct. A single sighting is not a sequence (a
+        // row WorkManager replayed on attach is the common case), so only >1 counts as transitions.
+        val page = matched.takeLast(limit)
+        val transitionsByEvent = page.associateWith { workerTransitions.of(it).takeIf { t -> t.size > 1 } ?: emptyList() }
         return buildJsonObject {
             put("count", matched.size)
             put("ran_this_session", matched.size - replayed)
@@ -1242,8 +1276,19 @@ object McpTools {
                     queued != null && ran != null && queued > ran
                 },
             )
+            // Whether any entry on this page carries a real sequence, so the observed-not-authoritative
+            // caveat is stated once for the tool rather than repeated on every worker.
+            if (transitionsByEvent.values.any { it.isNotEmpty() }) {
+                put(
+                    "transitions_note",
+                    "observed_transitions is the state sequence LogPose SAW each request pass " +
+                        "through, not WorkManager's authoritative history — an observer can miss a " +
+                        "state that changed twice between emissions. Entries without it were seen " +
+                        "in a single state (often replayed from WorkManager's store on attach).",
+                )
+            }
             put("workers", buildJsonArray {
-                matched.takeLast(limit).forEach { event ->
+                page.forEach { event ->
                     add(buildJsonObject {
                         put("id", event.id)
                         put("worker", event.work.worker)
@@ -1273,6 +1318,23 @@ object McpTools {
                         if (event.work.outputData.isNotEmpty()) {
                             put("output", buildJsonObject {
                                 event.work.outputData.forEach { (k, v) -> put(k, v) }
+                            })
+                        }
+                        // The observed state sequence — what a human gets from "Show state
+                        // transitions". Present only when there is a sequence to show; each entry is
+                        // a sighting with its device timestamp and attempt (attempt only when > 1,
+                        // matching the row's own convention).
+                        val transitions = transitionsByEvent[event].orEmpty()
+                        if (transitions.isNotEmpty()) {
+                            put("observed_transitions", buildJsonArray {
+                                transitions.forEach { t ->
+                                    add(buildJsonObject {
+                                        put("state", t.state)
+                                        (t.atMillis.takeIf { it > 0 } ?: t.hostMillis)
+                                            .let { put("at", it) }
+                                        if (t.runAttempt > 1) put("attempt", t.runAttempt)
+                                    })
+                                }
                             })
                         }
                     })

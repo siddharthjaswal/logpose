@@ -170,6 +170,7 @@ class McpRpc(
                 sessionOf = { id -> session.store.sessionOf(id) },
                 captureRunning = session.captureRunning,
                 clearCapture = session.clearCapture,
+                workerTransitions = session.workerTransitions,
                 unavailable = unavailable,
             )
         }.getOrElse { e -> return failed(name, e) }

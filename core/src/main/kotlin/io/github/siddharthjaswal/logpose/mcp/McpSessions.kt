@@ -49,6 +49,13 @@ object McpSessions {
          * everything else here so a stale session can't keep a store alive by identity alone.
          */
         val waits: McpTools.Waits? = null,
+        /**
+         * The observed worker state sequence, read from the host's `WorkerLifecycle` side index —
+         * how `worker_history` recovers the enqueued → running → terminal transitions the store
+         * collapses into one mutating row. Defaults to empty, so a host that keeps no lifecycle
+         * simply reports the single surviving state.
+         */
+        val workerTransitions: McpTools.WorkerTransitions = McpTools.WorkerTransitions { emptyList() },
     )
 
     private const val TOKEN_KEY = "logpose.mcp.token"

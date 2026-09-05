@@ -3,6 +3,7 @@ package io.github.siddharthjaswal.logpose.mcp
 import io.github.siddharthjaswal.logpose.analysis.Correlation
 import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
 import io.github.siddharthjaswal.logpose.analysis.KeyValue
+import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
 import io.github.siddharthjaswal.logpose.model.Badge
 import io.github.siddharthjaswal.logpose.model.ConfigChange
 import io.github.siddharthjaswal.logpose.model.ConfigUpdate
@@ -109,8 +110,12 @@ class McpToolsTest {
         bodies: Boolean = true,
         sessions: List<EventStore.Session> = emptyList(),
         sessionOf: (String) -> Int = { 0 },
+        workerTransitions: McpTools.WorkerTransitions = McpTools.WorkerTransitions { emptyList() },
     ): JsonObject =
-        McpTools.call(name, args, events, ages, bodies, null, sessions, sessionOf).jsonObject
+        McpTools.call(
+            name, args, events, ages, bodies, null, sessions, sessionOf,
+            workerTransitions = workerTransitions,
+        ).jsonObject
 
     @Test fun `list_events summarises each kind in one line`() {
         val out = call("list_events", listOf(http("a", code = 200), app("b", "SyncWorker")))
@@ -458,6 +463,58 @@ class McpToolsTest {
         assertFalse(entry.containsKey("queued_ms"))
         assertEquals(500, entry["run_ms"]!!.jsonPrimitive.int())
         assertEquals(0, out["queue_bound"]!!.jsonPrimitive.int(), "no wait measured, so no verdict")
+    }
+
+    @Test fun `worker_history reports the observed state sequence when a lifecycle is wired`() {
+        // The asymmetry this closes: the store keeps only the surviving state (the device reuses
+        // workId as the envelope id), so without the side index an agent sees one row where a human
+        // gets the whole sequence. Drive the seam with the same WorkerLifecycle the tool window reads.
+        val lifecycle = WorkerLifecycle()
+        lifecycle.note(worker("w1", state = WorkerEvent.STATE_ENQUEUED, at = 1_000), hostMillis = 1_010)
+        lifecycle.note(worker("w1", state = WorkerEvent.STATE_RUNNING, at = 2_000), hostMillis = 2_010)
+        lifecycle.note(worker("w1", state = WorkerEvent.STATE_RUNNING, attempt = 2, at = 3_000), hostMillis = 3_010)
+        lifecycle.note(worker("w1", state = WorkerEvent.STATE_SUCCEEDED, attempt = 2, at = 4_000), hostMillis = 4_010)
+
+        val out = call(
+            "worker_history",
+            listOf(worker("w1", state = WorkerEvent.STATE_SUCCEEDED, attempt = 2, at = 4_000)),
+            workerTransitions = McpTools.WorkerTransitions { lifecycle.transitions(lifecycle.keyOf(it)) },
+        )
+        val entry = out["workers"]!!.jsonArray.single().jsonObject
+        val transitions = entry["observed_transitions"]!!.jsonArray
+        assertEquals(
+            listOf("enqueued", "running", "running", "succeeded"),
+            transitions.map { it.jsonObject["state"]!!.jsonPrimitive.content },
+            "the full observed sequence, not just the surviving row",
+        )
+        assertEquals(1_000L, transitions.first().jsonObject["at"]!!.jsonPrimitive.content.toLong(), "device timestamp, not host clock")
+        // Attempt is reported only once it climbs past the first run, matching the row's convention.
+        assertFalse(transitions[1].jsonObject.containsKey("attempt"), "attempt 1 is left implicit")
+        assertEquals(2, transitions.last().jsonObject["attempt"]!!.jsonPrimitive.int())
+        assertTrue(
+            out["transitions_note"]!!.jsonPrimitive.content.contains("not WorkManager's authoritative history"),
+            "honest framing: these are sightings, stated once for the tool",
+        )
+    }
+
+    @Test fun `worker_history omits observed_transitions for a single sighting or no lifecycle`() {
+        // A row replayed from WorkManager's store on attach is one sighting, not a sequence — and a
+        // menu item (or a JSON key) that promises transitions and delivers one state is worse than
+        // none. The default seam (no lifecycle wired) must also stay silent, unchanged for old hosts.
+        val lifecycle = WorkerLifecycle()
+        lifecycle.note(worker("w1", state = WorkerEvent.STATE_SUCCEEDED, at = 4_000), hostMillis = 4_010)
+
+        val single = call(
+            "worker_history",
+            listOf(worker("w1", state = WorkerEvent.STATE_SUCCEEDED, at = 4_000)),
+            workerTransitions = McpTools.WorkerTransitions { lifecycle.transitions(lifecycle.keyOf(it)) },
+        )
+        assertFalse(single["workers"]!!.jsonArray.single().jsonObject.containsKey("observed_transitions"))
+        assertFalse(single.containsKey("transitions_note"), "no sequence anywhere, so no caveat")
+
+        val none = call("worker_history", listOf(worker("w1")))
+        assertFalse(none["workers"]!!.jsonArray.single().jsonObject.containsKey("observed_transitions"))
+        assertFalse(none.containsKey("transitions_note"))
     }
 
     @Test fun `config_changes flattens activations into individual flags`() {

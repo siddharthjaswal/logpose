@@ -64,6 +64,12 @@ class DaemonSession(
         // Reads, so never gated: correlation groups a flow, it doesn't touch the device.
         correlations = DaemonCorrelations(),
         waits = McpTools.Waits { timeout, predicate -> capture.store.addWaiter(timeout, predicate) },
+        // Parity with the IDE: the daemon keeps its own WorkerLifecycle (Capture wires it on the
+        // reader thread before store.add), so worker_history over the daemon reports the observed
+        // state sequence too — the whole point of the daemon is the same answers with no IDE.
+        workerTransitions = McpTools.WorkerTransitions {
+            capture.workerLifecycle.transitions(capture.workerLifecycle.keyOf(it))
+        },
     )
 
     /** One capture, so the token is pure authentication — it no longer selects anything. */
