@@ -7,7 +7,9 @@ import io.github.siddharthjaswal.logpose.desktop.session.QuietDetector
 import io.github.siddharthjaswal.logpose.desktop.session.SessionState
 import io.github.siddharthjaswal.logpose.desktop.session.TimelineFeed
 import io.github.siddharthjaswal.logpose.desktop.session.TimelineSnapshot
+import io.github.siddharthjaswal.logpose.desktop.wireless.RememberedDevices
 import io.github.siddharthjaswal.logpose.logcat.Adb
+import io.github.siddharthjaswal.logpose.settings.KeyValueStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,6 +39,7 @@ sealed interface AdbStatus {
 class AppModel(
     private val scope: CoroutineScope,
     val session: CaptureSession = CaptureSession(),
+    settings: KeyValueStore = RememberedDevices.forApp(AdbLocator.appSupportDir()),
 ) {
     private val _adb = MutableStateFlow<AdbStatus>(AdbStatus.Checking)
     val adb: StateFlow<AdbStatus> = _adb.asStateFlow()
@@ -55,6 +58,9 @@ class AppModel(
     val sessionState: StateFlow<SessionState> get() = session.state
 
     private var feedJob: Job? = null
+
+    /** Wi-Fi pairing, *Switch to wireless*, remembered phones and their auto-reconnect (M2). */
+    val wireless = WirelessController(scope, settings, onConnected = { serial -> if (session.state.value !is SessionState.Running) _selectedSerial.value = serial })
 
     fun start() {
         if (feedJob == null) feedJob = feed.launchIn(scope)
@@ -153,7 +159,11 @@ class AppModel(
         return QuietDetector.verdict(running.startedAtMillis, nowMillis, session.firstLogPoseAtMillis)
     }
 
+    /** Retries remembered Wi-Fi phones while the window is visible (launched beside [pollDevices]). */
+    suspend fun reconnectRemembered() = wireless.reconnectLoop({ _devices.value })
+
     fun shutdown() {
+        wireless.shutdown()
         session.stop()
     }
 }

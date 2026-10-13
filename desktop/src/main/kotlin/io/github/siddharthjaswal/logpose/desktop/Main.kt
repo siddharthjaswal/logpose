@@ -24,6 +24,7 @@ import io.github.siddharthjaswal.logpose.desktop.theme.LogPoseTheme
 import io.github.siddharthjaswal.logpose.desktop.ui.LogPoseScreen
 import io.github.siddharthjaswal.logpose.desktop.ui.ScreenActions
 import io.github.siddharthjaswal.logpose.desktop.ui.ScreenState
+import io.github.siddharthjaswal.logpose.desktop.ui.WirelessActions
 import kotlinx.coroutines.delay
 
 fun main() = application {
@@ -38,6 +39,9 @@ fun main() = application {
         // spawns adb. Leaving composition (or minimizing) cancels the loop.
         if (!windowState.isMinimized && adb is AdbStatus.Ready) {
             LaunchedEffect(Unit) { model.pollDevices() }
+            // Remembered Wi-Fi phones: retried on the same visibility rule (a hidden app dials nothing).
+            LaunchedEffect(Unit) { model.reconnectRemembered() }
+            LaunchedEffect(Unit) { model.wireless.showOnboardingIfFirstRun() }
         }
         LogPoseTheme(dark = isSystemInDarkTheme()) {
             App(model, adb)
@@ -52,6 +56,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
     val session by model.sessionState.collectAsState()
     val snapshot by model.snapshots.collectAsState()
     val selectedEventId by model.selectedEventId.collectAsState()
+    val wireless by model.wireless.ui.collectAsState()
     // A one-second clock, only while a session runs: it is what lets "no LogPose events" appear
     // 20 s in without any event arriving to trigger a recomposition.
     val now by produceState(System.currentTimeMillis(), session) {
@@ -70,7 +75,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
         eventCount = snapshot.events.size,
     )
     LogPoseScreen(
-        ScreenState(adb, devices, selectedSerial, session, snapshot, selectedEventId, placeholder),
+        ScreenState(adb, devices, selectedSerial, session, snapshot, selectedEventId, placeholder, wireless),
         ScreenActions(
             onDownloadAdb = model::downloadPlatformTools,
             onRecheckAdb = model::locateAdb,
@@ -79,6 +84,18 @@ private fun App(model: AppModel, adb: AdbStatus) {
             onStop = model::stopSession,
             onClear = model::clearTimeline,
             onSelectEvent = model::selectEvent,
+            wireless = WirelessActions(
+                onAddDevice = { model.wireless.openAddDevice() },
+                onHowToConnect = model.wireless::openHowToConnect,
+                onCloseSheet = model.wireless::closeSheet,
+                onSelectTab = model.wireless::selectTab,
+                onNewQr = model.wireless::startQr,
+                onFormChange = model.wireless::updateForm,
+                onPairWithCode = model.wireless::pairWithCode,
+                onSwitchToWireless = model.wireless::switchToWireless,
+                onForget = { id -> wireless.remembered.firstOrNull { it.id == id }?.let { model.wireless.forget(it, devices) } },
+                onDismissLegacy = model.wireless::dismissLegacyStatus,
+            ),
         ),
     )
 }

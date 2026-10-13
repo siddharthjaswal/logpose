@@ -30,7 +30,13 @@ import io.github.siddharthjaswal.logpose.desktop.adb.AdbLocator
 import io.github.siddharthjaswal.logpose.desktop.adb.PlatformTools
 import io.github.siddharthjaswal.logpose.desktop.app.AdbStatus
 import io.github.siddharthjaswal.logpose.desktop.app.Placeholder
+import io.github.siddharthjaswal.logpose.desktop.app.WirelessUi
 import io.github.siddharthjaswal.logpose.desktop.device.DeviceStatuses
+import io.github.siddharthjaswal.logpose.desktop.device.SidebarEntries
+import io.github.siddharthjaswal.logpose.desktop.device.SidebarEntry
+import io.github.siddharthjaswal.logpose.desktop.device.Transport
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import io.github.siddharthjaswal.logpose.desktop.session.SessionState
 import io.github.siddharthjaswal.logpose.desktop.session.TimelineSnapshot
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
@@ -45,6 +51,7 @@ data class ScreenState(
     val snapshot: TimelineSnapshot,
     val selectedEventId: String?,
     val placeholder: Placeholder,
+    val wireless: WirelessUi = WirelessUi(),
 )
 
 class ScreenActions(
@@ -55,6 +62,7 @@ class ScreenActions(
     val onStop: () -> Unit = {},
     val onClear: () -> Unit = {},
     val onSelectEvent: (String?) -> Unit = {},
+    val wireless: WirelessActions = WirelessActions(),
 )
 
 @Composable
@@ -87,49 +95,30 @@ fun LogPoseScreen(state: ScreenState, actions: ScreenActions) {
                 }
             }
         }
+        WirelessSheets(state.wireless, actions.wireless)
     }
 }
 
 @Composable
 private fun Sidebar(state: ScreenState, actions: ScreenActions, modifier: Modifier) {
     val p = LocalPalette.current
+    val w = state.wireless
+    val entries = SidebarEntries.build(state.devices, w.remembered, w.reconnecting)
     Column(modifier.background(p.bg1).padding(vertical = 12.dp)) {
-        T("DEVICES", p.textMuted, Modifier.padding(horizontal = 16.dp), style = Type.small, weight = FontWeight.SemiBold)
+        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            T("DEVICES", p.textMuted, style = Type.small, weight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Button("+ Add device", actions.wireless.onAddDevice)
+        }
         Spacer(Modifier.height(8.dp))
-        if (state.devices.isEmpty()) {
+        if (entries.isEmpty()) {
             T("No phone connected", p.textDim, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = Type.body)
         }
         val running = state.session as? SessionState.Running
-        state.devices.forEach { d ->
-            val status = DeviceStatuses.of(d.state)
-            val selected = d.serial == state.selectedSerial
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 8.dp, vertical = 2.dp)
-                    .background(if (selected) p.accentTint else p.bg1, RoundedCornerShape(6.dp))
-                    .clickable(enabled = status.ready && running == null) { actions.onSelectDevice(d.serial) }
-                    .padding(horizontal = 8.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                // The one green in the palette: only for "capturing right now".
-                val dot = when {
-                    running?.serial == d.serial -> p.ok
-                    status.ready -> p.textMuted
-                    else -> p.warn
-                }
-                Box(Modifier.padding(top = 5.dp).size(8.dp).background(dot, CircleShape))
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    T(DeviceStatuses.displayName(d), p.text, weight = FontWeight.SemiBold)
-                    T(d.serial, p.textMuted, style = Type.monoTiny)
-                    Spacer(Modifier.height(2.dp))
-                    val label = if (running?.serial == d.serial) "Capturing" else status.label
-                    T(label, if (status.actionNeeded) p.warn else p.textDim, style = Type.small, maxLines = 3)
-                }
-            }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            entries.forEach { e -> DeviceRow(e, state, running, actions) }
         }
-        Spacer(Modifier.weight(1f))
+        Link("How to connect a phone", Modifier.padding(horizontal = 16.dp, vertical = 6.dp), actions.wireless.onHowToConnect)
         val adb = state.adb as? AdbStatus.Ready
         if (adb != null) {
             T(
@@ -138,6 +127,60 @@ private fun Sidebar(state: ScreenState, actions: ScreenActions, modifier: Modifi
             )
         }
     }
+}
+
+@Composable
+private fun DeviceRow(e: SidebarEntry, state: ScreenState, running: SessionState.Running?, actions: ScreenActions) {
+    val p = LocalPalette.current
+    val selected = e.serial != null && e.serial == state.selectedSerial
+    val capturing = e.serial != null && running?.serial == e.serial
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .background(if (selected) p.accentTint else p.bg1, RoundedCornerShape(6.dp))
+            .clickable(enabled = e.serial != null && e.status.ready && running == null) { e.serial?.let(actions.onSelectDevice) }
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        // The one green in the palette: only for "capturing right now".
+        val tint = when {
+            capturing -> p.ok
+            e.status.actionNeeded -> p.warn
+            e.serial == null -> p.textMuted.copy(alpha = 0.7f)
+            e.status.ready -> p.textMuted
+            else -> p.textDim
+        }
+        Box(Modifier.width(14.dp).padding(top = 2.dp), contentAlignment = Alignment.TopCenter) {
+            if (e.transport == Transport.WIFI) WifiGlyph(tint) else Box(Modifier.padding(top = 3.dp).size(8.dp).background(tint, CircleShape))
+        }
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            T(e.name, if (e.serial == null) p.textDim else p.text, weight = FontWeight.SemiBold)
+            T(e.detail, p.textMuted, style = Type.monoTiny)
+            Spacer(Modifier.height(2.dp))
+            val label = if (capturing) "Capturing" else e.status.label
+            T(label, if (e.status.actionNeeded) p.warn else p.textDim, style = Type.small, maxLines = 3)
+            val legacy = state.wireless.legacy?.takeIf { it.serial == e.serial }
+            if (legacy != null) {
+                Spacer(Modifier.height(4.dp))
+                T(legacy.message, if (legacy.running || legacy.ok) p.textDim else p.warn, style = Type.small.copy(lineHeight = 15.sp), maxLines = 5)
+                if (!legacy.running) Link("Dismiss", Modifier.padding(top = 2.dp), actions.wireless.onDismissLegacy)
+            } else if (e.canSwitchToWireless && running == null) {
+                Link("Switch to wireless", Modifier.padding(top = 4.dp)) { actions.wireless.onSwitchToWireless(e.serial!!, e.name) }
+            }
+            if (e.remembered != null && !capturing) {
+                Link("Forget device", Modifier.padding(top = 4.dp)) { actions.wireless.onForget(e.remembered.id) }
+            }
+        }
+    }
+}
+
+/** A quiet text action, for the sidebar's per-row verbs. */
+@Composable
+private fun Link(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val p = LocalPalette.current
+    T(text, p.accent, modifier.clickable(onClick = onClick), style = Type.small, weight = FontWeight.Medium)
 }
 
 @Composable
@@ -179,10 +222,12 @@ fun EmptyState(placeholder: Placeholder) {
     val (title, body, hint) = when (placeholder) {
         Placeholder.NoAdb -> Triple("adb isn't available", "LogPose needs Android's adb tool to talk to a phone.", null)
         Placeholder.NoDevice -> Triple(
-            "Plug in a phone with USB debugging on",
-            "Connect an Android phone with a USB cable. It appears on the left as soon as the computer sees it.",
+            "Connect a phone",
+            "Connect an Android phone with a USB cable — it appears on the left as soon as the computer sees it. " +
+                "No cable? Use + Add device to pair over Wi-Fi with a QR code.",
             "First time? On the phone: Settings → About phone → tap Build number seven times. " +
-                "Then Settings → System → Developer options → turn on USB debugging.",
+                "Then Settings → System → Developer options → turn on USB debugging. " +
+                "Different on Samsung or Xiaomi — see How to connect a phone.",
         )
         Placeholder.DeviceNotReady -> Triple(
             "Your phone needs one more step",

@@ -17,10 +17,15 @@ data class DeviceStatus(
 
 object DeviceStatuses {
 
-    fun of(state: String): DeviceStatus = when (state.lowercase()) {
+    /** [wireless]: the transport is Wi-Fi, so "reconnect the cable" would be the wrong instruction. */
+    fun of(state: String, wireless: Boolean = false): DeviceStatus = when (state.lowercase()) {
         "device" -> DeviceStatus("Ready", ready = true, actionNeeded = false)
-        "unauthorized" -> DeviceStatus("Tap Allow on the phone's USB-debugging prompt", ready = false, actionNeeded = true)
-        "offline" -> DeviceStatus("Reconnect the cable", ready = false, actionNeeded = true)
+        "unauthorized" ->
+            if (wireless) DeviceStatus("Tap Allow on the phone, or pair it again", ready = false, actionNeeded = true)
+            else DeviceStatus("Tap Allow on the phone's USB-debugging prompt", ready = false, actionNeeded = true)
+        "offline" ->
+            if (wireless) DeviceStatus("Wi-Fi connection lost — reconnecting…", ready = false, actionNeeded = false)
+            else DeviceStatus("Reconnect the cable", ready = false, actionNeeded = true)
         "authorizing" -> DeviceStatus("Waiting for the phone to authorize…", ready = false, actionNeeded = false)
         "connecting" -> DeviceStatus("Connecting…", ready = false, actionNeeded = false)
         "no permissions", "no" -> DeviceStatus("macOS can't access this device — reconnect it", ready = false, actionNeeded = true)

@@ -3,6 +3,7 @@ plugins {
     // Compose plugins), so Kotlin, the Compose compiler and Compose Multiplatform stay in lockstep.
     kotlin("jvm")
     kotlin("plugin.compose")
+    kotlin("plugin.serialization")
     id("org.jetbrains.compose")
 }
 
@@ -16,8 +17,12 @@ dependencies {
     implementation(compose.desktop.currentOs)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-swing:1.8.1")
+    // QR pairing (M2): Nayuki's encoder — one small MIT jar, no transitive dependencies.
+    implementation("io.nayuki:qrcodegen:1.8.0")
 
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    // Test-only: ZXing's *decoder* proves the QR we draw actually scans (tests + renderScreens).
+    testImplementation("com.google.zxing:core:3.5.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
