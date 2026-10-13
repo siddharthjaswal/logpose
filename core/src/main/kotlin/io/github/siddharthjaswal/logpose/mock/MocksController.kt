@@ -1,6 +1,5 @@
 package io.github.siddharthjaswal.logpose.mock
 
-import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.model.Hello
 import io.github.siddharthjaswal.logpose.model.MockAck
@@ -32,8 +31,30 @@ import java.util.concurrent.atomic.AtomicBoolean
  * reader thread, ack deadlines on a shared scheduler thread. State access is synchronized;
  * every adb invocation runs on a short-lived daemon thread — never the EDT (the project's hard
  * rule).
+ *
+ * **Broadcasting needs arming.** Nothing reaches the device — not a push on Hello, not a sync
+ * retry, not the empty set on stop — unless [onCaptureStarted] armed this controller. An unarmed
+ * controller still ingests Hello and acks (so a read-only observer can report what the device
+ * holds), but it is a pure reader: that is how the single-writer rule (daemon PRD §7) is kept by
+ * the read-only daemon, the read-only Mac app and an IDE panel disposed without ever capturing.
+ *
+ * **Revisions are per writer, the device's is shared.** The library ignores a rule set whose
+ * revision is *lower* than the one it holds, and each writer (plugin, daemon, Mac app, the push
+ * script) counts on its own. So whenever the device reports a revision this controller did not
+ * push (Hello's `mockRevision`, a foreign ack) it is remembered as [deviceFloor], and the next
+ * push goes out strictly above `max(local counter, floor)` — and that bump is persisted. Learning
+ * the floor never pushes by itself: a set someone else applied is recorded, not corrected.
+ *
+ * [transport] and [runAsync] exist so the broadcast decisions can be tested without adb; the
+ * defaults are the real `am broadcast` on a short-lived daemon thread.
  */
-class MocksController(private val props: KeyValueStore) {
+class MocksController(
+    private val props: KeyValueStore,
+    private val transport: RuleSetTransport = RuleSetTransport.Adb,
+    private val runAsync: (Runnable) -> Unit = { task ->
+        Thread(task, "logpose-mock-push").apply { isDaemon = true }.start()
+    },
+) {
 
     /** Snapshot of what the device reported, for the UI's sync indicator. */
     data class DeviceState(
@@ -58,7 +79,15 @@ class MocksController(private val props: KeyValueStore) {
     // ruleId -> the captured response the rule was seeded from, so the field-tree editor can be
     // rebuilt when editing later. Plugin-side only; never pushed to the device.
     private val baseBodies = mutableMapOf<String, String>()
-    private var revision: Int = props.getInt(KEY_REVISION, 0)
+    // Never negative: a negative `rev` is dropped by the device's receiver outright.
+    private var revision: Int = props.getInt(KEY_REVISION, 0).coerceAtLeast(0)
+
+    /** Highest revision the device reported that this controller did not push itself; -1 = none. */
+    private var deviceFloor = -1
+
+    /** The last revision this controller broadcast, so its own acks are not mistaken for a
+     *  foreign writer's (which would bump the revision on every retry and void the budget). */
+    private var lastPushedRevision = -1
 
     private var pkg: String? = props.get(KEY_PKG)
     private var libVersion: String? = null
@@ -181,13 +210,16 @@ class MocksController(private val props: KeyValueStore) {
 
     /** Called when capture stops (or the panel disposes): clear the device, keep local rules. */
     fun onCaptureStopped() {
-        live.set(false)
+        // Only an armed controller clears the device. One that was never armed (a read-only
+        // daemon or Mac app, an IDE panel disposed without capturing) has nothing of its own on
+        // the device — that empty set would delete the real writer's live mocks (PRD §7).
+        val wasArmed = live.getAndSet(false)
         lastProblem = null
         skewNotice = null
         val target = pkg
-        if (target != null) {
+        if (wasArmed && target != null) {
             // Bump revision so the empty set supersedes whatever the device holds.
-            val rev = synchronized(this) { ++revision }
+            val rev = synchronized(this) { nextRevision().also { lastPushedRevision = it } }
             persistRevision()
             // Untracked: capture is going away, so no ack will be read back and a failure to
             // reach a device that may already be gone is noise, not news.
@@ -216,6 +248,7 @@ class MocksController(private val props: KeyValueStore) {
             // treat as the same run so we don't prune on every re-announce.
             val fresh = hello.processId.isNotBlank() && hello.processId != lastProcessId
             if (hello.processId.isNotBlank()) lastProcessId = hello.processId
+            learnDeviceRevision(hello.mockRevision)
             fresh
         }
         props.set(KEY_PKG, hello.pkg)
@@ -254,6 +287,7 @@ class MocksController(private val props: KeyValueStore) {
             helloSeen = true
             syncedRevision = ack.revision
             hits = ack.hits
+            learnDeviceRevision(ack.revision)
         }
         props.set(KEY_PKG, ack.pkg)
         applyEffect(sync.onAck(ack.revision, ack.ruleCount))
@@ -263,11 +297,27 @@ class MocksController(private val props: KeyValueStore) {
     // ---- Push -----------------------------------------------------------------------------
 
     /** Serializes the current rule set and pushes it to the device (off the EDT). */
-    fun pushNow() {
+    fun pushNow() = push(isRetry = false)
+
+    /**
+     * [isRetry] marks a re-push the sync state machine asked for, so a revision bump on the way
+     * out (jumping past another writer) doesn't refill the retry budget — see [SyncState.onPush].
+     */
+    private fun push(isRetry: Boolean) {
         val target = pkg ?: return
+        if (!live.get()) return // unarmed: a reader never broadcasts, whoever asks
         val pushable = pushableRules()
-        val rev = synchronized(this) { revision }
-        sync.onPush(rev, pushable.size, System.currentTimeMillis())
+        val (rev, bumped) = synchronized(this) {
+            // The device holds a revision someone else wrote at or above ours: an equal or lower
+            // one may be ignored, so jump strictly past it. Our own last push is never a floor,
+            // so retrying it keeps its revision (and its budget).
+            val bump = revision <= deviceFloor
+            if (bump) revision = Revisions.after(deviceFloor)
+            lastPushedRevision = revision
+            revision to bump
+        }
+        if (bumped) persistRevision()
+        sync.onPush(rev, pushable.size, System.currentTimeMillis(), isRetry = isRetry)
         reportSkew()
         // Pin the attempt this push belongs to now, so the ack deadline armed for it can't be
         // matched against a state a later retry has already moved on.
@@ -314,42 +364,31 @@ class MocksController(private val props: KeyValueStore) {
 
     private fun broadcast(target: String, ruleSet: MockRuleSet, tracked: Boolean, attempt: Int = 0) {
         val revision = ruleSet.revision
-        val adb = Adb.resolve()
-        if (adb == null) {
-            if (tracked) {
-                applyEffect(sync.onBroadcastFailure(revision, "adb not found (set ANDROID_HOME or put adb on PATH)"))
-                notifyChanged()
-            }
-            return
-        }
-        val slices = BroadcastCommand.slices(json.encodeToString(MockRuleSet.serializer(), ruleSet))
-        val total = slices.size
         val serial = deviceSerial
-
-        Thread({
-            var failure: String? = null
-            for ((seq, slice) in slices.withIndex()) {
-                val cmd = Adb.baseCmd(adb, serial) + BroadcastCommand.args(
-                    target = target,
-                    // Deliberately no `cmd` extra: a rule set is what the receiver did before the
-                    // extra existed, so an older library on the device keeps working unchanged.
-                    cmd = null,
-                    revision = revision,
-                    seq = seq,
-                    total = total,
-                    payload = slice,
-                )
-                failure = AdbCommand.run(cmd)
-                if (failure != null) break
-            }
-            if (!tracked) return@Thread
+        runAsync(Runnable {
+            val failure = transport.deliver(serial, target, ruleSet)
+            if (!tracked) return@Runnable
             if (failure != null) {
                 applyEffect(sync.onBroadcastFailure(revision, failure))
             } else {
                 armAckDeadline(revision, attempt)
             }
             notifyChanged()
-        }, "logpose-mock-push").apply { isDaemon = true }.start()
+        })
+    }
+
+    // ---- Revisions ------------------------------------------------------------------------
+
+    /** Remembers a revision the device reported, unless it is the one we last pushed. */
+    private fun learnDeviceRevision(deviceRevision: Int) {
+        if (deviceRevision < 0 || deviceRevision == lastPushedRevision) return
+        deviceFloor = maxOf(deviceFloor, deviceRevision)
+    }
+
+    /** The revision a new rule set goes out at: strictly above our counter *and* the device's. */
+    private fun nextRevision(): Int {
+        revision = Revisions.after(maxOf(revision, deviceFloor))
+        return revision
     }
 
     /**
@@ -369,8 +408,10 @@ class MocksController(private val props: KeyValueStore) {
     private fun applyEffect(effect: SyncState.Effect) {
         when (effect) {
             is SyncState.Effect.None -> Unit
-            is SyncState.Effect.Repush -> if (live.get()) pushNow()
-            is SyncState.Effect.Fail -> report(effect.message)
+            is SyncState.Effect.Repush -> if (live.get()) push(isRetry = true)
+            // An unarmed reader has no rules on the device by design, so "your mocks may not be
+            // live" would be a false alarm; the state is still recorded for list_mocks.
+            is SyncState.Effect.Fail -> if (live.get()) report(effect.message)
         }
     }
 
@@ -406,7 +447,7 @@ class MocksController(private val props: KeyValueStore) {
     private inline fun mutate(change: () -> Unit) {
         val rev = synchronized(this) {
             change()
-            ++revision
+            nextRevision()
         }
         sync.onLocalRevision(rev)
         persistRules()
@@ -458,4 +499,56 @@ class MocksController(private val props: KeyValueStore) {
             Thread(r, "logpose-mock-sync").apply { isDaemon = true }
         }
     }
+}
+
+/**
+ * How a rule set physically reaches the device. One implementation in production — [Adb], the
+ * sliced `am broadcast` — and a recording fake in tests, which is what lets "this controller
+ * broadcast nothing" be asserted rather than trusted.
+ */
+fun interface RuleSetTransport {
+
+    /** Delivers [ruleSet] to [target]'s receiver; returns why it failed, or null. Off the EDT. */
+    fun deliver(serial: String?, target: String, ruleSet: MockRuleSet): String?
+
+    object Adb : RuleSetTransport {
+        private val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
+
+        override fun deliver(serial: String?, target: String, ruleSet: MockRuleSet): String? {
+            val adb = io.github.siddharthjaswal.logpose.logcat.Adb.resolve()
+                ?: return "adb not found (set ANDROID_HOME or put adb on PATH)"
+            val slices = BroadcastCommand.slices(json.encodeToString(MockRuleSet.serializer(), ruleSet))
+            for ((seq, slice) in slices.withIndex()) {
+                val cmd = io.github.siddharthjaswal.logpose.logcat.Adb.baseCmd(adb, serial) + BroadcastCommand.args(
+                    target = target,
+                    // Deliberately no `cmd` extra: a rule set is what the receiver did before the
+                    // extra existed, so an older library on the device keeps working unchanged.
+                    cmd = null,
+                    revision = ruleSet.revision,
+                    seq = seq,
+                    total = slices.size,
+                    payload = slice,
+                )
+                AdbCommand.run(cmd)?.let { return it }
+            }
+            return null
+        }
+    }
+}
+
+/**
+ * Rule-set revision arithmetic. The revision is an `Int` on both halves of the wire (`MockRuleSet
+ * .revision`, `Hello.mockRevision`, `MockAck.revision`) and travels as `am broadcast --ei rev`, a
+ * 32-bit extra — so it cannot simply be widened, and `++` past [Int.MAX_VALUE] would wrap to a
+ * negative number the receiver drops outright (`rev < 0` is rejected) while every later
+ * comparison read it as "older".
+ *
+ * So increments saturate. At the ceiling a writer keeps sending [Int.MAX_VALUE], which the library
+ * still applies (it ignores only revisions *lower* than its own; an equal one is re-applied).
+ * In practice the ceiling is far away: per-edit counters climb by one, and the largest values seen
+ * in the wild are `scripts/push-mocks.sh`'s epoch seconds (~1.79e9 in 2026), which reach
+ * [Int.MAX_VALUE] only in January 2038.
+ */
+internal object Revisions {
+    fun after(revision: Int): Int = if (revision >= Int.MAX_VALUE) Int.MAX_VALUE else maxOf(revision, -1) + 1
 }

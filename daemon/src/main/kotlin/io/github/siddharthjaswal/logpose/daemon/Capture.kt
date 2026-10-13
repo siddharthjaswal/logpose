@@ -44,16 +44,20 @@ class Capture(
     // not the daemon's own settings — so a key configured in the IDE is the one the daemon groups on.
     private val correlationSettings: KeyValueStore,
     private val log: Log,
+    /**
+     * Mock state and the device handshake. Always constructed — the handshake and hit counts are
+     * *reads* the MCP tools want even in read-only mode. Only armed with `--mocks` (see [start]):
+     * an unarmed controller ingests Hello and acks but never broadcasts, which is the whole of the
+     * read-only guarantee — the MCP write tools are declined separately (see `DaemonSession`).
+     * A parameter only so tests can hand in one whose transport records instead of running adb.
+     */
+    val mocks: MocksController = MocksController(settings),
 ) {
 
     val store = EventStore()
     private val parser = TransactionParser()
     val correlation = CorrelationIndex().apply { setKeys(CorrelationSettings.keys(correlationSettings)) }
     val workerLifecycle = WorkerLifecycle()
-
-    /** Mock state and the device handshake. Always constructed — the handshake and hit counts are
-     *  *reads* the MCP tools want even in read-only mode; only the writes are gated (see [Session]). */
-    val mocks = MocksController(settings)
 
     val push = PushController(
         packageName = { mocks.deviceState().pkg },
@@ -88,11 +92,34 @@ class Capture(
 
     fun start() {
         options.open?.let { loadFile(it); return }
-        if (!active.compareAndSet(false, true)) return
-        wireReverseChannel()
-        mocks.onCaptureStarted()
-        attach()
+        if (begin()) attach()
     }
+
+    /**
+     * Everything [start] does before the first adb call: mark capture active, wire the reverse
+     * channel, arm the mocks if this daemon is the writer. Internal so a test can drive the
+     * reverse channel without a device. False when capture was already running.
+     */
+    internal fun begin(): Boolean {
+        if (!active.compareAndSet(false, true)) return false
+        wireReverseChannel()
+        armMocksIfWriter()
+        return true
+    }
+
+    /**
+     * Arms the mock controller only for the device's single writer (`--mocks`), exactly as the Mac
+     * app arms only in its WRITER mode. Read-only must never broadcast (PRD §7): armed, the
+     * controller re-pushes its own (usually empty) rule set whenever a device Hello disagrees with
+     * it — which is every app restart while an IDE holds live mocks — and that push would replace
+     * the IDE's rules. Unarmed, not even a sync retry can reach the device.
+     */
+    private fun armMocksIfWriter() {
+        if (options.mocks) mocks.onCaptureStarted()
+    }
+
+    /** The reverse-channel entry point, as the reader thread calls it (tests feed it directly). */
+    internal fun onControl(msg: ControlMessage) = parser.onControl(msg)
 
     /**
      * `--open`: replays a capture file into the store — the same parser, the same warm-up, the same
@@ -232,7 +259,9 @@ class Capture(
         if (!active.compareAndSet(true, false)) return
         reader?.stop()
         reader = null
-        if (clearDeviceRules) {
+        // Gated twice: the caller's flag, and our own --mocks — a read-only daemon has nothing of
+        // its own on the device to clear (and the controller, never armed, would refuse anyway).
+        if (clearDeviceRules && options.mocks) {
             log.info("clearing mock rules from the device")
             mocks.onCaptureStopped()
         }

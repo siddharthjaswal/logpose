@@ -342,6 +342,46 @@ Three smaller observations, filed rather than fixed:
   plugin's *filter bar* haystack does include bodies since 1.9.2, so the two searches named
   "contains" no longer mean the same thing. Not changed here; an asymmetry to decide on.
 
+### Coexistence findings — both resolved
+
+Two ways the §7 rules leaked in practice, found while building the Mac app's Advanced section
+(which already did read-only right — its controller is never armed unless the user hands it the
+device). Both are fixed in `:core`/`:daemon`, so the plugin, the daemon and the Mac app all get
+the second one.
+
+- **A read-only daemon could still wipe an IDE's live mocks.** *(resolved — `daemon/Capture.kt`,
+  `core/mock/MocksController.kt`)* `Capture.start()` armed the daemon's `MocksController` with or
+  without `--mocks`. The MCP write tools were declined, but the controller itself was live: on
+  every device Hello whose rule count disagreed with the daemon's own (usually empty) set —
+  i.e. every app restart while the IDE held rules — `SyncState` asked for a re-push, and the
+  daemon broadcast its set over the IDE's. Shutdown was already gated by `--mocks`; the Hello path
+  was not. Now the daemon arms only with `--mocks`, mirroring the Mac app's `MockWriter.armsDevice`,
+  and the controller itself refuses to broadcast anything — push, sync retry, or the stop-time
+  empty set — unless it was armed (`Capture.stop` additionally checks `--mocks`). Read-only still
+  ingests Hello and acks, so `list_mocks` reports what the device holds; it just never writes, and
+  no longer logs "mock rules may not be live" about rules it doesn't own. The core guard also
+  covers an IDE panel disposed without ever capturing, which used to broadcast the empty set too.
+  Tests: `DaemonMockCoexistenceTest` (read-only Hello/retry/stop → zero broadcasts; `--mocks` still
+  pushes and clears).
+- **A second mock writer was ignored in silence.** *(resolved — `core/mock/MocksController.kt`,
+  `core/mock/SyncState.kt`)* The library drops any rule set whose revision is *lower* than the one
+  it holds (`MockRegistry.apply`: `if (set.revision < revision) return false`; equal re-applies),
+  and every writer — plugin, daemon, Mac app, `scripts/push-mocks.sh` with its epoch-seconds
+  revisions — keeps its own counter. A writer behind another pushed sets the device discarded: no
+  ack, retries, then FAILED, with nothing saying why. Now a revision the device reports that this
+  controller didn't push itself (Hello's `mockRevision`, a foreign ack) becomes a floor, and the
+  next push goes out strictly above `max(local, floor)`, persisted. Learning the floor never pushes
+  by itself — "an ack for a set this session never pushed is recorded, not corrected" still holds,
+  so a script's push isn't clobbered by an observer. A re-push that bumps past a foreign revision
+  keeps its spent retry budget, so two armed writers can't refill each other's budget forever: the
+  one that runs out reports FAILED, and the message now says another writer replaced its set.
+  Revisions stay `Int` on both halves (they ride `am broadcast --ei rev`, a 32-bit extra); bumps
+  saturate at `Int.MAX_VALUE` rather than wrapping negative (the receiver drops `rev < 0`), and the
+  library re-applies an equal revision, so a writer at the ceiling still delivers. The largest
+  revision seen in the field, 1,791,889,168, decodes as epoch seconds to 2026-10-13 10:59 UTC —
+  push-mocks.sh's scheme, not a per-edit counter — and that scheme meets the ceiling in January
+  2038. Tests: `MocksControllerRevisionTest`, two new `SyncStateTest` cases.
+
 ### Configuring correlation keys
 
 The vocabulary now lives in `<project-dir>/.logpose/correlation.properties`, **shared** between the

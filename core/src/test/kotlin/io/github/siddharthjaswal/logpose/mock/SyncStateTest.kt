@@ -66,6 +66,27 @@ class SyncStateTest {
     }
 
     @Test
+    fun `a retry that had to jump past another writer's revision keeps the spent budget`() {
+        state.onPush(revision = 1, ruleCount = 2, atMillis = 0)
+        val first = state.onAck(revision = 10, ruleCount = 4) as SyncState.Effect.Repush
+        assertEquals(1, first.attempt)
+
+        // The controller re-pushes above the foreign revision — a new number, the same retry.
+        state.onPush(revision = 11, ruleCount = 2, atMillis = 0, isRetry = true)
+        assertEquals(1, state.snapshot().attempt)
+        assertEquals(2, (state.onAck(revision = 20, ruleCount = 4) as SyncState.Effect.Repush).attempt)
+        state.onPush(revision = 21, ruleCount = 2, atMillis = 0, isRetry = true)
+        assertTrue(state.onAck(revision = 30, ruleCount = 4) is SyncState.Effect.Fail)
+    }
+
+    @Test
+    fun `an ack above our push with another count names the takeover`() {
+        state.onPush(revision = 5, ruleCount = 2, atMillis = 0)
+        val effect = state.onAck(revision = 9, ruleCount = 3) as SyncState.Effect.Repush
+        assertTrue(effect.reason.contains("another writer"), effect.reason)
+    }
+
+    @Test
     fun `a broadcast failure fails immediately and retains the message`() {
         state.onPush(revision = 1, ruleCount = 1, atMillis = 0)
         val effect = state.onBroadcastFailure(1, "adb exited 1: device offline")

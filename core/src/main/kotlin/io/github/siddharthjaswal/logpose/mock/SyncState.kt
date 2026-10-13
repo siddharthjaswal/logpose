@@ -93,10 +93,15 @@ class SyncState(private val maxRetries: Int = DEFAULT_MAX_RETRIES) {
      * A rule set of [ruleCount] rules is going out at [revision]. A push of a *new* revision
      * clears the retry budget and any retained failure; a retry of the same revision keeps the
      * budget it has already spent.
+     *
+     * [isRetry] keeps the spent budget even when the revision changed: a re-push that had to jump
+     * past another writer's revision is still the same disagreement, not a new edit. Without it,
+     * two armed writers would refill each other's budget on every bump and ping-pong forever;
+     * with it, the one that runs out reports FAILED and stops.
      */
     @Synchronized
-    fun onPush(revision: Int, ruleCount: Int, atMillis: Long) {
-        if (revision != pushedRevision) attempt = 0
+    fun onPush(revision: Int, ruleCount: Int, atMillis: Long, isRetry: Boolean = false) {
+        if (revision != pushedRevision && !isRetry) attempt = 0
         localRevision = maxOf(localRevision, revision)
         pushedRevision = revision
         expectedRules = ruleCount
@@ -127,8 +132,14 @@ class SyncState(private val maxRetries: Int = DEFAULT_MAX_RETRIES) {
             return Effect.None
         }
         if (ruleCount != expectedRules) {
+            // A higher revision than our own push is somebody else's set (another LogPose
+            // writer, a script) — say so, because "takeover" is the thing a user needs to see.
             return retryOrFail(
-                "device applied $ruleCount rule(s) at revision $revision, expected $expectedRules",
+                if (revision > pushedRevision)
+                    "another writer replaced our rule set: device applied $ruleCount rule(s) at " +
+                        "revision $revision, ours is $pushedRevision with $expectedRules"
+                else
+                    "device applied $ruleCount rule(s) at revision $revision, expected $expectedRules",
             )
         }
         syncedRevision = revision

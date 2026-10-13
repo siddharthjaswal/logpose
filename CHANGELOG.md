@@ -99,6 +99,24 @@ plugin changes — it is the same code, now reachable two more ways.
 - **A taken port is explained rather than reported.** `Address already in use` named neither the
   port nor the fix; the message now does both, and says that one-writer-per-device is a rule
   about `--mocks`, not about reading.
+- **A read-only `logpose serve` can no longer delete the IDE's mocks.** The daemon's promise is
+  that without `--mocks` it never writes a device's rule set — but it armed its mock controller
+  anyway, and the MCP gate only stopped the *tools*. So every time the app restarted while the
+  IDE held live mocks, the device's Hello disagreed with the daemon's own (empty) set, the sync
+  logic asked for a re-push, and the daemon broadcast that empty set over the IDE's rules. The
+  daemon now arms only with `--mocks`, as the Mac app already did, and the controller itself
+  refuses to broadcast anything — a push, a sync retry, the clear on stop — unless it was armed.
+  Read-only still reads the handshake and hit counts for `list_mocks`. The same guard stops an
+  IDE panel that closes without ever capturing from broadcasting an empty set.
+- **Taking over a device's mocks is no longer silently ignored.** The device keeps whichever rule
+  set has the highest revision and drops anything lower, but each writer — the plugin, the
+  daemon, the Mac app, `push-mocks.sh` — counts revisions on its own. A writer whose counter was
+  behind pushed sets the device threw away: no ack, a couple of retries, then FAILED, with nothing
+  saying why. Writers now note the revision the device reports (in its Hello and in every ack)
+  and push strictly above it, persisting the jump. Noting it never pushes by itself, so a set
+  someone else applied is still left alone until you edit. Two writers armed at once still can't
+  both win: the retry budget isn't refilled by the jump, so one gives up after two attempts — and
+  its failure now says another writer replaced its rules.
 
 ### Improved
 
