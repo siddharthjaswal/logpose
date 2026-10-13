@@ -9,8 +9,19 @@ import java.io.File
  */
 object Adb {
 
-    /** Resolves an adb executable from the SDK env vars, common install paths, then PATH. */
+    /**
+     * An adb the host located itself, consulted before anything else. Null — the default, and the
+     * only value the plugin and the daemon ever have — leaves [resolve] exactly as it was. The Mac
+     * app sets it to the platform-tools it downloaded for a user with no SDK, so every caller of
+     * [resolve] ([LogcatReader], [devices], the mock pusher) uses that binary without each needing
+     * a path parameter.
+     */
+    @Volatile
+    var explicitPath: String? = null
+
+    /** Resolves an adb executable: [explicitPath], then the SDK env vars, common install paths, then PATH. */
     fun resolve(): String? {
+        explicitPath?.let { return it }
         val candidates = buildList {
             System.getenv("ANDROID_HOME")?.let { add("$it/platform-tools/adb") }
             System.getenv("ANDROID_SDK_ROOT")?.let { add("$it/platform-tools/adb") }

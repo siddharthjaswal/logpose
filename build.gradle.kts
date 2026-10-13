@@ -2,6 +2,12 @@ plugins {
     kotlin("jvm") version "2.1.0"
     kotlin("plugin.serialization") version "2.1.0"
     id("org.jetbrains.intellij.platform") version "2.2.1"
+    // The Mac app (`:desktop`). Declared here, not applied, so the versions live in one place and
+    // share the root's buildscript classpath with Kotlin. The Compose compiler plugin's version
+    // must equal the Kotlin version; Compose Multiplatform 1.7.3 is the newest 1.7.x and is built
+    // for Kotlin 2.1.0.
+    id("org.jetbrains.compose") version "1.7.3" apply false
+    kotlin("plugin.compose") version "2.1.0" apply false
 }
 
 group = "io.github.siddharthjaswal"

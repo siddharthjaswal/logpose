@@ -12,6 +12,9 @@ pluginManagement {
 dependencyResolutionManagement {
     repositories {
         mavenCentral()
+        // Compose Multiplatform (`:desktop`) pulls a few androidx artifacts (collection, annotation)
+        // that are published only to Google's repository.
+        google()
     }
 }
 
@@ -26,3 +29,7 @@ include(":core")
 // A plain JVM application module; its only runtime deps are :core, kotlinx-serialization and the
 // Kotlin stdlib, which is what lets it ship as a jar you can `java -jar`.
 include(":daemon")
+
+// The Mac app: a Compose Desktop host that embeds :core in-process (docs/mac-app-prd.md). Plain
+// Compose + Kotlin plugins only — nothing from the IntelliJ Platform reaches its classpath.
+include(":desktop")
