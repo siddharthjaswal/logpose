@@ -145,8 +145,8 @@ object KindGlyphs {
 }
 
 @Composable
-fun KindGlyph(kind: String, modifier: Modifier = Modifier) {
+fun KindGlyph(kind: String, modifier: Modifier = Modifier, tint: Color? = null) {
     val p = LocalPalette.current
     val painter = KindGlyphs.painter(kind, LocalDensity.current) ?: return
-    Image(painter, contentDescription = kind, modifier = modifier.size(16.dp), colorFilter = ColorFilter.tint(p.kind(kind)))
+    Image(painter, contentDescription = kind, modifier = modifier.size(16.dp), colorFilter = ColorFilter.tint(tint ?: p.kind(kind)))
 }

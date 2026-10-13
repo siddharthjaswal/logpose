@@ -6,6 +6,7 @@ import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.presentation.DetailContent
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Dimension
@@ -272,12 +273,7 @@ class OverviewPanel : CardPanel(null) {
             statusPill.set("${spinnerChar(0)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
         } else {
             val sColor = Theme.statusColor(code, tx.error)
-            val label = when {
-                tx.error != null -> "ERR"
-                code != null -> "$code ${tx.response?.message?.ifBlank { reason(code) } ?: reason(code)}".trim()
-                else -> "pending"
-            }
-            statusPill.set(label, sColor, Theme.statusTint(code, tx.error))
+            statusPill.set(DetailContent.statusLabel(tx), sColor, Theme.statusTint(code, tx.error))
         }
         // Method carries no hue — read vs write is weight, so a POST looks heavier than a GET
         // without borrowing a colour that status already means something with.
@@ -288,29 +284,18 @@ class OverviewPanel : CardPanel(null) {
 
         chips.removeAll()
         liveDurationChip = null
-        val items = buildList {
-            if (pending) {
-                StatChip("duration", "0 ms").also { liveDurationChip = it; add(it) }
-            } else {
-                tx.durationMillis?.let { add(StatChip("duration", "$it ms")) }
-                tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { add(StatChip("size", Theme.humanSize(it))) }
-            }
-            if (tx.startedAtMillis > 0) add(StatChip("started", timeFmt.format(Date(tx.startedAtMillis))))
-            if (tx.request.host.isNotBlank()) add(StatChip("host", tx.request.host.substringBefore('.')))
-            // Prefer a server trace/request id (useful for backend log lookup) over the
-            // internal LogPose correlation id.
-            val trace = traceId(tx)
-            if (trace != null) add(StatChip(trace.first, ellipsize(trace.second), tip = trace.second))
-            else add(StatChip("id", tx.id, tip = "Internal LogPose correlation id"))
-            // The LogPose trace, when the app set one — a link, because it's the flow this call
-            // belongs to and not just another identifier.
-            envelope?.traceId?.takeIf { it.isNotBlank() }?.let { flow ->
-                add(
-                    StatChip("trace", ellipsize(flow))
-                        .clickable("LogPose trace $flow — open the waterfall for this flow") {
-                            onOpenTrace(flow)
-                        },
-                )
+        // Which chips, in which order, saying what: :core's (DetailContent), shared with the Mac
+        // app. Prefer a server trace/request id (useful for backend log lookup) over the internal
+        // LogPose correlation id; the LogPose trace, when the app set one, is a link, because it's
+        // the flow this call belongs to and not just another identifier.
+        val items = DetailContent.httpChips(tx, envelope).map { chip ->
+            val flow = chip.traceLink
+            when {
+                flow != null -> StatChip(chip.caption, chip.value, chip.tip)
+                    .clickable("LogPose trace $flow — open the waterfall for this flow") { onOpenTrace(flow) }
+                pending && chip.caption == DetailContent.CAPTION_DURATION ->
+                    StatChip(chip.caption, chip.value, chip.tip).also { liveDurationChip = it }
+                else -> StatChip(chip.caption, chip.value, chip.tip)
             }
         }
         items.forEachIndexed { i, c ->
@@ -374,58 +359,20 @@ class OverviewPanel : CardPanel(null) {
             dupRow.isVisible = false
             return
         }
-        val (fg, tint, label) = when (dup.severity) {
-            DuplicateDetector.Severity.STRONG ->
-                Triple(Theme.danger, Theme.dangerTint, "Possible double-submit")
-            DuplicateDetector.Severity.MEDIUM ->
-                Triple(Theme.warn, Theme.warnTint, "Redundant duplicate request")
-            DuplicateDetector.Severity.INFO ->
-                Triple(Theme.textDim, Theme.tint(Theme.textDim, 22), "Repeated request")
+        val (fg, tint) = when (dup.severity) {
+            DuplicateDetector.Severity.STRONG -> Theme.danger to Theme.dangerTint
+            DuplicateDetector.Severity.MEDIUM -> Theme.warn to Theme.warnTint
+            DuplicateDetector.Severity.INFO -> Theme.textDim to Theme.tint(Theme.textDim, 22)
         }
-        val detail = if (dup.severity == DuplicateDetector.Severity.STRONG)
-            " — fired before the previous ${tx.request.method} responded; check for a missing debounce or disabled-button guard."
-        else
-            " — ${ordinalWord(dup.ordinal)} identical ${tx.request.method} within a short burst."
         dupBanner.foreground = fg
-        dupBanner.text = "⚠  DUPLICATE ×${dup.ordinal}  ·  $label$detail"
+        // The words are :core's (shared with the Mac app); the severity colours are ours.
+        dupBanner.text = DetailContent.duplicateBanner(tx, dup).text
         setBannerFill(tint)
         dupRow.isVisible = true
     }
 
-    private fun ordinalWord(n: Int): String = when (n) {
-        2 -> "2nd"; 3 -> "3rd"; else -> "${n}th"
-    }
-
-    /** Finds a server-side trace/request id in response (then request) headers. */
-    private fun traceId(tx: io.github.siddharthjaswal.logpose.model.Transaction): Pair<String, String>? {
-        val candidates = listOf(
-            "x-request-id", "x-correlation-id", "x-amzn-requestid", "x-amzn-trace-id",
-            "x-trace-id", "x-span-id", "request-id", "traceparent", "x-b3-traceid",
-        )
-        fun find(headers: Map<String, String>): Pair<String, String>? {
-            for (key in candidates) {
-                val match = headers.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }
-                if (match != null && match.value.isNotBlank()) {
-                    val label = if (key == "traceparent" || key.contains("trace")) "trace id" else "req id"
-                    return label to match.value
-                }
-            }
-            return null
-        }
-        return tx.response?.let { find(it.headers) } ?: find(tx.request.headers)
-    }
-
     private fun ellipsize(s: String, max: Int = 14): String =
         if (s.length <= max) s else s.take(max - 1) + "…"
-
-    private fun reason(code: Int): String = when (code) {
-        200 -> "OK"; 201 -> "Created"; 202 -> "Accepted"; 204 -> "No Content"
-        301 -> "Moved Permanently"; 302 -> "Found"; 304 -> "Not Modified"
-        400 -> "Bad Request"; 401 -> "Unauthorized"; 403 -> "Forbidden"; 404 -> "Not Found"
-        405 -> "Method Not Allowed"; 409 -> "Conflict"; 422 -> "Unprocessable Entity"
-        429 -> "Too Many Requests"; 500 -> "Internal Server Error"; 502 -> "Bad Gateway"
-        503 -> "Service Unavailable"; 504 -> "Gateway Timeout"; else -> ""
-    }
 
     /** The status/method pills at the west end, the occurrence stepper (when there is one) at the east. */
     private fun pillRow(pills: Component, east: Component): JPanel =

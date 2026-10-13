@@ -1,6 +1,8 @@
 package io.github.siddharthjaswal.logpose.desktop.session
 
 import io.github.siddharthjaswal.logpose.analysis.CorrelationIndex
+import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
+import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.capture.CaptureLines
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
@@ -44,6 +46,13 @@ class CaptureSession(
 ) {
     val correlation = CorrelationIndex()
 
+    /**
+     * The state sequence each worker request was **observed** to pass through — the store cannot
+     * say, because a worker's states re-put one envelope id. Noted on the reader thread beside the
+     * correlation warm-up, as the daemon's `Capture` and the plugin panel do; read by the worker card.
+     */
+    val workerLifecycle = WorkerLifecycle()
+
     private val _state = MutableStateFlow<SessionState>(SessionState.Idle)
     val state: StateFlow<SessionState> = _state.asStateFlow()
 
@@ -72,6 +81,7 @@ class CaptureSession(
         // one's rows (recording sessions to disk, so nothing is lost, is M3).
         store.clear()
         correlation.clear()
+        workerLifecycle.clear()
         firstLogPoseAtMillis = null
         val startedAt = (after as SessionState.Running).startedAtMillis
         val rec = recorderFor?.invoke(serial, startedAt)
@@ -96,6 +106,7 @@ class CaptureSession(
                 if (firstLogPoseAtMillis == null && QuietDetector.isLogPoseLine(line)) firstLogPoseAtMillis = clock()
                 p.accept(line)?.let { event ->
                     correlation.warm(event)
+                    if (event is LogEvent.Worker) workerLifecycle.note(event, clock())
                     // Every envelope, every update: the store keeps the latest per id and evicts at
                     // its cap; the file keeps everything, so the shareable record never loses history.
                     rec?.append(CaptureLines.of(event))

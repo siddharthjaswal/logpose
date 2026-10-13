@@ -2,24 +2,25 @@ package io.github.siddharthjaswal.logpose.desktop.timeline
 
 import io.github.siddharthjaswal.logpose.capture.Bookmark
 import io.github.siddharthjaswal.logpose.capture.ScreenshotRef
+import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.desktop.Fixtures
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 
 class TimelineItemsTest {
-    private val rows = Fixtures.store().snapshot().map(RowModels::of)
-    private val t0 = rows.first().event.timestampMillis
+    private val rows = Fixtures.store().snapshot().map { Rows.of(RowCollapse.Row.Single(it), emptyMap()) }
+    private val t0 = rows.first().row.lead.timestampMillis
 
     private fun keys(items: List<TimelineItem>) = items.map {
         when (it) {
-            is TimelineItem.Event -> it.row.event.id
+            is TimelineItem.Event -> it.cells.row.lead.id
             is TimelineItem.Mark -> "B${it.number}"
             is TimelineItem.Shot -> "S"
         }
     }
 
     @Test fun `no marks is just the rows`() {
-        assertEquals(rows.map { it.event.id }, keys(TimelineItems.merge(rows, SessionMarks.EMPTY)))
+        assertEquals(rows.map { it.row.lead.id }, keys(TimelineItems.merge(rows, SessionMarks.EMPTY)))
     }
 
     @Test fun `a marker goes before the first row that started after it, numbered in the order made`() {

@@ -11,6 +11,7 @@ import com.intellij.util.ui.ImageUtil
 import com.intellij.util.ui.JBUI
 import com.intellij.util.ui.UIUtil
 import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.presentation.RowContent
 import java.awt.AlphaComposite
 import java.awt.Color
 import java.awt.Component
@@ -133,14 +134,12 @@ object Theme {
     val cardBorder get() = borderStrong
     val chipBg get() = bg1
 
-    private val READ_METHODS = setOf("GET", "HEAD", "OPTIONS")
-
     /**
      * Whether [method] only reads. Reads render regular weight in [methodRead]; everything else —
      * including verbs LogPose has never heard of — renders bold in [methodWrite], because an
      * unrecognised verb is far more likely to change server state than not.
      */
-    fun isRead(method: String): Boolean = method.trim().uppercase() in READ_METHODS
+    fun isRead(method: String): Boolean = RowContent.isReadMethod(method)
 
     /**
      * The text colour for a method label. Method carries **no hue**: this returns one of two
@@ -236,12 +235,8 @@ object Theme {
         return Color(mix(c.red, b.red), mix(c.green, b.green), mix(c.blue, b.blue))
     }
 
-    fun humanSize(bytes: Long): String = when {
-        bytes < 0 -> "—"
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
-        else -> "%.1f MB".format(bytes / (1024.0 * 1024))
-    }
+    /** The one size format, shared with the Mac app through `:core`'s [RowContent]. */
+    fun humanSize(bytes: Long): String = RowContent.humanSize(bytes)
 }
 
 /** A small fading toast confirming an action (e.g. a copy). */
@@ -666,10 +661,10 @@ class IconButton(private val icon: javax.swing.Icon, tooltip: String, action: ()
     }
 }
 
-fun Transaction.statusText(): String = response?.code?.toString() ?: if (error != null) "ERR" else "···"
+fun Transaction.statusText(): String = RowContent.statusText(this)
 
 /** True while the request is in flight (request emitted, no response/error yet). */
-fun Transaction.isPending(): Boolean = response == null && error == null
+fun Transaction.isPending(): Boolean = RowContent.isPending(this)
 
 private const val SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 

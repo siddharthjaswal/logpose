@@ -73,6 +73,25 @@ data class Palette(
     val warnPlate: Color get() = blend(rgba(0xE3B34C, 0.17f), bg0)
     val dangerPlate: Color get() = blend(rgba(0xEC7A70, 0.17f), bg0)
 
+    /** The 17% tints the duplicate banner fills with (the plugin's `warnTint` / `dangerTint`). */
+    val warnTint: Color get() = rgba(0xE3B34C, 0.17f)
+    val dangerTint: Color get() = rgba(0xEC7A70, 0.17f)
+
+    /** Find-in-body highlight (the plugin's `findAll`). */
+    val findAll: Color get() = if (dark) rgba(0xE3B34C, 0.30f) else rgba(0xFFD54F, 0.55f)
+
+    /** [c] at [alpha]/255 — the plugin's `Theme.tint`. */
+    fun tint(c: Color, alpha: Int = 38): Color = c.copy(alpha = alpha / 255f)
+
+    /**
+     * [c] blended toward the window background, keeping [keep] of it — the plugin's `Theme.fade`,
+     * which is what a muted endpoint and a folded transaction are drawn with (0.34, 0.7 hovered).
+     */
+    fun fade(c: Color, keep: Float): Color {
+        fun mix(f: Float, t: Float) = (f * keep + t * (1 - keep)).coerceIn(0f, 1f)
+        return Color(mix(c.red, bg0.red), mix(c.green, bg0.green), mix(c.blue, bg0.blue))
+    }
+
     fun kind(kind: String): Color = when (kind) {
         Envelope.KIND_HTTP -> kindNet
         Envelope.KIND_FCM -> kindFcm

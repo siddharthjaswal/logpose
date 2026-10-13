@@ -232,6 +232,64 @@ object FilterPresentation {
         )
     }
 
+    /**
+     * Whether one event survives the whole filter — the structured [FilterState] plus the two
+     * narrowings that need the rest of the capture to decide (duplicate membership, and a
+     * correlation value that can hide in a body no row shows).
+     *
+     * One predicate, used by the list and by [relaxations] alike, so a loosener can't offer rows
+     * the list would then reject. [correlation] is null when no correlation chip is on.
+     */
+    fun passes(
+        event: LogEvent,
+        state: FilterState,
+        isDuplicate: (String) -> Boolean,
+        correlation: ((LogEvent) -> Boolean)?,
+    ): Boolean =
+        state.matches(event) &&
+            (!state.duplicatesOnly || isDuplicate(event.id)) &&
+            (correlation == null || correlation(event))
+
+    /**
+     * How many rows each active filter is costing, measured rather than guessed: the filter is run
+     * again with that one narrowing dropped, and the count is what the loosener would show.
+     *
+     * [passes] is the host's whole-filter predicate (normally [FilterState] + duplicates +
+     * correlation, see the overload above) with the correlation chip on or off; the host owns the
+     * correlation haystack, so it supplies that half.
+     */
+    fun relaxations(
+        all: List<LogEvent>,
+        state: FilterState,
+        correlationLabel: String?,
+        passes: (event: LogEvent, state: FilterState, withCorrelation: Boolean) -> Boolean,
+    ): List<Relaxation> = buildList {
+        val correlationOn = correlationLabel != null
+        fun candidate(id: FilterId, relaxed: FilterState, withCorrelation: Boolean) {
+            add(Relaxation(id, looseningLabel(id, correlationLabel), all.count { passes(it, relaxed, withCorrelation) }))
+        }
+        if (state.statusClasses.isNotEmpty()) candidate(FilterId.STATUS, state.copy(statusClasses = emptySet()), correlationOn)
+        if (state.methods.isNotEmpty()) candidate(FilterId.METHOD, state.copy(methods = emptySet()), correlationOn)
+        if (correlationOn) candidate(FilterId.CORRELATION, state, false)
+        if (state.hideNoise) candidate(FilterId.HIDE_NOISE, state.copy(hideNoise = false), correlationOn)
+        if (state.duplicatesOnly) candidate(FilterId.DUPES, state.copy(duplicatesOnly = false), correlationOn)
+        if (state.urlQuery.isNotBlank()) candidate(FilterId.SEARCH, state.copy(urlQuery = ""), correlationOn)
+        if (state.types.isNotEmpty()) candidate(FilterId.TYPES, state.copy(types = emptySet()), correlationOn)
+        // The DB opt-in is the one narrowing with no chip switched on, so without this the empty
+        // state can neither name it nor offer to lift it: a capture of nothing but db events, with
+        // no filter active at all, was told "several filters are narrowing at once" and handed a
+        // "Clear filters" button that changed nothing. Offered only when granting db actually
+        // brings rows back, so a genuinely different cause (a status filter, which hides every
+        // non-HTTP kind) keeps the blame.
+        if (EventType.DB !in state.types && all.any { it is LogEvent.Db }) {
+            val withDb = state.copy(types = state.types + EventType.DB)
+            val wouldShow = all.count { passes(it, withDb, correlationOn) }
+            if (wouldShow > 0) {
+                add(Relaxation(FilterId.DB_OPT_IN, looseningLabel(FilterId.DB_OPT_IN, correlationLabel), wouldShow))
+            }
+        }
+    }
+
     /** The label of the ghost button that drops one filter. */
     fun looseningLabel(id: FilterId, correlationLabel: String? = null): String = when (id) {
         FilterId.STATUS -> "Loosen status"

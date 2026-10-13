@@ -81,6 +81,7 @@ fun main(args: Array<String>) {
     }
     renderWireless(out, ::state)
     renderM3(out)
+    renderM4a(out)
     println("Rendered to ${out.absolutePath}")
 }
 

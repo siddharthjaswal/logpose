@@ -19,7 +19,12 @@ import kotlinx.serialization.json.booleanOrNull
  */
 object JsonTreeModel {
 
-    enum class Kind { OBJECT, ARRAY, STRING, NUMBER, BOOL, NULL }
+    /**
+     * [CLOSE] is the closing `}` / `]` of an expanded container, on its own line at the
+     * container's depth — so a long expanded object reads where it ends, the way the plugin's
+     * editor-backed tree shows it. Its [Line.text] is the brace.
+     */
+    enum class Kind { OBJECT, ARRAY, STRING, NUMBER, BOOL, NULL, CLOSE }
 
     data class Line(
         val path: String,
@@ -99,12 +104,18 @@ object JsonTreeModel {
             is JsonObject -> {
                 val open = path in expanded
                 out += Line(path, depth, key, Kind.OBJECT, "", node.size, open, embedded)
-                if (open) node.forEach { (k, v) -> visit(v, child(path, k), depth + 1, k, expanded, out) }
+                if (open) {
+                    node.forEach { (k, v) -> visit(v, child(path, k), depth + 1, k, expanded, out) }
+                    out += closing(path, depth, "}")
+                }
             }
             is JsonArray -> {
                 val open = path in expanded
                 out += Line(path, depth, key, Kind.ARRAY, "", node.size, open, embedded)
-                if (open) node.forEachIndexed { i, v -> visit(v, child(path, "[$i]"), depth + 1, "[$i]", expanded, out) }
+                if (open) {
+                    node.forEachIndexed { i, v -> visit(v, child(path, "[$i]"), depth + 1, "[$i]", expanded, out) }
+                    out += closing(path, depth, "]")
+                }
             }
             JsonNull -> out += Line(path, depth, key, Kind.NULL, "null", 0, false, false)
             is JsonPrimitive -> {
@@ -118,6 +129,12 @@ object JsonTreeModel {
             }
         }
     }
+
+    /** A closing brace's line: keyed off its container's path, so it is unique and stable. */
+    private fun closing(path: String, depth: Int, brace: String) =
+        Line("$path$SEP$CLOSE_MARK", depth, null, Kind.CLOSE, brace, 0, false, false)
+
+    private const val CLOSE_MARK = "\u0000"
 
     /** A set that contains every path — "expand all" without enumerating first. */
     private object AllExpanded : AbstractSet<String>() {

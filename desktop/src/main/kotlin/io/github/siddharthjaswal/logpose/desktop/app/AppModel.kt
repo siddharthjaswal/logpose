@@ -33,6 +33,21 @@ import io.github.siddharthjaswal.logpose.desktop.timeline.SessionMarks
 import io.github.siddharthjaswal.logpose.desktop.timeline.ShotMark
 import io.github.siddharthjaswal.logpose.desktop.wireless.AdbCommands
 import java.io.File
+import io.github.siddharthjaswal.logpose.analysis.RowCollapse
+import io.github.siddharthjaswal.logpose.desktop.timeline.MenuItem
+import io.github.siddharthjaswal.logpose.desktop.timeline.RowCells
+import io.github.siddharthjaswal.logpose.desktop.timeline.RowCommand
+import io.github.siddharthjaswal.logpose.desktop.timeline.RowMenu
+import io.github.siddharthjaswal.logpose.desktop.timeline.Selection
+import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineView
+import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineViews
+import io.github.siddharthjaswal.logpose.model.LogEvent
+import io.github.siddharthjaswal.logpose.model.Transaction
+import io.github.siddharthjaswal.logpose.presentation.FilterState
+import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 
 /** Where adb stands — the first thing the window decides. */
 sealed interface AdbStatus {
@@ -115,11 +130,139 @@ class AppModel(
 
     val share = ShareController(scope, writtenBy = "LogPose for Mac ${appVersion()}")
 
+    init {
+        // Mutes are a global view preference (the plugin keeps them application-wide too), kept in
+        // the app's settings file beside the remembered devices.
+        MutedEndpoints.store = settings
+    }
+
+    // ---- M4a: filter, folds, the derived timeline view -----------------------------------------
+
+    private val _filter = MutableStateFlow(FilterState())
+    /** The filter bar's state (without the haystack hook, which is added when the view is built). */
+    val filter: StateFlow<FilterState> = _filter.asStateFlow()
+
+    private val _expanded = MutableStateFlow<Set<String>>(emptySet())
+    /** Collapsed groups the tester opened, by `RowCollapse.Row.key` (anchor-based, so stable). */
+    val expanded: StateFlow<Set<String>> = _expanded.asStateFlow()
+
+    private val muteVersion = MutableStateFlow(0)
+
+    private val _pinnedOccurrence = MutableStateFlow<String?>(null)
+    /** The occurrence of a collapsed run the tester stepped to; null follows the latest. */
+    val pinnedOccurrence: StateFlow<String?> = _pinnedOccurrence.asStateFlow()
+
+    private val _view = MutableStateFlow(TimelineView.EMPTY)
+    /**
+     * The filtered, folded timeline — rebuilt off the UI thread whenever the coalesced snapshot,
+     * the filter, the expansion set or a mute changes. Still one rebuild per 200ms snapshot at most.
+     */
+    val view: StateFlow<TimelineView> = _view.asStateFlow()
+
+    private var viewJob: Job? = null
+    private var builds = 0L
+    /** Where the last plain or ⌘-click landed, so shift-click knows where a range starts. */
+    private var rangeAnchor: String? = null
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun launchView() {
+        if (viewJob != null) return
+        viewJob = scope.launch {
+            combine(feed.snapshots, _filter, _expanded, muteVersion) { snap, f, e, _ -> Triple(snap, f, e) }
+                .conflate()
+                .collect { (snap, f, e) ->
+                    val built = withContext(Dispatchers.Default) {
+                        // Body search reaches the CorrelationIndex haystack (bodies, not headers), for
+                        // queries of 3+ characters — FilterState's own rule, through its textOf hook.
+                        TimelineViews.build(snap.events, f.copy(textOf = session.correlation::textOf), e, session.store::sessionOf, ++builds)
+                    }
+                    _view.value = built
+                    val pruned = TimelineViews.prune(e, built)
+                    if (pruned.size != e.size) _expanded.value = pruned
+                }
+        }
+    }
+
+    fun setFilter(state: FilterState) { _filter.value = state.copy(textOf = null) }
+
+    fun toggleExpanded(key: String) {
+        _expanded.value = _expanded.value.let { if (key in it) it - key else it + key }
+    }
+
+    fun pinOccurrence(id: String) { _pinnedOccurrence.value = id }
+
+    /** Mutes or unmutes an endpoint (a settings-file write, so off the UI thread), then re-folds. */
+    fun toggleMute(tx: Transaction) {
+        scope.launch {
+            withContext(Dispatchers.IO) { MutedEndpoints.toggle(tx) }
+            muteVersion.value++
+        }
+    }
+
+    fun clearMutes() {
+        scope.launch {
+            withContext(Dispatchers.IO) { MutedEndpoints.clearAll() }
+            muteVersion.value++
+        }
+    }
+
+    /** ⌘-click on a row: its members join or leave the multi-selection. */
+    fun toggleSelectedRow(row: RowCollapse.Row) {
+        val next = Selection.toggle(_selectedIds.value, row)
+        _selectedIds.value = next
+        rangeAnchor = row.anchorId
+        _selectedEventId.value = if (row.memberIds.any { it in next }) row.anchorId else null
+    }
+
+    /** Shift-click: everything from the last clicked row to this one. */
+    fun selectRange(row: RowCollapse.Row) {
+        _selectedIds.value = Selection.range(_view.value.rows.map { it.row }, rangeAnchor ?: _selectedEventId.value, row)
+        _selectedEventId.value = row.anchorId
+    }
+
+    /** The event the detail card shows for [row]: its lead, or the occurrence the tester stepped to. */
+    fun shownEvent(row: RowCollapse.Row): LogEvent {
+        val group = row as? RowCollapse.Row.Group ?: return row.lead
+        val pin = _pinnedOccurrence.value?.takeIf { it in group.memberIds } ?: return row.lead
+        return TimelineViews.occurrencesOf(_view.value, group).firstOrNull { it.id == pin } ?: row.lead
+    }
+
+    /** The context menu for a row — or, on a multi-selection that includes it, Copy timeline. */
+    fun menuFor(cells: RowCells): List<MenuItem> {
+        val view = _view.value
+        val selected = _selectedIds.value
+        val row = cells.row
+        val selectedRows = view.rows.map { it.row }.filter { r -> r.memberIds.any { it in selected } }
+        if (selectedRows.size > 1 && row.memberIds.any { it in selected }) {
+            return listOf(RowMenu.timelineItem(RowMenu.timelineLines(selectedRows, view.filtered.associateBy { it.id })))
+        }
+        val expanded = _expanded.value
+        val collapse = TimelineViews.naturalGroupFor(view, row, expanded, session.store::sessionOf)?.let { it to (it.key in expanded) }
+        return RowMenu.items(row, shownEvent(row), collapse)
+    }
+
+    fun run(command: RowCommand) {
+        when (command) {
+            is RowCommand.Copy -> copy(command.text, command.toast)
+            is RowCommand.ToggleMute -> toggleMute(command.tx)
+            RowCommand.ClearMutes -> clearMutes()
+            is RowCommand.ToggleExpand -> toggleExpanded(command.groupKey)
+        }
+    }
+
+    /** Puts [text] on the macOS clipboard and says so under the toolbar. */
+    fun copy(text: String, toast: String) {
+        runCatching {
+            java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(java.awt.datatransfer.StringSelection(text), null)
+        }.onSuccess { say(toast) }.onFailure { say("Couldn't copy: ${it.message}", error = true) }
+    }
+
     /** Wi-Fi pairing, *Switch to wireless*, remembered phones and their auto-reconnect (M2). */
     val wireless = WirelessController(scope, settings, onConnected = { serial -> if (session.state.value !is SessionState.Running) _selectedSerial.value = serial })
 
     fun start() {
         if (feedJob == null) feedJob = feed.launchIn(scope)
+        launchView()
         locateAdb()
     }
 
@@ -221,16 +364,15 @@ class AppModel(
     }
 
     fun selectEvent(id: String?) {
+        // A different row has no occurrence to remember; the same row keeps its pin.
+        if (id != _selectedEventId.value) _pinnedOccurrence.value = null
         _selectedEventId.value = id
-        _selectedIds.value = if (id == null) emptySet() else setOf(id)
+        // The selected row is the selection Share's "only selected rows" exports: a collapsed row
+        // contributes every event it stands for.
+        _selectedIds.value = if (id == null) emptySet() else (_view.value.rowFor(id)?.row?.memberIds?.toSet() ?: setOf(id))
+        rangeAnchor = id
     }
 
-    /** ⌘-click: add a row to, or take it out of, the multi-row selection. */
-    fun toggleSelected(id: String) {
-        val next = _selectedIds.value.let { if (id in it) it - id else it + id }
-        _selectedIds.value = next
-        _selectedEventId.value = if (id in next) id else next.lastOrNull()
-    }
 
     // ---- bookmarks (⌘B) ---------------------------------------------------------------------
 
@@ -312,7 +454,11 @@ class AppModel(
             withContext(Dispatchers.IO) {
                 session.store.clear()
                 session.correlation.clear()
-                capture.replayInto(session.store) { session.correlation.warm(it) }
+                session.workerLifecycle.clear()
+                capture.replayInto(session.store) {
+                    session.correlation.warm(it)
+                    if (it is LogEvent.Worker) session.workerLifecycle.note(it, System.currentTimeMillis())
+                }
             }
             _marks.value = SessionMarks(
                 capture.bookmarks,

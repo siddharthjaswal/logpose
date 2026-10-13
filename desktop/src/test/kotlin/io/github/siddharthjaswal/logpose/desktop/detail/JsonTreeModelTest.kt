@@ -45,4 +45,15 @@ class JsonTreeModelTest {
         val paths = JsonTreeModel.flatten(tricky, JsonTreeModel.allContainers(tricky)).map { it.path }
         assertEquals(paths.size, paths.toSet().size)
     }
+
+    @Test fun `expanded containers close on their own line at their own depth`() {
+        val small = Json.parseToJsonElement("""{"a":[1,2],"b":{"c":true}}""")
+        val lines = JsonTreeModel.flatten(small, JsonTreeModel.allContainers(small))
+        val closes = lines.filter { it.kind == JsonTreeModel.Kind.CLOSE }
+        assertEquals(listOf("]" to 1, "}" to 1, "}" to 0), closes.map { it.text to it.depth })
+        assertEquals(JsonTreeModel.Kind.CLOSE, lines.last().kind)
+        assertEquals(lines.size, lines.map { it.path }.toSet().size)
+        // A folded container has no closing line.
+        assertTrue(JsonTreeModel.flatten(small, setOf(JsonTreeModel.ROOT)).none { it.kind == JsonTreeModel.Kind.CLOSE && it.depth == 1 })
+    }
 }

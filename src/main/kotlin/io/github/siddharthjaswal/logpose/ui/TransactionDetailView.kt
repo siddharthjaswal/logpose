@@ -3,15 +3,9 @@ package io.github.siddharthjaswal.logpose.ui
 import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.util.ui.JBUI
-import io.github.siddharthjaswal.logpose.model.Body
 import io.github.siddharthjaswal.logpose.model.Transaction
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.add
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Dimension
@@ -19,6 +13,7 @@ import java.awt.datatransfer.StringSelection
 import javax.swing.JComponent
 import javax.swing.JPanel
 import io.github.siddharthjaswal.logpose.presentation.CurlBuilder
+import io.github.siddharthjaswal.logpose.presentation.DetailContent
 
 /**
  * Detail pane: a hero Overview card on top, with Request and Response cards
@@ -49,7 +44,6 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
      */
     var onOccurrenceChanged: (String) -> Unit = {}
 
-    private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
     private val pretty = Json { prettyPrint = true; encodeDefaults = true }
     private var current: Transaction? = null
 
@@ -176,7 +170,7 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
                 response.setElement(responseJson(tx))
             }
             else -> {
-                response.setStatus(tx.response?.let { "${it.code} ${it.message}".trim() } ?: "—")
+                response.setStatus(DetailContent.responseStatus(tx))
                 response.setElement(responseJson(tx))
             }
         }
@@ -210,45 +204,9 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         Toast.show(overview, label)
     }
 
-    private fun requestJson(tx: Transaction): JsonElement = buildJsonObject {
-        put("method", tx.request.method)
-        put("url", tx.request.url)
-        if (tx.request.host.isNotBlank()) put("host", tx.request.host)
-        if (tx.request.path.isNotBlank()) put("path", tx.request.path)
-        if (showReqHeaders) put("headers", buildJsonObject { tx.request.headers.forEach { (k, v) -> put(k, v) } })
-        bodyElement(tx.request.body)?.let { put("body", it) }
-    }
+    // The composed trees are :core's (DetailContent), shared with the Mac app; the header toggles
+    // are this card's.
+    private fun requestJson(tx: Transaction): JsonElement = DetailContent.requestJson(tx, showReqHeaders)
 
-    private fun responseJson(tx: Transaction): JsonElement {
-        val r = tx.response ?: return buildJsonObject {
-            // No response object reached the interceptor. Surface the exception text (connection
-            // reset, timeout, cleartext-not-permitted, a downstream interceptor's throw, …) which
-            // the wire transaction carries in `error` — this is the most useful thing we can show.
-            if (tx.error != null) put("error", tx.error) else put("status", "(pending)")
-        }
-        return buildJsonObject {
-            put("code", r.code)
-            if (r.message.isNotBlank()) put("message", r.message)
-            if (showRespHeaders) put("headers", buildJsonObject { r.headers.forEach { (k, v) -> put(k, v) } })
-            bodyElement(r.body)?.let { put("body", it) }
-        }
-    }
-
-    private fun bodyElement(body: Body?): JsonElement? {
-        if (body == null) return null
-        body.parts?.let { parts ->
-            return buildJsonArray {
-                parts.forEach { p ->
-                    add(buildJsonObject {
-                        p.name?.let { put("name", it) }
-                        p.filename?.let { put("filename", it) }
-                        p.contentType?.let { put("contentType", it) }
-                        put("sizeBytes", p.sizeBytes)
-                    })
-                }
-            }
-        }
-        val text = body.text ?: return JsonPrimitive("(empty)")
-        return runCatching { lenient.parseToJsonElement(text) }.getOrNull() ?: JsonPrimitive(text)
-    }
+    private fun responseJson(tx: Transaction): JsonElement = DetailContent.responseJson(tx, showRespHeaders)
 }

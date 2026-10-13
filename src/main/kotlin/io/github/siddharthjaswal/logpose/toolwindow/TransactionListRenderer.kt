@@ -4,7 +4,6 @@ import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.model.Envelope
-import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
@@ -441,29 +440,22 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         fun shade(c: Color): Color =
             if (facts.failed) c else Theme.fade(c, if (hovered) 0.7f else 0.34f)
 
-        val tail = buildString {
-            append(" · ").append(facts.statements)
-            append(if (facts.statements == 1) " statement" else " statements")
-            // Room's callback carries no per-statement timing, so a true Σ would print `0ms` on
-            // almost every capture. This is the wall span BEGIN → END, which is the number a reader
-            // actually wants, and it is omitted rather than faked when the clocks can't give it.
-            facts.totalDurationMillis?.let { append(" · ").append(formatDuration(it)) }
-        }
+        // The words (and the ✓-only-on-evidence rule) are :core's, shared with the Mac app.
+        val fold = RowContent.txnFold(facts)
         txnText.runs = buildList {
-            add(RunLabel.Run("transaction", LABEL_12_5, shade(Theme.textDim)))
-            when {
-                facts.failed -> {
+            add(RunLabel.Run(fold.word, LABEL_12_5, shade(Theme.textDim)))
+            when (fold.mark) {
+                RowContent.TxnMark.FAILED -> {
                     add(RunLabel.Run(" ", LABEL_12_5, shade(Theme.textDim)))
                     add(RunLabel.Run("✕", LABEL_12_5_BOLD, Theme.danger))
                 }
-                // A ✓ is only painted where one was actually reported. Integrations that never emit
-                // `TRANSACTION SUCCESSFUL` get no glyph rather than an asserted success.
-                facts.succeeded -> {
+                RowContent.TxnMark.SUCCEEDED -> {
                     add(RunLabel.Run(" ", LABEL_12_5, shade(Theme.textDim)))
                     add(RunLabel.Run("✓", LABEL_12_5, shade(Theme.textDim)))
                 }
+                null -> Unit
             }
-            add(RunLabel.Run(tail, MONO_11, shade(Theme.textMuted)))
+            add(RunLabel.Run(fold.tail, MONO_11, shade(Theme.textMuted)))
         }
 
         // The counts are in the text, and a fold is not a single event with a size or a clock.
@@ -586,7 +578,8 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         // to a semantic colour would make a boring poll look like a warning.
         countTag.isVisible = group != null
         countGap.isVisible = group != null
-        if (group != null) countTag.set("×${group.facts.count}", shade(Theme.textDim), null, stroke = shade(Theme.borderStrong))
+        val poll = group?.let(RowContent::pollFold)
+        if (poll != null) countTag.set(poll.count, shade(Theme.textDim), null, stroke = shade(Theme.borderStrong))
         else countTag.set("", Theme.text, null)
 
         // MOCK is the one solid-accent fill a row may carry: it says LogPose itself caused this
@@ -631,15 +624,11 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         // for thirty requests names none of them.
         val armed = actionsArmed(index, isSelected) && group == null
         when {
-            group != null -> {
+            poll != null -> {
                 // The latest occurrence's size, and the run's median duration — a time some call in
                 // this run really took, prefixed `~` so it never reads as a single measurement.
-                val size = value.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let { Theme.humanSize(it) }
-                sizeCell.meta(size.orEmpty(), shade(Theme.textMuted))
-                durationCell.meta(
-                    group.facts.medianDurationMillis?.let { "~${it}ms" }.orEmpty(),
-                    shade(Theme.textMuted),
-                )
+                sizeCell.meta(poll.size, shade(Theme.textMuted))
+                durationCell.meta(poll.median, shade(Theme.textMuted))
             }
             pending -> {
                 sizeCell.meta("", shade(Theme.textMuted))
@@ -673,9 +662,10 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         // nothing about how urgent the row is, so all three are neutral. The FCM hue is already
         // stated once, by the gutter glyph. It leads the summary rather than occupying a column,
         // because there is nothing for it to line up with.
-        fcmTag.set(fcmKind(msg), Theme.textDim, Theme.bg2)
+        val content = RowContent.fcm(event)
+        fcmTag.set(content.label, Theme.textDim, Theme.bg2)
 
-        fcmText.text = fcmSummary(msg)
+        fcmText.text = content.summary
         fcmText.foreground = Theme.text
 
         // A push LogPose itself delivered is marked, always — the same trust rule and the same
@@ -687,12 +677,11 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         else injTag.set("", Theme.text, null)
 
         // "size" column: number of data keys (data messages carry the payload of interest).
-        val keys = msg.data.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "key" else "keys"}" }
-        fcmCount.meta(keys.orEmpty(), Theme.textMuted)
+        fcmCount.meta(content.keys, Theme.textMuted)
 
-        // An injected push has no device receive-time of its own, so fall back to the envelope's
-        // clock rather than leaving the column blank.
-        val at = msg.receivedAtMillis.takeIf { it > 0 } ?: event.timestampMillis
+        // An injected push has no device receive-time of its own, so this falls back to the
+        // envelope's clock rather than leaving the column blank (RowContent.FcmRow.atMillis).
+        val at = content.atMillis
         if (actionsArmed(index, isSelected) && canGroup(event)) {
             fcmTime.action(FLOW)
         } else {
@@ -701,31 +690,6 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
 
         return fcmRow
     }
-
-    private fun fcmKind(msg: FcmMessage): String = when {
-        msg.event == "token" -> "TOKEN"
-        msg.notification != null -> "NOTIF"
-        else -> "DATA"
-    }
-
-    private fun fcmSummary(msg: FcmMessage): String = when {
-        msg.event == "token" -> "Registration token refreshed"
-        msg.notification != null ->
-            msg.notification?.title?.takeIf { it.isNotBlank() }
-                ?: msg.notification?.body?.takeIf { it.isNotBlank() }
-                ?: "(notification)"
-        // A data message's most meaningful label is its channel (apps commonly carry one in the
-        // data map); the raw `from` is just an FCM sender/project number, so it's the last resort.
-        else -> fcmChannel(msg)
-            ?: msg.collapseKey?.takeIf { it.isNotBlank() }
-            ?: msg.from?.takeIf { it.isNotBlank() }
-            ?: "(data message)"
-    }
-
-    /** The channel a data message rides on, if the app put one in the data map. */
-    private fun fcmChannel(msg: FcmMessage): String? =
-        msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
-            ?.value?.takeIf { it.isNotBlank() }
 
     /**
      * Whether a row paints its action buttons: the hovered one, and the selected one.

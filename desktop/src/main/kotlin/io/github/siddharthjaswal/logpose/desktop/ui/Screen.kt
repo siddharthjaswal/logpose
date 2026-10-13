@@ -59,6 +59,17 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.foundation.DarkDefaultContextMenuRepresentation
+import androidx.compose.foundation.LightDefaultContextMenuRepresentation
+import androidx.compose.foundation.LocalContextMenuRepresentation
+import androidx.compose.runtime.CompositionLocalProvider
+import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
+import io.github.siddharthjaswal.logpose.desktop.detail.DetailModel
+import io.github.siddharthjaswal.logpose.desktop.timeline.FilterEdits
+import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineView
+import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineViews
+import io.github.siddharthjaswal.logpose.model.LogEvent
+import io.github.siddharthjaswal.logpose.presentation.FilterState
 
 /** Everything the window paints, as plain values — so the off-screen renders use the real screen. */
 data class ScreenState(
@@ -80,6 +91,18 @@ data class ScreenState(
     val screenshotBusy: Boolean = false,
     val canBookmark: Boolean = session is SessionState.Running,
     val canShare: Boolean = viewing != null || snapshot.events.isNotEmpty(),
+    // M4a — parity
+    val filter: FilterState = FilterState(),
+    /** The folded, filtered timeline; null builds it here from [snapshot] (the renders' path). */
+    val view: TimelineView? = null,
+    val expanded: Set<String> = emptySet(),
+    val pinnedOccurrence: String? = null,
+    /** Host-clock age of an event — the live count-up's source (`EventStore.elapsedMillis`). */
+    val elapsedOf: (String) -> Long? = { null },
+    val transitions: (LogEvent.Worker) -> List<WorkerLifecycle.Transition> = { emptyList() },
+    /** Render seeds: open the Filters popover / a find-in-body query on first composition. */
+    val filterPopover: Boolean = false,
+    val detailFind: String? = null,
 )
 
 class ScreenActions(
@@ -91,7 +114,6 @@ class ScreenActions(
     val onClear: () -> Unit = {},
     val onSelectEvent: (String?) -> Unit = {},
     val wireless: WirelessActions = WirelessActions(),
-    val onToggleSelect: (String) -> Unit = {},
     val onBookmark: () -> Unit = {},
     /** Enter passes the note; Esc passes null (the marker is kept, without a note). */
     val onCommitBookmark: (String?) -> Unit = {},
@@ -101,10 +123,21 @@ class ScreenActions(
     val onShare: () -> Unit = {},
     val onDismissNotice: () -> Unit = {},
     val share: ShareActions = ShareActions(),
+    val onFilter: (FilterState) -> Unit = {},
+    val timeline: TimelineActions = TimelineActions(onSelect = { onSelectEvent(it) }),
+    val detail: DetailActions = DetailActions(onClose = { onSelectEvent(null) }),
 )
 
 @Composable
 fun LogPoseScreen(state: ScreenState, actions: ScreenActions) {
+    val p = LocalPalette.current
+    CompositionLocalProvider(
+        LocalContextMenuRepresentation provides if (p.dark) DarkDefaultContextMenuRepresentation else LightDefaultContextMenuRepresentation,
+    ) { Screen(state, actions) }
+}
+
+@Composable
+private fun Screen(state: ScreenState, actions: ScreenActions) {
     val p = LocalPalette.current
     Box(Modifier.fillMaxSize().background(p.bg0)) {
         if (state.adb !is AdbStatus.Ready) {
@@ -120,21 +153,45 @@ fun LogPoseScreen(state: ScreenState, actions: ScreenActions) {
                 state.viewing?.let { ViewingBanner(it, actions) }
                 state.pendingBookmark?.let { BookmarkPrompt(it, state.marks.bookmarks.size + 1, actions) }
                 state.notice?.let { NoticeStrip(it, actions) }
-                val selected = state.selectedEventId?.let { id -> state.snapshot.events.firstOrNull { it.id == id } }
+                val view = state.view ?: remember(state.snapshot.version, state.filter, state.expanded) {
+                    TimelineViews.build(state.snapshot.events, state.filter, state.expanded, version = state.snapshot.version)
+                }
+                val showTimeline = state.placeholder == Placeholder.None || state.viewing != null
+                val target = DetailModel.resolve(view, state.selectedEventId, state.pinnedOccurrence) { id ->
+                    state.snapshot.events.firstOrNull { it.id == id }
+                }
                 Row(Modifier.fillMaxSize()) {
-                    Box(Modifier.weight(1f).fillMaxHeight()) {
-                        if (state.placeholder == Placeholder.None || state.viewing != null) {
-                            Timeline(
-                                state.snapshot, state.selectedEventId, { actions.onSelectEvent(it) }, Modifier.fillMaxSize(),
-                                marks = state.marks, selectedIds = state.selectedIds, onToggleSelect = actions.onToggleSelect,
+                    // The bar sits over the list only, as in the plugin (the list half of its
+                    // splitter) — so its narrow layout follows the list's width, not the window's.
+                    Column(Modifier.weight(1f).fillMaxHeight()) {
+                    if (showTimeline) {
+                        FilterBar(state.filter, view, actions.onFilter, popoverInitiallyOpen = state.filterPopover)
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
+                    }
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        val empty = view.empty
+                        when {
+                            !showTimeline -> EmptyState(state.placeholder)
+                            empty != null -> FilteredToNothing(
+                                empty,
+                                onClearAll = { actions.onFilter(FilterEdits.clearAll(state.filter)) },
+                                onLoosen = { id -> actions.onFilter(FilterEdits.loosen(state.filter, id)) },
                             )
-                        } else {
-                            EmptyState(state.placeholder)
+                            else -> Timeline(
+                                view, state.selectedEventId, Modifier.fillMaxSize(),
+                                marks = state.marks, selectedIds = state.selectedIds, elapsedOf = state.elapsedOf,
+                                actions = actions.timeline,
+                            )
                         }
                     }
-                    if (selected != null) {
+                    }
+                    if (target != null) {
                         Box(Modifier.width(1.dp).fillMaxHeight().background(p.borderSubtle))
-                        DetailPane(selected, onClose = { actions.onSelectEvent(null) }, Modifier.width(460.dp).fillMaxHeight())
+                        DetailPane(
+                            target, { view.duplicateMarks[it.id] }, Modifier.width(470.dp).fillMaxHeight(),
+                            elapsedOf = state.elapsedOf, transitions = state.transitions, actions = actions.detail,
+                            initialFind = state.detailFind,
+                        )
                     }
                 }
             }

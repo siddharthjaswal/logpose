@@ -28,6 +28,8 @@ import io.github.siddharthjaswal.logpose.desktop.ui.WirelessActions
 import kotlinx.coroutines.delay
 import io.github.siddharthjaswal.logpose.capture.CaptureReader
 import io.github.siddharthjaswal.logpose.desktop.ui.ShareActions
+import io.github.siddharthjaswal.logpose.desktop.ui.DetailActions
+import io.github.siddharthjaswal.logpose.desktop.ui.TimelineActions
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isMetaPressed
@@ -113,6 +115,10 @@ private fun App(model: AppModel, adb: AdbStatus) {
     val share by model.share.ui.collectAsState()
     val selectedIds by model.selectedIds.collectAsState()
     val screenshotBusy by model.screenshotBusy.collectAsState()
+    val filter by model.filter.collectAsState()
+    val view by model.view.collectAsState()
+    val expanded by model.expanded.collectAsState()
+    val pinned by model.pinnedOccurrence.collectAsState()
     // A one-second clock, only while a session runs: it is what lets "no LogPose events" appear
     // 20 s in without any event arriving to trigger a recomposition.
     val now by produceState(System.currentTimeMillis(), session) {
@@ -136,6 +142,9 @@ private fun App(model: AppModel, adb: AdbStatus) {
             marks = marks, viewing = viewing, pendingBookmark = pendingBookmark, notice = notice, share = share,
             selectedIds = selectedIds, screenshotBusy = screenshotBusy,
             canBookmark = session is SessionState.Running, canShare = viewing != null || session !is SessionState.Idle || snapshot.events.isNotEmpty(),
+            filter = filter, view = view, expanded = expanded, pinnedOccurrence = pinned,
+            elapsedOf = { id -> model.session.store.elapsedMillis(id).takeIf { it > 0 } },
+            transitions = { w -> model.session.workerLifecycle.transitions(model.session.workerLifecycle.keyOf(w)) },
         ),
         ScreenActions(
             onDownloadAdb = model::downloadPlatformTools,
@@ -157,7 +166,6 @@ private fun App(model: AppModel, adb: AdbStatus) {
                 onForget = { id -> wireless.remembered.firstOrNull { it.id == id }?.let { model.wireless.forget(it, devices) } },
                 onDismissLegacy = model.wireless::dismissLegacyStatus,
             ),
-            onToggleSelect = model::toggleSelected,
             onBookmark = model::beginBookmark,
             onCommitBookmark = model::commitBookmark,
             onScreenshot = model::takeScreenshot,
@@ -165,6 +173,20 @@ private fun App(model: AppModel, adb: AdbStatus) {
             onBackToLive = model::backToLive,
             onShare = model::openShare,
             onDismissNotice = model::dismissNotice,
+            onFilter = model::setFilter,
+            timeline = TimelineActions(
+                onSelect = model::selectEvent,
+                onToggleSelect = model::toggleSelectedRow,
+                onSelectRange = model::selectRange,
+                onToggleExpand = model::toggleExpanded,
+                onCommand = model::run,
+                menuFor = model::menuFor,
+            ),
+            detail = DetailActions(
+                onClose = { model.selectEvent(null) },
+                onStep = model::pinOccurrence,
+                onCopy = model::copy,
+            ),
             share = ShareActions(
                 onClose = model.share::close,
                 onOptions = model.share::setOptions,

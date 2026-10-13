@@ -20,8 +20,10 @@ data class SessionMarks(val bookmarks: List<Bookmark> = emptyList(), val shots: 
 sealed interface TimelineItem {
     val key: String
 
-    data class Event(val row: RowModel) : TimelineItem {
-        override val key: String get() = row.event.id
+    /** A row of the folded list; keyed by [io.github.siddharthjaswal.logpose.analysis.RowCollapse.Row.key],
+     *  which embeds a group's anchor id, so expansion and selection survive every snapshot. */
+    data class Event(val cells: RowCells) : TimelineItem {
+        override val key: String get() = cells.row.key
     }
 
     /** [number] is 1-based in the order bookmarks were made — what the share sheet calls them. */
@@ -44,7 +46,7 @@ object TimelineItems {
      *
      * Marker times are the Mac's clock and event times the phone's; they are compared directly.
      */
-    fun merge(rows: List<RowModel>, marks: SessionMarks): List<TimelineItem> {
+    fun merge(rows: List<RowCells>, marks: SessionMarks): List<TimelineItem> {
         if (marks.bookmarks.isEmpty() && marks.shots.isEmpty()) return rows.map { TimelineItem.Event(it) }
         val pending = ArrayDeque(
             (marks.bookmarks.mapIndexed { i, b -> b.atMillis to TimelineItem.Mark(b, i + 1) } +
@@ -53,7 +55,7 @@ object TimelineItems {
         )
         val out = ArrayList<TimelineItem>(rows.size + pending.size)
         for (row in rows) {
-            while (pending.isNotEmpty() && pending.first().first < row.event.timestampMillis) out.add(pending.removeFirst().second)
+            while (pending.isNotEmpty() && pending.first().first < row.row.lead.timestampMillis) out.add(pending.removeFirst().second)
             out.add(TimelineItem.Event(row))
         }
         pending.forEach { out.add(it.second) }

@@ -8,10 +8,10 @@ import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
+import io.github.siddharthjaswal.logpose.presentation.DetailContent
+import io.github.siddharthjaswal.logpose.presentation.RowContent
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Dimension
@@ -52,8 +52,7 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
         layout = BoxLayout(this, BoxLayout.X_AXIS)
     }
     /** Says out loud that LogPose delivered this push — the detail half of the row's INJ pill. */
-    private val injectedBanner = JBLabel("⚡  Injected by LogPose — delivered into the app on your " +
-        "behalf, not by Firebase").apply {
+    private val injectedBanner = JBLabel(DetailContent.INJECTED_BANNER).apply {
         // Intervention, not kind: kind hues are confined to the glyph, the TYPE chip, the kind
         // pill and waterfall marks, and this banner is the detail half of the row's INJ pill.
         foreground = Theme.intervention
@@ -119,31 +118,18 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
 
         val kind = kindOf(msg)
         kindPill.set(kind, Theme.textDim, Theme.statusNeutralBg)
-        eventLabel.text = if (msg.event == "token") "Token refresh" else "Push message"
-        summary.text = summaryOf(msg)
+        eventLabel.text = DetailContent.fcmEventLabel(msg)
+        summary.text = DetailContent.fcmSummary(msg)
         injectedBanner.isVisible = msg.injected
 
         chips.removeAll()
-        val receivedAt = msg.receivedAtMillis.takeIf { it > 0 } ?: envelope?.at ?: 0
-        val items = buildList {
-            fcmChannel(msg)?.let { add(StatChip("channel", ellipsize(it), tip = it)) }
-            if (receivedAt > 0) add(StatChip("at", timeFmt.format(Date(receivedAt))))
-            msg.sentTimeMillis?.takeIf { it > 0 }?.let { add(StatChip("sent", timeFmt.format(Date(it)))) }
-            msg.from?.takeIf { it.isNotBlank() }?.let { add(StatChip("from", ellipsize(it), tip = it)) }
-            msg.priority?.let { add(StatChip("priority", priorityName(it))) }
-            msg.ttlSeconds?.let { add(StatChip("ttl", "${it}s")) }
-            msg.collapseKey?.takeIf { it.isNotBlank() }?.let { add(StatChip("collapse", ellipsize(it), tip = it)) }
-            if (msg.data.isNotEmpty()) add(StatChip("data", "${msg.data.size}"))
-            // The trace chip is also the way into the flow this push started.
-            envelope?.traceId?.takeIf { it.isNotBlank() }?.let { trace ->
-                add(
-                    StatChip("trace", ellipsize(trace))
-                        .clickable("$trace — open the waterfall for this flow") { onOpenTrace(trace) },
-                )
-            }
-            envelope?.parentId?.takeIf { it.isNotBlank() }?.let { add(StatChip("parent", ellipsize(it), tip = it)) }
-            val idShown = msg.messageId?.takeIf { it.isNotBlank() } ?: msg.id
-            add(StatChip("id", ellipsize(idShown), tip = idShown))
+        // The chips are :core's (DetailContent), shared with the Mac app. The trace chip is also
+        // the way into the flow this push started.
+        val items = DetailContent.fcmChips(msg, envelope).map { chip ->
+            val trace = chip.traceLink
+            if (trace != null) StatChip(chip.caption, chip.value, chip.tip)
+                .clickable("$trace — open the waterfall for this flow") { onOpenTrace(trace) }
+            else StatChip(chip.caption, chip.value, chip.tip)
         }
         items.forEachIndexed { i, c ->
             if (i > 0) chips.add(Box.createHorizontalStrut(JBUI.scale(8)))
@@ -160,47 +146,10 @@ class FcmDetailView(project: Project) : JPanel(BorderLayout()) {
      * timeline row shows), because which of the three a push is says nothing about how much it
      * matters; the FCM hue is stated once, by the [typeIcon] glyph beside this pill.
      */
-    private fun kindOf(msg: FcmMessage): String = when {
-        msg.event == "token" -> "TOKEN"
-        msg.notification != null -> "NOTIF"
-        else -> "DATA"
-    }
-
-    private fun summaryOf(msg: FcmMessage): String = when {
-        msg.event == "token" -> msg.token ?: "(token)"
-        msg.notification != null -> listOfNotNull(
-            msg.notification?.title?.takeIf { it.isNotBlank() },
-            msg.notification?.body?.takeIf { it.isNotBlank() },
-        ).joinToString("\n").ifBlank { "(notification)" }
-        else -> fcmChannel(msg)
-            ?: msg.from?.takeIf { it.isNotBlank() }?.let { "from $it" }
-            ?: "(data message)"
-    }
-
-    /** The channel a data message rides on, if the app put one in the data map. */
-    private fun fcmChannel(msg: FcmMessage): String? =
-        msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
-            ?.value?.takeIf { it.isNotBlank() }
+    private fun kindOf(msg: FcmMessage): String = RowContent.fcmLabel(msg)
 
     /** A composed view of the event for the tree: notification, data map, and token. */
-    private fun payloadJson(msg: FcmMessage): JsonElement = buildJsonObject {
-        put("event", msg.event)
-        msg.notification?.let { n ->
-            put("notification", buildJsonObject {
-                n.title?.let { put("title", it) }
-                n.body?.let { put("body", it) }
-                n.channelId?.let { put("channelId", it) }
-                n.clickAction?.let { put("clickAction", it) }
-                n.imageUrl?.let { put("imageUrl", it) }
-            })
-        }
-        if (msg.data.isNotEmpty()) put("data", buildJsonObject { msg.data.forEach { (k, v) -> put(k, v) } })
-        msg.token?.let { put("token", it) }
-    }
-
-    private fun priorityName(p: Int): String = when (p) {
-        1 -> "high"; 2 -> "normal"; else -> p.toString()
-    }
+    private fun payloadJson(msg: FcmMessage): JsonElement = DetailContent.fcmPayloadJson(msg)
 
     private fun ellipsize(s: String, max: Int = 16): String =
         if (s.length <= max) s else s.take(max - 1) + "…"

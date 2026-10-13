@@ -1,11 +1,14 @@
 package io.github.siddharthjaswal.logpose.presentation
 
+import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
 import io.github.siddharthjaswal.logpose.model.Badge
 import io.github.siddharthjaswal.logpose.model.DbQuery
 import io.github.siddharthjaswal.logpose.model.Envelope
+import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.GenericEvent
 import io.github.siddharthjaswal.logpose.model.LogEvent
+import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.model.WorkerEvent
 
 /**
@@ -313,6 +316,214 @@ object RowContent {
         // Index into the *filtered* badges: an app event whose first badge echoes its kind used to
         // have its real fact silently shifted out of this cell.
         else -> badges.getOrNull(1)?.text.orEmpty()
+    }
+
+    // ---- http ------------------------------------------------------------------------------------
+
+    private val READ_METHODS = setOf("GET", "HEAD", "OPTIONS")
+
+    /**
+     * Whether [method] only reads. Reads render regular weight in `methodRead`; everything else —
+     * including verbs LogPose has never heard of — renders bold in `methodWrite`, because an
+     * unrecognised verb is far more likely to change server state than not.
+     */
+    fun isReadMethod(method: String): Boolean = method.trim().uppercase() in READ_METHODS
+
+    /** True while the request is in flight (request emitted, no response/error yet). */
+    fun isPending(tx: Transaction): Boolean = tx.response == null && tx.error == null
+
+    /** The status pill's text: the code, `ERR` for a call that threw, `···` while in flight. */
+    fun statusText(tx: Transaction): String = tx.response?.code?.toString() ?: if (tx.error != null) "ERR" else "···"
+
+    fun humanSize(bytes: Long): String = when {
+        bytes < 0 -> "—"
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+        else -> "%.1f MB".format(bytes / (1024.0 * 1024))
+    }
+
+    /**
+     * An HTTP row's cells. The status *colour* is the host's (`statusColor(code, error)` over the
+     * same two fields); everything that is text is decided here.
+     *
+     * [size] and [duration] are what a finished row prints; a pending row's size cell is blank and
+     * its time cell is the host's live count-up, so both come back empty for it.
+     */
+    data class HttpRow(
+        val method: String,
+        /** Read vs write is weight — the method carries no hue. */
+        val methodWeight: Weight,
+        val status: String,
+        val statusCode: Int?,
+        val error: String?,
+        val pending: Boolean,
+        val path: String,
+        val mocked: Boolean,
+        val size: String,
+        val duration: String,
+    )
+
+    fun http(tx: Transaction): HttpRow {
+        val pending = isPending(tx)
+        return HttpRow(
+            method = tx.request.method,
+            methodWeight = if (isReadMethod(tx.request.method)) Weight.REGULAR else Weight.BOLD,
+            status = statusText(tx),
+            statusCode = tx.response?.code,
+            error = tx.error,
+            pending = pending,
+            path = tx.request.path.ifBlank { tx.request.url },
+            mocked = tx.mocked,
+            size = if (pending) "" else responseSize(tx),
+            // HTTP keeps whole milliseconds (`2310ms`), unlike [shortDuration]: a request's time is
+            // read against its neighbours' in one column, and the plugin has always printed it so.
+            duration = if (pending) "" else tx.durationMillis?.let { "${it}ms" }.orEmpty(),
+        )
+    }
+
+    /** The response body's size, or blank when the device did not report one. */
+    fun responseSize(tx: Transaction): String =
+        tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let(::humanSize).orEmpty()
+
+    /** A pending call's live count-up, from the host's elapsed clock. */
+    fun liveMillis(elapsedMillis: Long): String = "${elapsedMillis}ms"
+
+    // ---- fcm -------------------------------------------------------------------------------------
+
+    data class FcmRow(
+        /** TOKEN / NOTIF / DATA — a *label*, not a severity, so it renders neutral. */
+        val label: String,
+        val summary: String,
+        /** A push LogPose itself delivered: the solid-intervention INJ pill. */
+        val injected: Boolean,
+        /** "size" column: the number of data keys (data messages carry the payload of interest). */
+        val keys: String,
+        /**
+         * When it arrived. An injected push has no device receive-time of its own, so this falls
+         * back to the envelope's clock rather than leaving the column blank.
+         */
+        val atMillis: Long,
+    )
+
+    fun fcm(event: LogEvent.Fcm): FcmRow {
+        val msg = event.msg
+        return FcmRow(
+            label = fcmLabel(msg),
+            summary = fcmSummary(msg),
+            injected = msg.injected,
+            keys = msg.data.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "key" else "keys"}" }.orEmpty(),
+            atMillis = msg.receivedAtMillis.takeIf { it > 0 } ?: event.timestampMillis,
+        )
+    }
+
+    fun fcmLabel(msg: FcmMessage): String = when {
+        msg.event == "token" -> "TOKEN"
+        msg.notification != null -> "NOTIF"
+        else -> "DATA"
+    }
+
+    fun fcmSummary(msg: FcmMessage): String = when {
+        msg.event == "token" -> "Registration token refreshed"
+        msg.notification != null ->
+            msg.notification?.title?.takeIf { it.isNotBlank() }
+                ?: msg.notification?.body?.takeIf { it.isNotBlank() }
+                ?: "(notification)"
+        // A data message's most meaningful label is its channel (apps commonly carry one in the
+        // data map); the raw `from` is just an FCM sender/project number, so it's the last resort.
+        else -> fcmChannel(msg)
+            ?: msg.collapseKey?.takeIf { it.isNotBlank() }
+            ?: msg.from?.takeIf { it.isNotBlank() }
+            ?: "(data message)"
+    }
+
+    /** The channel a data message rides on, if the app put one in the data map. */
+    fun fcmChannel(msg: FcmMessage): String? =
+        msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }
+            ?.value?.takeIf { it.isNotBlank() }
+
+    // ---- folds -----------------------------------------------------------------------------------
+
+    /**
+     * What a collapsed polling run paints in place of one call's cells: the neutral outlined `×N`
+     * pill, the **latest** occurrence's size, and the run's `~median` duration — a time some call
+     * in this run really took, prefixed `~` so it never reads as a single measurement.
+     */
+    data class PollFold(val count: String, val size: String, val median: String)
+
+    fun pollFold(group: RowCollapse.Row.Group): PollFold {
+        val tx = (group.lead as? LogEvent.Http)?.tx
+        return PollFold(
+            count = "×${group.facts.count}",
+            size = tx?.let(::responseSize).orEmpty(),
+            median = group.facts.medianDurationMillis?.let { "~${it}ms" }.orEmpty(),
+        )
+    }
+
+    /** The one glyph a folded transaction may carry — painted only on positive evidence. */
+    enum class TxnMark { SUCCEEDED, FAILED }
+
+    /**
+     * `transaction ✓ · 4 statements · 128ms` — a whole transaction's ceremony as one 26px line.
+     *
+     * [faded] is false only for a failed transaction: failure is not noise, so it is drawn at full
+     * strength with a `✕` in danger; everything else takes the muted-endpoint fade.
+     */
+    data class TxnFold(val word: String, val mark: TxnMark?, val tail: String, val faded: Boolean)
+
+    fun txnFold(facts: RowCollapse.Facts): TxnFold = TxnFold(
+        word = "transaction",
+        mark = when {
+            facts.failed -> TxnMark.FAILED
+            // A ✓ is only painted where one was actually reported. Integrations that never emit
+            // `TRANSACTION SUCCESSFUL` get no glyph rather than an asserted success.
+            facts.succeeded -> TxnMark.SUCCEEDED
+            else -> null
+        },
+        tail = buildString {
+            append(" · ").append(facts.statements)
+            append(if (facts.statements == 1) " statement" else " statements")
+            // Room's callback carries no per-statement timing, so a true Σ would print `0ms` on
+            // almost every capture. This is the wall span BEGIN → END, which is the number a reader
+            // actually wants, and it is omitted rather than faked when the clocks can't give it.
+            facts.totalDurationMillis?.let { append(" · ").append(shortDuration(it)) }
+        },
+        faded = !facts.failed,
+    )
+
+    /**
+     * A hover hint as structure: a bold lead, the rest of its line, then further lines. Hosts
+     * render it in their own markup (HTML in Swing, styled text in Compose) — the words are here.
+     */
+    data class Hint(val bold: String, val rest: String, val lines: List<String>)
+
+    /**
+     * What a collapsed row says when you hover it.
+     *
+     * The row itself has no space for a time range, and — because it sits at its **first** member's
+     * position while showing the latest occurrence's content — no way to state one honestly. This is
+     * also the only place the filter-relativity can be said out loud: the pass runs over the
+     * filtered list, so `×30` means thirty rows *matching the current filter*, not thirty calls the
+     * app necessarily made.
+     */
+    fun groupHint(group: RowCollapse.Row.Group, clock: (Long) -> String): Hint {
+        val facts = group.facts
+        return when (group.groupKind) {
+            RowCollapse.GroupKind.NET_POLL -> {
+                val span = facts.latestAtMillis.takeIf { it > 0 }?.let { "latest ${clock(it)}" }.orEmpty()
+                val timing = buildString {
+                    facts.medianDurationMillis?.let { append("median ${it}ms") }
+                    if (span.isNotEmpty()) { if (facts.medianDurationMillis != null) append(" · "); append(span) }
+                }
+                Hint(
+                    "${facts.count} calls", " matching the current filter",
+                    listOf(KindPresenter.rowLabel(group.lead), timing, "Double-click to expand"),
+                )
+            }
+            RowCollapse.GroupKind.DB_TXN -> Hint(
+                "Transaction", " — ${facts.count} ceremony rows folded",
+                listOf("${facts.statements} wrapped statement(s), still listed individually", "Double-click to expand"),
+            )
+        }
     }
 
     // ---- formatting ------------------------------------------------------------------------------

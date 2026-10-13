@@ -1,161 +1,106 @@
 package io.github.siddharthjaswal.logpose.desktop.timeline
 
-import io.github.siddharthjaswal.logpose.model.FcmMessage
+import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.RowCollapse
+import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
-import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.presentation.RowContent
+import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
 import java.text.SimpleDateFormat
 import java.util.Date
 
 /**
- * What a timeline row says, per kind — the painter looks answers up here rather than computing them.
+ * What one timeline row paints — every word of it from `:core`.
  *
- * db / worker / config / analytics / app rows come straight from core's [RowContent] (and through
- * it [io.github.siddharthjaswal.logpose.presentation.KindPresenter]), so their titles, badges and
- * facts are the plugin's, decided once. HTTP and FCM row decisions still live in the plugin's
- * Swing renderer (`TransactionListRenderer`), which this module cannot depend on; the few lines
- * they amount to — status text, pending, the FCM TOKEN/NOTIF/DATA label and summary — are ported
- * here verbatim. Moving them into `RowContent` is an M4 parity item.
+ * M1 ported the HTTP/FCM wording and the plugin's `RowGeometry` numbers into this file because they
+ * lived only in the plugin's Swing renderer. Both now live in core ([RowContent],
+ * [io.github.siddharthjaswal.logpose.presentation.RowGeometry]) and the plugin reads them too, so
+ * this is only the bundle a Compose row needs, resolved once per snapshot (off the UI thread, in
+ * [TimelineViews.build]) rather than per recomposition. The one thing decided here is the host's
+ * clock format, `HH:mm:ss`, which is the plugin renderer's too.
  */
-sealed interface RowModel {
-    val event: LogEvent
+sealed interface RowCells {
+    val row: RowCollapse.Row
 
+    /** An HTTP call — or a collapsed polling run of them, when [poll] is set. */
     data class Http(
-        override val event: LogEvent.Http,
-        val method: String,
-        val read: Boolean,
-        val status: String,
-        val statusCode: Int?,
-        val error: String?,
-        val pending: Boolean,
-        val path: String,
-        val mocked: Boolean,
-        val size: String,
-        val duration: String,
-    ) : RowModel
+        override val row: RowCollapse.Row,
+        val event: LogEvent.Http,
+        val content: RowContent.HttpRow,
+        /** Outlined `DUP ×N`. Suppressed on a run: `×N` already says "this repeated". */
+        val duplicate: DuplicateDetector.Mark?,
+        /** A muted endpoint: 26px, faded. */
+        val muted: Boolean,
+        val poll: RowContent.PollFold?,
+    ) : RowCells
 
-    data class Fcm(
-        override val event: LogEvent.Fcm,
-        val label: String,
-        val summary: String,
-        val injected: Boolean,
-        val keys: String,
-        val time: String,
-    ) : RowModel
+    data class Fcm(override val row: RowCollapse.Row, val content: RowContent.FcmRow, val time: String) : RowCells
 
-    data class Db(override val event: LogEvent.Db, val content: RowContent.DbRow, val time: String) : RowModel
+    data class Db(override val row: RowCollapse.Row, val content: RowContent.DbRow, val time: String) : RowCells
 
-    data class Worker(override val event: LogEvent.Worker, val content: RowContent.WorkerRow, val time: String) : RowModel
+    /** A folded transaction's ceremony: one 26px muted line. */
+    data class Txn(override val row: RowCollapse.Row, val fold: RowContent.TxnFold) : RowCells
 
-    data class Generic(override val event: LogEvent, val content: RowContent.GenericRow, val time: String) : RowModel
+    data class Worker(override val row: RowCollapse.Row, val content: RowContent.WorkerRow, val time: String) : RowCells
+
+    data class Generic(override val row: RowCollapse.Row, val content: RowContent.GenericRow, val time: String) : RowCells {
+        val analytics: Boolean get() = row.lead.kind == Envelope.KIND_ANALYTICS
+    }
+
+    /** Whether this row's time cell counts up live (an in-flight call, a running worker). */
+    val live: Boolean get() = when (this) {
+        is Http -> poll == null && content.pending
+        is Worker -> content.time is RowContent.TimeCell.LiveCountUp
+        else -> false
+    }
+
+    /** 34, or 26 for a muted endpoint and a folded transaction. */
+    val short: Boolean get() = (this is Http && muted) || this is Txn
 }
 
-object RowModels {
+object Rows {
 
-    private val READ_METHODS = setOf("GET", "HEAD", "OPTIONS")
-
-    fun of(event: LogEvent): RowModel = when (event) {
-        is LogEvent.Http -> http(event)
-        is LogEvent.Fcm -> fcm(event)
-        is LogEvent.Db -> RowModel.Db(event, RowContent.db(event.query), dbTime(event))
-        is LogEvent.Worker -> RowContent.worker(event).let { RowModel.Worker(event, it, timeText(it.time)) }
-        else -> RowContent.generic(event).let { RowModel.Generic(event, it, timeText(it.time)) }
+    fun of(row: RowCollapse.Row, marks: Map<String, DuplicateDetector.Mark>): RowCells {
+        val group = row as? RowCollapse.Row.Group
+        if (group?.groupKind == RowCollapse.GroupKind.DB_TXN) return RowCells.Txn(row, RowContent.txnFold(group.facts))
+        return when (val event = row.lead) {
+            is LogEvent.Http -> RowCells.Http(
+                row, event, RowContent.http(event.tx),
+                duplicate = if (group == null) marks[event.id] else null,
+                muted = MutedEndpoints.isMuted(event.tx),
+                poll = group?.let(RowContent::pollFold),
+            )
+            is LogEvent.Fcm -> RowContent.fcm(event).let { RowCells.Fcm(row, it, clock(it.atMillis)) }
+            is LogEvent.Db -> RowCells.Db(row, RowContent.db(event.query), event.durationMillis?.let(RowContent::shortDuration) ?: clock(event.timestampMillis))
+            is LogEvent.Worker -> RowContent.worker(event).let { RowCells.Worker(row, it, timeText(it.time)) }
+            else -> RowContent.generic(event).let { RowCells.Generic(row, it, timeText(it.time)) }
+        }
     }
 
-    fun http(event: LogEvent.Http): RowModel.Http {
-        val tx = event.tx
-        val pending = isPending(tx)
-        return RowModel.Http(
-            event = event,
-            method = tx.request.method,
-            read = tx.request.method.trim().uppercase() in READ_METHODS,
-            status = statusText(tx),
-            statusCode = tx.response?.code,
-            error = tx.error,
-            pending = pending,
-            path = tx.request.path.ifBlank { tx.request.url },
-            mocked = tx.mocked,
-            size = if (pending) "" else tx.response?.body?.sizeBytes?.takeIf { it >= 0 }?.let(::humanSize).orEmpty(),
-            duration = if (pending) "…" else tx.durationMillis?.let { "${it}ms" }.orEmpty(),
-        )
-    }
-
-    fun fcm(event: LogEvent.Fcm): RowModel.Fcm {
-        val msg = event.msg
-        val at = msg.receivedAtMillis.takeIf { it > 0 } ?: event.timestampMillis
-        return RowModel.Fcm(
-            event = event,
-            label = fcmLabel(msg),
-            summary = fcmSummary(msg),
-            injected = msg.injected,
-            keys = msg.data.size.takeIf { it > 0 }?.let { "$it ${if (it == 1) "key" else "keys"}" }.orEmpty(),
-            time = clock(at),
-        )
-    }
-
-    // ---- ported from the plugin (Ui.kt / TransactionListRenderer) ----------------------------------
-
-    fun statusText(tx: Transaction): String = tx.response?.code?.toString() ?: if (tx.error != null) "ERR" else "···"
-
-    fun isPending(tx: Transaction): Boolean = tx.response == null && tx.error == null
-
-    fun fcmLabel(msg: FcmMessage): String = when {
-        msg.event == "token" -> "TOKEN"
-        msg.notification != null -> "NOTIF"
-        else -> "DATA"
-    }
-
-    fun fcmSummary(msg: FcmMessage): String = when {
-        msg.event == "token" -> "Registration token refreshed"
-        msg.notification != null ->
-            msg.notification?.title?.takeIf { it.isNotBlank() }
-                ?: msg.notification?.body?.takeIf { it.isNotBlank() }
-                ?: "(notification)"
-        else -> msg.data.entries.firstOrNull { it.key.equals("channel", ignoreCase = true) }?.value?.takeIf { it.isNotBlank() }
-            ?: msg.collapseKey?.takeIf { it.isNotBlank() }
-            ?: msg.from?.takeIf { it.isNotBlank() }
-            ?: "(data message)"
-    }
-
-    fun humanSize(bytes: Long): String = when {
-        bytes < 0 -> "—"
-        bytes < 1024 -> "$bytes B"
-        bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
-        else -> "%.1f MB".format(bytes / (1024.0 * 1024))
-    }
-
-    private fun dbTime(event: LogEvent.Db): String =
-        event.durationMillis?.let(RowContent::shortDuration) ?: clock(event.timestampMillis)
-
+    /** The time cell for a resolved [RowContent.TimeCell]; a live count-up is painted by the row. */
     fun timeText(cell: RowContent.TimeCell): String = when (cell) {
         is RowContent.TimeCell.Duration -> RowContent.shortDuration(cell.millis)
         is RowContent.TimeCell.Timestamp -> clock(cell.atMillis)
-        // No live count-up in M1: a running worker shows the same ellipsis a pending call does.
         is RowContent.TimeCell.LiveCountUp -> "…"
         RowContent.TimeCell.Empty -> ""
     }
 
+    /**
+     * A live row's time text. A pending call counts whole milliseconds like a finished one; a
+     * running worker counts its *run* — the host age less the queue the device reported, floored
+     * at zero because a device clock adjusted mid-run can overshoot.
+     */
+    fun liveText(cells: RowCells, elapsedMillis: Long?): String = when {
+        elapsedMillis == null -> "…"
+        cells is RowCells.Http -> RowContent.liveMillis(elapsedMillis)
+        cells is RowCells.Worker -> {
+            val offset = (cells.content.time as? RowContent.TimeCell.LiveCountUp)?.offsetMillis ?: 0
+            RowContent.shortDuration((elapsedMillis - offset).coerceAtLeast(0))
+        }
+        else -> "…"
+    }
+
     private val timeFmt = ThreadLocal.withInitial { SimpleDateFormat("HH:mm:ss") }
 
-    private fun clock(millis: Long): String = millis.takeIf { it > 0 }?.let { timeFmt.get().format(Date(it)) }.orEmpty()
-}
-
-/**
- * The plugin's `RowGeometry` numbers (logical px = dp here). Copied, because the plugin's object
- * scales through `JBUI` and cannot leave the IDE; the arithmetic is two constants deep.
- */
-object RowGeometry {
-    const val HEIGHT = 34
-    const val EDGE = 14
-    const val GLYPH = 18
-    const val GAP = 10
-    const val METHOD = 46
-    const val STATUS = 46
-    const val TEXT_GAP = 12
-    const val PILL_GAP = 8
-    const val SIZE = 64
-    const val FACT = 120
-    const val FACT_ANALYTICS = 150
-    const val TIME = 56
-    const val META_GAP = 10
+    fun clock(millis: Long): String = millis.takeIf { it > 0 }?.let { timeFmt.get().format(Date(it)) }.orEmpty()
 }

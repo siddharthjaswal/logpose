@@ -22,6 +22,7 @@ import javax.swing.Box
 import javax.swing.BoxLayout
 import javax.swing.JComponent
 import javax.swing.JPanel
+import io.github.siddharthjaswal.logpose.presentation.DetailContent
 import io.github.siddharthjaswal.logpose.presentation.KindPresenter
 import io.github.siddharthjaswal.logpose.presentation.RowContent
 
@@ -175,22 +176,14 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         setRowVisible(sectionsRow, sectionsGap, !presentation?.sections.isNullOrEmpty())
 
         chips.removeAll()
-        val items = buildList {
-            if (event.timestampMillis > 0) add(StatChip("at", timeFmt.format(Date(event.timestampMillis))))
-            // Kind-agnostic on purpose: this is still the whole span (a worker's queue + run), and
-            // the worker card's own Timing section is what breaks that down. Formatted, though —
-            // "124300ms" is a number nobody reads. No new chip: worker knowledge stays in
-            // KindPresenter rather than leaking into the shared card.
-            event.durationMillis?.let { add(StatChip("took", RowContent.shortDuration(it))) }
-            if (event.isOpen) add(StatChip("state", "running"))
-            event.traceId?.takeIf { it.isNotBlank() }?.let { trace ->
-                add(
-                    StatChip("trace", trace)
-                        .clickable("$trace — open the waterfall for this flow") { onOpenTrace(trace) },
-                )
-            }
-            event.envelope.parentId?.let { add(StatChip("parent", it, tip = it)) }
-            add(StatChip("id", event.id, tip = event.id))
+        // The chips are :core's (DetailContent), shared with the Mac app. `took` is kind-agnostic
+        // on purpose — still the whole span (a worker's queue + run); the worker card's own Timing
+        // section is what breaks that down.
+        val items = DetailContent.genericChips(event).map { chip ->
+            val trace = chip.traceLink
+            if (trace != null) StatChip(chip.caption, chip.value, chip.tip)
+                .clickable("$trace — open the waterfall for this flow") { onOpenTrace(trace) }
+            else StatChip(chip.caption, chip.value, chip.tip)
         }
         items.forEachIndexed { i, c ->
             if (i > 0) chips.add(Box.createHorizontalStrut(JBUI.scale(8)))

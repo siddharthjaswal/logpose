@@ -62,6 +62,7 @@ import io.github.siddharthjaswal.logpose.ui.ComposePushDialog
 import io.github.siddharthjaswal.logpose.ui.CorrelationKeysDialog
 import io.github.siddharthjaswal.logpose.settings.CorrelationSettings
 import io.github.siddharthjaswal.logpose.presentation.CurlBuilder
+import io.github.siddharthjaswal.logpose.presentation.DetailContent
 import io.github.siddharthjaswal.logpose.presentation.EventType
 import io.github.siddharthjaswal.logpose.ui.FindByValueDialog
 import io.github.siddharthjaswal.logpose.ui.FcmDetailView
@@ -989,27 +990,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * app necessarily made.
      */
     private fun groupTooltip(group: RowCollapse.Row.Group): String {
-        val facts = group.facts
-        val label = KindPresenter.rowLabel(group.lead)
+        // The words are :core's (RowContent.groupHint), shared with the Mac app; this only marks up.
         val clock = java.text.SimpleDateFormat("HH:mm:ss")
-        val span = facts.latestAtMillis.takeIf { it > 0 }
-            ?.let { "latest ${clock.format(java.util.Date(it))}" }
-            .orEmpty()
-        return when (group.groupKind) {
-            RowCollapse.GroupKind.NET_POLL -> buildString {
-                append("<html><b>${facts.count} calls</b> matching the current filter<br/>")
-                append("$label<br/>")
-                facts.medianDurationMillis?.let { append("median ${it}ms") }
-                if (span.isNotEmpty()) { if (facts.medianDurationMillis != null) append(" · "); append(span) }
-                append("<br/>Double-click to expand</html>")
-            }
-            RowCollapse.GroupKind.DB_TXN -> buildString {
-                append("<html><b>Transaction</b> — ${facts.count} ceremony rows folded<br/>")
-                append("${facts.statements} wrapped statement(s), still listed individually<br/>")
-                append("Double-click to expand</html>")
-            }
-        }
+        return hintHtml(RowContent.groupHint(group) { clock.format(java.util.Date(it)) })
     }
+
+    /** A [RowContent.Hint] as tooltip HTML: the bold lead, the rest of its line, then one line each. */
+    private fun hintHtml(hint: RowContent.Hint): String =
+        "<html><b>${hint.bold}</b>${hint.rest}<br/>" + hint.lines.joinToString("<br/>") + "</html>"
 
     /**
      * Whether one event survives the whole filter — the structured [FilterState] plus the two
@@ -1020,9 +1008,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * empty state's loosener, so a button can't offer rows the list would then reject.
      */
     private fun passes(event: LogEvent, state: FilterState, grouping: Grouping?): Boolean =
-        state.matches(event) &&
-            (!state.duplicatesOnly || duplicateMarks.containsKey(event.id)) &&
-            (grouping == null || Correlation.containsValue(correlation.textOf(event), grouping.value))
+        FilterPresentation.passes(
+            event, state,
+            isDuplicate = { duplicateMarks.containsKey(it) },
+            correlation = grouping?.let { g -> { e: LogEvent -> Correlation.containsValue(correlation.textOf(e), g.value) } },
+        )
 
     /**
      * Picks which of the list half's two cards is showing.
@@ -1064,50 +1054,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         all: List<LogEvent>,
         state: FilterState,
         grouping: Grouping?,
-    ): List<FilterPresentation.Relaxation> = buildList {
-        val label = grouping?.shortLabel
-        fun candidate(id: FilterPresentation.FilterId, relaxed: FilterState, g: Grouping?) {
-            add(
-                FilterPresentation.Relaxation(
-                    id, FilterPresentation.looseningLabel(id, label),
-                    all.count { passes(it, relaxed, g) },
-                )
-            )
+    ): List<FilterPresentation.Relaxation> =
+        // The measuring procedure is :core's, shared with the Mac app; only the predicate is ours.
+        FilterPresentation.relaxations(all, state, grouping?.shortLabel) { event, relaxed, withCorrelation ->
+            passes(event, relaxed, grouping.takeIf { withCorrelation })
         }
-        if (state.statusClasses.isNotEmpty()) {
-            candidate(FilterPresentation.FilterId.STATUS, state.copy(statusClasses = emptySet()), grouping)
-        }
-        if (state.methods.isNotEmpty()) {
-            candidate(FilterPresentation.FilterId.METHOD, state.copy(methods = emptySet()), grouping)
-        }
-        if (grouping != null) candidate(FilterPresentation.FilterId.CORRELATION, state, null)
-        if (state.hideNoise) {
-            candidate(FilterPresentation.FilterId.HIDE_NOISE, state.copy(hideNoise = false), grouping)
-        }
-        if (state.duplicatesOnly) {
-            candidate(FilterPresentation.FilterId.DUPES, state.copy(duplicatesOnly = false), grouping)
-        }
-        if (state.urlQuery.isNotBlank()) {
-            candidate(FilterPresentation.FilterId.SEARCH, state.copy(urlQuery = ""), grouping)
-        }
-        if (state.types.isNotEmpty()) {
-            candidate(FilterPresentation.FilterId.TYPES, state.copy(types = emptySet()), grouping)
-        }
-        // The DB opt-in is the one narrowing with no chip switched on, so without this the empty
-        // state can neither name it nor offer to lift it: a capture of nothing but db events, with
-        // no filter active at all, was told "several filters are narrowing at once" and handed a
-        // "Clear filters" button that changed nothing. Offered only when granting db actually
-        // brings rows back, so a genuinely different cause (a status filter, which hides every
-        // non-HTTP kind) keeps the blame.
-        if (EventType.DB !in state.types && all.any { it is LogEvent.Db }) {
-            val withDb = state.copy(types = state.types + EventType.DB)
-            val wouldShow = all.count { passes(it, withDb, grouping) }
-            if (wouldShow > 0) {
-                val id = FilterPresentation.FilterId.DB_OPT_IN
-                add(FilterPresentation.Relaxation(id, FilterPresentation.looseningLabel(id, label), wouldShow))
-            }
-        }
-    }
 
     /**
      * Shows one flow as a waterfall. The event list is snapshotted here, on the EDT, and handed
@@ -1317,16 +1268,12 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             Toast.show(list, "No state transitions were observed for this worker")
             return
         }
-        val clock = java.text.SimpleDateFormat("HH:mm:ss.SSS")
-        val lines = transitions.joinToString("<br/>") { t ->
-            val at = t.atMillis.takeIf { it > 0 } ?: t.hostMillis
-            val attempt = if (t.runAttempt > 1) "  ·  attempt ${t.runAttempt}" else ""
-            "<code>${clock.format(java.util.Date(at))}</code>&nbsp;&nbsp;${t.state}$attempt"
+        // Rows and caveat are :core's (DetailContent), shared with the Mac app's worker card.
+        val lines = DetailContent.workerTransitions(transitions).joinToString("<br/>") { (at, what) ->
+            "<code>$at</code>&nbsp;&nbsp;$what"
         }
         val html = "<html><body style='width:340px'><b>${event.work.worker}</b><br/><br/>$lines<br/><br/>" +
-            "<i>These are the transitions LogPose observed. WorkManager can move between two states " +
-            "in the gap between observer emissions, so this is a record of sightings, not its full " +
-            "history.</i></body></html>"
+            "<i>${DetailContent.TRANSITIONS_NOTE}</i></body></html>"
         val body = JBLabel(html).apply {
             border = JBUI.Borders.empty(10, 12)
             isOpaque = true
@@ -1442,18 +1389,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         }
     }
 
-    private fun duplicateTooltip(tx: Transaction, mark: DuplicateDetector.Mark): String {
-        val headline = when (mark.severity) {
-            DuplicateDetector.Severity.STRONG -> "Possible double-submit"
-            DuplicateDetector.Severity.MEDIUM -> "Redundant duplicate request"
-            DuplicateDetector.Severity.INFO -> "Repeated request"
-        }
-        val ord = when (mark.ordinal) { 2 -> "2nd"; 3 -> "3rd"; else -> "${mark.ordinal}th" }
-        val extra = if (mark.severity == DuplicateDetector.Severity.STRONG)
-            "<br/>It fired before the previous one responded — likely a missing debounce or disabled-button guard."
-        else ""
-        return "<html><b>$headline</b><br/>$ord identical ${tx.request.method} call in a quick burst.$extra</html>"
-    }
+    private fun duplicateTooltip(tx: Transaction, mark: DuplicateDetector.Mark): String =
+        hintHtml(DetailContent.duplicateHint(tx, mark))
 
     private fun onLiveTick() {
         renderer.spinnerFrame++
@@ -1735,11 +1672,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * waterfall's lanes use — with the kind prefixed, since a pasted timeline has no glyph to
      * carry it.
      */
-    private fun timelineLabel(event: LogEvent): String = when (event) {
-        is LogEvent.Http -> KindPresenter.rowLabel(event)   // already leads with the method
-        is LogEvent.Fcm -> "FCM ${KindPresenter.rowLabel(event)}"
-        else -> "${KindPresenter.kindLabel(event)} ${KindPresenter.rowLabel(event)}"
-    }
+    private fun timelineLabel(event: LogEvent): String = DetailContent.timelineLine(event)
 
     /** A one-off menu action (native IDE popup item), shared by the row menus and the toolbar. */
     private fun act(text: String, icon: javax.swing.Icon?, run: () -> Unit): AnAction =
