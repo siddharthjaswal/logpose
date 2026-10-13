@@ -33,6 +33,8 @@ import io.github.siddharthjaswal.logpose.analysis.Groupings
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.analysis.Suggestion
 import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
+import io.github.siddharthjaswal.logpose.capture.Capture
+import io.github.siddharthjaswal.logpose.capture.CaptureReader
 import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.logcat.DeviceChoice
@@ -337,6 +339,31 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     // can tell "no matching events" from "capture isn't running". Kept off the UI's statusDot,
     // which lives on the EDT.
     @Volatile private var captureActive = false
+
+    /**
+     * Non-null while a capture file is open read-only (*Open Capture File…*): its name. Live capture,
+     * Clear, push and mock writes are off while it is set; *Back to live capture* clears it.
+     */
+    @Volatile private var viewingFile: String? = null
+    /** Whether Back-to-live should restart the capture the file interrupted. */
+    private var resumeCaptureAfterViewing = false
+    /** Bumped on every open and on Back to live, so a replay still running for an old file stops. */
+    @Volatile private var viewGeneration = 0
+    private val viewingLabel = JBLabel().apply {
+        foreground = Theme.text
+        font = JBUI.Fonts.label(12f)
+    }
+    private val viewingBanner = JPanel(BorderLayout()).apply {
+        isOpaque = true
+        background = Theme.bg2
+        border = JBUI.Borders.compound(
+            JBUI.Borders.customLine(Theme.accent, 0, 3, 0, 0),
+            JBUI.Borders.empty(5, 10),
+        )
+        add(viewingLabel, BorderLayout.CENTER)
+        add(LinkLabel("Back to live capture") { backToLive() }.apply { border = JBUI.Borders.emptyLeft(12) }, BorderLayout.EAST)
+        isVisible = false
+    }
     private var reattachAttempts = 0
     private val MAX_REATTACH = 5
     private val REATTACH_DELAY_MS = 2_000
@@ -543,6 +570,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun buildHeader(): Component {
         val group = DefaultActionGroup().apply {
             add(CaptureToggleAction()); add(ClearAction())
+            // A .logpose shared from LogPose for Mac (or a library capture.ndjson), read-only.
+            add(OpenCaptureAction())
             addSeparator()
             // The two things LogPose can *start*: a push into the app, and a whole bottled
             // session. Both are also reachable where they're most natural (an FCM row's menu,
@@ -589,8 +618,99 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         return JPanel(BorderLayout()).apply {
             isOpaque = false
             add(toolbarRow, BorderLayout.NORTH)
-            add(belowToolbar, BorderLayout.CENTER)
+            add(JPanel(BorderLayout()).apply {
+                isOpaque = false
+                add(viewingBanner, BorderLayout.NORTH)
+                add(belowToolbar, BorderLayout.CENTER)
+            }, BorderLayout.CENTER)
         }
+    }
+
+    // ---- Open Capture File (read-only) --------------------------------------------------------
+
+    /** Picks a capture with the IDE's chooser, then reads it on a pooled thread — never the EDT. */
+    private fun openCaptureFile() {
+        val descriptor = com.intellij.openapi.fileChooser.FileChooserDescriptor(true, false, false, false, false, false)
+            .withTitle("Open LogPose Capture")
+            .withDescription("A .logpose file shared from LogPose for Mac, or a library capture.ndjson export")
+            .withFileFilter { vf -> CaptureReader.accepts(vf.name) }
+        val vf = com.intellij.openapi.fileChooser.FileChooser.chooseFile(descriptor, project, null) ?: return
+        val file = java.io.File(vf.path)
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            val result = runCatching { CaptureReader.read(file) }
+            SwingUtilities.invokeLater {
+                result.fold(
+                    onSuccess = { showCapture(file.name, it) },
+                    onFailure = { LogPoseNotifications.warn(project, "LogPose: couldn't open ${file.name}", it.message ?: it.toString()) },
+                )
+            }
+        }
+    }
+
+    /** On the EDT, with the file already parsed: confirm, stop live capture, then replay off the EDT. */
+    private fun showCapture(name: String, capture: Capture) {
+        if (captureActive) {
+            val answer = com.intellij.openapi.ui.Messages.showYesNoDialog(
+                project, CaptureFileView.confirmMessage(name), "Open Capture File",
+                "Stop Capture and Open", "Cancel", com.intellij.openapi.ui.Messages.getQuestionIcon(),
+            )
+            if (answer != com.intellij.openapi.ui.Messages.YES) return
+            resumeCaptureAfterViewing = true
+            stopCapture()
+        } else if (viewingFile == null) {
+            resumeCaptureAfterViewing = false
+        }
+        viewingFile = name
+        val generation = ++viewGeneration
+        resetTimeline()
+        viewingLabel.text = CaptureFileView.bannerText(name, capture)
+        viewingBanner.isVisible = true
+        revalidate()
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            // The same path the reader thread takes: warm correlation, note worker transitions, add.
+            capture.replayInto(store, cancelled = { generation != viewGeneration }) { event ->
+                correlation.warm(event)
+                if (event is LogEvent.Worker) workerLifecycle.note(event, System.currentTimeMillis())
+            }
+            SwingUtilities.invokeLater {
+                if (generation != viewGeneration) return@invokeLater
+                refreshList()
+                CaptureFileView.malformedNotice(capture)?.let { Toast.show(list, it) }
+            }
+        }
+    }
+
+    private fun backToLive() {
+        if (viewingFile == null) return
+        viewingFile = null
+        viewGeneration++
+        viewingBanner.isVisible = false
+        revalidate()
+        resetTimeline()
+        if (resumeCaptureAfterViewing) {
+            resumeCaptureAfterViewing = false
+            startCapture()
+        }
+    }
+
+    /** Whether a device write may proceed; says why not (a toast) while a file is open. */
+    private fun liveOrSay(): Boolean {
+        if (CaptureFileView.liveActionsEnabled(viewingFile)) return true
+        Toast.show(list, CaptureFileView.READ_ONLY_HINT)
+        return false
+    }
+
+    /** Empties the timeline and every per-session cache over it (not the device's log buffer). */
+    private fun resetTimeline() {
+        store.clear()
+        correlation.clear()
+        workerLifecycle.clear()
+        // Expansion is session state over rows that no longer exist.
+        expandedGroups.clear()
+        memberRows = emptyMap()
+        lastFiltered = emptyList()
+        showDetail(null)
+        refreshList()
     }
 
     /**
@@ -1374,6 +1494,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     /** Opens the mock editor pre-filled from a captured transaction, and registers the rule. */
     private fun mockTransaction(tx: Transaction) {
+        if (!liveOrSay()) return
         val dialog = MockRuleDialog(project, MockRuleDialog.fromTransaction(tx), tx.response?.body?.text, "Mock endpoint")
         if (dialog.showAndGet()) mocksController.addOrUpdate(dialog.result(), dialog.capturedBaseBody())
     }
@@ -1387,12 +1508,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     /** Sends a captured push back to the app, verbatim but for a fresh id, send time and trace. */
     private fun replayPush(msg: FcmMessage) {
+        if (!liveOrSay()) return
         if (pushController.readyToInject() == null) return
         sendPush(PushReplay.toMessage(msg, PushReplay.newId(), System.currentTimeMillis()))
     }
 
     /** Opens the composer, optionally pre-filled from a captured push. */
     private fun composePush(seed: PushMessage = PushMessage()) {
+        if (!liveOrSay()) return
         if (pushController.readyToInject() == null) return
         val dialog = ComposePushDialog(project, seed)
         if (dialog.showAndGet()) sendPush(dialog.result())
@@ -1536,6 +1659,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     }
 
     private fun loadScenario(name: String, replace: Boolean) {
+        if (!liveOrSay()) return
         val store = scenarioStore ?: return
         com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
             val scenario = runCatching { store.load(name) }.getOrNull()
@@ -1913,6 +2037,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         }
         override fun update(e: AnActionEvent) {
             val running = captureActive
+            // A file is open read-only: capture resumes from the banner's Back to live capture.
+            e.presentation.isEnabled = CaptureFileView.liveActionsEnabled(viewingFile)
             Toggleable.setSelected(e.presentation, running)
             e.presentation.icon = if (running) AllIcons.Actions.Suspend else AllIcons.Actions.Execute
             e.presentation.text = if (running) "Stop Capture" else "Start Capture"
@@ -1931,6 +2057,19 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     ) {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
         override fun actionPerformed(e: AnActionEvent) = composePush()
+        override fun update(e: AnActionEvent) {
+            e.presentation.isEnabled = CaptureFileView.liveActionsEnabled(viewingFile)
+        }
+    }
+
+    /** Opens a `.logpose` / `.ndjson` capture into the timeline, read-only. */
+    private inner class OpenCaptureAction : AnAction(
+        "Open Capture File…",
+        "Open a .logpose capture shared from LogPose for Mac (or a library capture.ndjson) — read-only",
+        AllIcons.Actions.MenuOpen,
+    ) {
+        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun actionPerformed(e: AnActionEvent) = openCaptureFile()
     }
 
     /** Save / snapshot / load the committable rule sets under `.logpose/scenarios`. */
@@ -1943,22 +2082,20 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         override fun actionPerformed(e: AnActionEvent) {
             showScenariosPopup(e.inputEvent?.component)
         }
+        override fun update(e: AnActionEvent) {
+            e.presentation.isEnabled = CaptureFileView.liveActionsEnabled(viewingFile)
+        }
     }
 
     private inner class ClearAction :
         AnAction("Clear", "Clear captured transactions and the device log buffer", AllIcons.Actions.GC) {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
         override fun actionPerformed(e: AnActionEvent) {
-            store.clear()
-            correlation.clear()
-            workerLifecycle.clear()
-            // Expansion is session state over rows that no longer exist.
-            expandedGroups.clear()
-            memberRows = emptyMap()
-            lastFiltered = emptyList()
             reader.clearBuffer()
-            showDetail(null)
-            refreshList()
+            resetTimeline()
+        }
+        override fun update(e: AnActionEvent) {
+            e.presentation.isEnabled = CaptureFileView.liveActionsEnabled(viewingFile)
         }
     }
 

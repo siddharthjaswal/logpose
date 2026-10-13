@@ -76,13 +76,43 @@ class Capture(
     fun isRunning(): Boolean = active.get() && reader?.isRunning() == true
 
     /** For `/health`: whether we have a live stream or are still looking for a device. */
-    fun state(): String = if (isRunning()) "attached" else "waiting"
+    fun state(): String = when {
+        openedFile != null -> "file"
+        isRunning() -> "attached"
+        else -> "waiting"
+    }
+
+    /** Events loaded from `--open`, or null when tailing a device. */
+    @Volatile var openedFile: io.github.siddharthjaswal.logpose.capture.Capture? = null
+        private set
 
     fun start() {
+        options.open?.let { loadFile(it); return }
         if (!active.compareAndSet(false, true)) return
         wireReverseChannel()
         mocks.onCaptureStarted()
         attach()
+    }
+
+    /**
+     * `--open`: replays a capture file into the store — the same parser, the same warm-up, the same
+     * worker-transition note as a live line — and never touches adb. Throws on an unreadable file,
+     * which `serve` reports in one line and exits 1.
+     */
+    private fun loadFile(file: java.io.File) {
+        val capture = io.github.siddharthjaswal.logpose.capture.CaptureReader.read(file)
+        capture.replayInto(store) { event ->
+            correlation.warm(event)
+            if (event is LogEvent.Worker) workerLifecycle.note(event, System.currentTimeMillis())
+        }
+        openedFile = capture
+        val m = capture.manifest
+        log.info(
+            "opened ${file.name}: ${capture.events.size} events" +
+                (m?.app?.pkg?.let { " · $it" } ?: "") + (m?.device?.model?.let { " · $it" } ?: "") +
+                (if (capture.malformedLines > 0) " · ${capture.malformedLines} unreadable lines skipped" else "") +
+                " — serving read-only, no device",
+        )
     }
 
     private fun wireReverseChannel() {

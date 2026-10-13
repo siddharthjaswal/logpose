@@ -161,7 +161,7 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
                 "read-only (pass --mocks to let create_mock / load_scenario / inject_fcm write)"
             }
         )
-        if (!options.clear) log.info("logcat backlog left intact (--clear to wipe it at start)")
+        if (!options.clear && options.open == null) log.info("logcat backlog left intact (--clear to wipe it at start)")
         if (!options.exposeBodies) log.info("bodies withheld from MCP results (--no-bodies)")
         if (options.stdio) {
             // Not one byte of this may reach stdout: the client is reading JSON-RPC there, and a

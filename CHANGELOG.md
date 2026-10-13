@@ -6,6 +6,37 @@ format may still change.
 
 ## [Unreleased]
 
+### Added — LogPose for Mac (in progress) and the `.logpose` capture file
+
+A Compose Desktop app for people who don't use Android Studio — QA testers first
+([`docs/mac-app-prd.md`](docs/mac-app-prd.md)). Not released yet; milestones M1–M3 are in.
+
+- **Connect without an SDK or a cable.** The app finds an existing `adb` or downloads Google's
+  platform-tools on first run (versioned archive, size + SHA-1 checked against Google's own
+  manifest), lists cable devices in plain English, and pairs phones over Wi-Fi by **QR code** using
+  the same protocol Android Studio uses — plus a pairing-code fallback, *Switch to wireless* for
+  Android 10 and older, and remembered devices that reconnect on their own.
+- **Record a test session, then share it.** Sessions are written to disk as they happen, so a long
+  test pass never loses history to the 2,000-event memory cap. ⌘B drops a bookmark with a note;
+  one click grabs a device screenshot. **Share** exports a scoped `.logpose` file (whole session,
+  since a bookmark, or ±N minutes around one) with a **PII scrubber on by default** — names, phone
+  numbers, emails, addresses and coordinates, including inside JSON body strings — a live preview
+  of exactly what leaves the machine, and a Slack-formatted summary on the clipboard.
+- **The `.logpose` file** is one format in `:core` — a zip of a manifest, one `Envelope` per line
+  (the library's own line format, so a library `capture.ndjson` opens too) and screenshots. It opens
+  in the Mac app, in the plugin, and in the daemon.
+
+### Added (plugin)
+- **Open Capture File…** — open a `.logpose` someone shared (in Slack, say) as a read-only timeline
+  in Android Studio: capture pauses, the file replays through the same parser the live capture
+  uses, and a banner offers *Back to live capture*. Write actions (mocks, push) are disabled while
+  viewing.
+
+### Added (daemon)
+- **`logpose serve --open <file>`** loads a shared capture instead of tailing a device, so a coding
+  agent can read it over MCP.
+
+
 ### Added — headless daemon (`logpose serve`)
 
 LogPose's capture and all 21 MCP tools, with no IDE in the process. A plain JVM binary an agent,

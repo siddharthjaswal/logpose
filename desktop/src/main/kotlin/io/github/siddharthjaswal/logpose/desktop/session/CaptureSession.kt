@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose.desktop.session
 
 import io.github.siddharthjaswal.logpose.analysis.CorrelationIndex
+import io.github.siddharthjaswal.logpose.capture.CaptureLines
 import io.github.siddharthjaswal.logpose.logcat.ControlMessage
 import io.github.siddharthjaswal.logpose.logcat.LogcatReader
 import io.github.siddharthjaswal.logpose.logcat.TransactionParser
@@ -34,6 +35,12 @@ class CaptureSession(
     val store: EventStore = EventStore(capacity = STORE_CAPACITY),
     private val sourceFor: (serial: String) -> LineSource = { serial -> LogcatLineSource(serial) },
     private val clock: () -> Long = System::currentTimeMillis,
+    /**
+     * Opens the disk recording for a new session (M3). Null records nothing — the unit tests'
+     * default. The recorder does all its own I/O on a background thread, so calling this on the
+     * UI thread costs a thread start, not a disk write.
+     */
+    private val recorderFor: ((serial: String, startedAtMillis: Long) -> SessionRecorder)? = null,
 ) {
     val correlation = CorrelationIndex()
 
@@ -42,6 +49,13 @@ class CaptureSession(
 
     /** Host millis the first LogPose line of the current session arrived; null until one does. */
     @Volatile var firstLogPoseAtMillis: Long? = null
+        private set
+
+    /**
+     * The current session's disk recording — or, once it has ended, the last one, which is what
+     * Share reads. Replaced on the next start.
+     */
+    @Volatile var recorder: SessionRecorder? = null
         private set
 
     @Volatile private var source: LineSource? = null
@@ -59,12 +73,18 @@ class CaptureSession(
         store.clear()
         correlation.clear()
         firstLogPoseAtMillis = null
+        val startedAt = (after as SessionState.Running).startedAtMillis
+        val rec = recorderFor?.invoke(serial, startedAt)
+        recorder = rec
         val p = TransactionParser().also { parser = it }
         p.onControl = { msg ->
             // Same as the daemon and the panel: a hello marks an app run, so two launches never
             // read as one timeline. Mock acks are ignored — M1 has no mock writer.
             if (msg is ControlMessage.DeviceHello) {
                 store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion)
+                // Recorded as a line too, so a replay of the file splits app runs the same way.
+                rec?.append(CaptureLines.of(msg.hello))
+                rec?.updateMeta { it.copy(appPackage = msg.hello.pkg, libVersion = msg.hello.libVersion) }
             }
         }
         _state.value = after
@@ -76,11 +96,14 @@ class CaptureSession(
                 if (firstLogPoseAtMillis == null && QuietDetector.isLogPoseLine(line)) firstLogPoseAtMillis = clock()
                 p.accept(line)?.let { event ->
                     correlation.warm(event)
+                    // Every envelope, every update: the store keeps the latest per id and evicts at
+                    // its cap; the file keeps everything, so the shareable record never loses history.
+                    rec?.append(CaptureLines.of(event))
                     store.add(event)
                 }
             },
-            onError = { msg -> if (gen == generation) transition(SessionEvent.Failed(serial, msg)) },
-            onStopped = { if (gen == generation) transition(SessionEvent.StreamEnded(serial)) },
+            onError = { msg -> if (gen == generation) { transition(SessionEvent.Failed(serial, msg)); endRecording(rec) } },
+            onStopped = { if (gen == generation) { transition(SessionEvent.StreamEnded(serial)); endRecording(rec) } },
         )
     }
 
@@ -93,6 +116,11 @@ class CaptureSession(
         _state.value = after
         source?.stop()
         source = null
+        endRecording(recorder)
+    }
+
+    private fun endRecording(rec: SessionRecorder?) {
+        rec?.close(clock())
     }
 
     private fun transition(event: SessionEvent) {

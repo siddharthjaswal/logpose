@@ -41,6 +41,24 @@ import io.github.siddharthjaswal.logpose.desktop.session.SessionState
 import io.github.siddharthjaswal.logpose.desktop.session.TimelineSnapshot
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
 import io.github.siddharthjaswal.logpose.logcat.Adb
+import io.github.siddharthjaswal.logpose.desktop.app.Notice
+import io.github.siddharthjaswal.logpose.desktop.app.ShareUi
+import io.github.siddharthjaswal.logpose.desktop.app.ViewingFile
+import io.github.siddharthjaswal.logpose.desktop.timeline.SessionMarks
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 
 /** Everything the window paints, as plain values — so the off-screen renders use the real screen. */
 data class ScreenState(
@@ -52,6 +70,16 @@ data class ScreenState(
     val selectedEventId: String?,
     val placeholder: Placeholder,
     val wireless: WirelessUi = WirelessUi(),
+    // M3 — record and share
+    val marks: SessionMarks = SessionMarks.EMPTY,
+    val viewing: ViewingFile? = null,
+    val pendingBookmark: Long? = null,
+    val notice: Notice? = null,
+    val share: ShareUi? = null,
+    val selectedIds: Set<String> = emptySet(),
+    val screenshotBusy: Boolean = false,
+    val canBookmark: Boolean = session is SessionState.Running,
+    val canShare: Boolean = viewing != null || snapshot.events.isNotEmpty(),
 )
 
 class ScreenActions(
@@ -63,6 +91,16 @@ class ScreenActions(
     val onClear: () -> Unit = {},
     val onSelectEvent: (String?) -> Unit = {},
     val wireless: WirelessActions = WirelessActions(),
+    val onToggleSelect: (String) -> Unit = {},
+    val onBookmark: () -> Unit = {},
+    /** Enter passes the note; Esc passes null (the marker is kept, without a note). */
+    val onCommitBookmark: (String?) -> Unit = {},
+    val onScreenshot: () -> Unit = {},
+    val onOpenFile: () -> Unit = {},
+    val onBackToLive: () -> Unit = {},
+    val onShare: () -> Unit = {},
+    val onDismissNotice: () -> Unit = {},
+    val share: ShareActions = ShareActions(),
 )
 
 @Composable
@@ -79,11 +117,17 @@ fun LogPoseScreen(state: ScreenState, actions: ScreenActions) {
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 Toolbar(state, actions)
                 Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
+                state.viewing?.let { ViewingBanner(it, actions) }
+                state.pendingBookmark?.let { BookmarkPrompt(it, state.marks.bookmarks.size + 1, actions) }
+                state.notice?.let { NoticeStrip(it, actions) }
                 val selected = state.selectedEventId?.let { id -> state.snapshot.events.firstOrNull { it.id == id } }
                 Row(Modifier.fillMaxSize()) {
                     Box(Modifier.weight(1f).fillMaxHeight()) {
-                        if (state.placeholder == Placeholder.None) {
-                            Timeline(state.snapshot, state.selectedEventId, { actions.onSelectEvent(it) }, Modifier.fillMaxSize())
+                        if (state.placeholder == Placeholder.None || state.viewing != null) {
+                            Timeline(
+                                state.snapshot, state.selectedEventId, { actions.onSelectEvent(it) }, Modifier.fillMaxSize(),
+                                marks = state.marks, selectedIds = state.selectedIds, onToggleSelect = actions.onToggleSelect,
+                            )
                         } else {
                             EmptyState(state.placeholder)
                         }
@@ -96,6 +140,7 @@ fun LogPoseScreen(state: ScreenState, actions: ScreenActions) {
             }
         }
         WirelessSheets(state.wireless, actions.wireless)
+        ShareSheet(state.share, actions.share)
     }
 }
 
@@ -195,12 +240,16 @@ private fun Toolbar(state: ScreenState, actions: ScreenActions) {
             is SessionState.Running -> Button("Stop session", actions.onStop)
             else -> Button(
                 "Start session", actions.onStart, primary = true,
-                enabled = device != null && device.ready,
+                enabled = device != null && device.ready && state.viewing == null,
             )
         }
+        Spacer(Modifier.width(8.dp))
+        Button("Bookmark ⌘B", actions.onBookmark, enabled = state.canBookmark && state.pendingBookmark == null)
+        Spacer(Modifier.width(8.dp))
+        Button(if (state.screenshotBusy) "Screenshot…" else "Screenshot", actions.onScreenshot, enabled = state.canBookmark && !state.screenshotBusy)
         Spacer(Modifier.width(14.dp))
         val count = state.snapshot.events.size
-        val label = when (val s = state.session) {
+        val label = if (state.viewing != null) "Capture file  ·  $count events" else when (val s = state.session) {
             is SessionState.Running -> "Capturing ${device?.let(DeviceStatuses::displayName) ?: s.serial}  ·  $count events"
             is SessionState.Ended -> "Session ended  ·  $count events"
             SessionState.Idle -> when {
@@ -210,10 +259,93 @@ private fun Toolbar(state: ScreenState, actions: ScreenActions) {
                 else -> "No phone connected"
             }
         }
-        T(label, p.textDim)
+        T(label, p.textDim, Modifier.weight(1f, fill = false))
         Spacer(Modifier.weight(1f))
-        Button("Clear", actions.onClear, enabled = state.snapshot.events.isNotEmpty())
+        Button("Open…", actions.onOpenFile)
+        Spacer(Modifier.width(8.dp))
+        Button("Share", actions.onShare, primary = state.canShare && state.session !is SessionState.Running, enabled = state.canShare)
+        Spacer(Modifier.width(8.dp))
+        Button("Clear", actions.onClear, enabled = state.snapshot.events.isNotEmpty() && state.viewing == null)
     }
+}
+
+/** The read-only state: which file is open, and the way back to capturing. */
+@Composable
+private fun ViewingBanner(v: ViewingFile, actions: ScreenActions) {
+    val p = LocalPalette.current
+    Row(
+        Modifier.fillMaxWidth().height(34.dp).background(p.accentTint).padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Pill("READ-ONLY", p.accent, stroke = p.accent)
+        Spacer(Modifier.width(10.dp))
+        val from = v.manifest?.let { m ->
+            listOfNotNull(m.app?.pkg, m.device?.model, m.scope).joinToString(" · ").takeIf { it.isNotBlank() }
+        }
+        T("Viewing ${v.name}" + (from?.let { "  ·  $it" } ?: ""), p.text, Modifier.weight(1f, fill = false), weight = FontWeight.Medium)
+        Spacer(Modifier.width(12.dp))
+        Link("Back to live capture", Modifier, actions.onBackToLive)
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
+}
+
+/** ⌘B's note prompt: the marker is already timed; Enter saves the note, Esc saves without one. */
+@Composable
+private fun BookmarkPrompt(at: Long, number: Int, actions: ScreenActions) {
+    val p = LocalPalette.current
+    var note by remember(at) { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+    Row(
+        Modifier.fillMaxWidth().height(40.dp).background(p.bg1).padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.width(3.dp).height(24.dp).background(p.accent))
+        Spacer(Modifier.width(9.dp))
+        Pill("BOOKMARK $number", p.accent, stroke = p.accent)
+        Spacer(Modifier.width(8.dp))
+        T(java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(at)), p.textDim, style = Type.monoSmall)
+        Spacer(Modifier.width(10.dp))
+        Box(
+            Modifier.weight(1f).height(28.dp).background(p.bg0, RoundedCornerShape(6.dp))
+                .border(1.dp, p.accent, RoundedCornerShape(6.dp)).padding(horizontal = 10.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            if (note.isEmpty()) T("What happened here? (optional)", p.textMuted)
+            BasicTextField(
+                value = note,
+                onValueChange = { note = it.replace("\n", " ") },
+                singleLine = true,
+                textStyle = Type.body.copy(color = p.text),
+                cursorBrush = SolidColor(p.accent),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus).onPreviewKeyEvent { e ->
+                    if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (e.key) {
+                        Key.Enter, Key.NumPadEnter -> { actions.onCommitBookmark(note); true }
+                        Key.Escape -> { actions.onCommitBookmark(null); true }
+                        else -> false
+                    }
+                },
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        T("Enter to save · Esc to skip the note", p.textMuted, style = Type.small)
+    }
+    LaunchedEffect(at) { runCatching { focus.requestFocus() } }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
+}
+
+@Composable
+private fun NoticeStrip(n: Notice, actions: ScreenActions) {
+    val p = LocalPalette.current
+    Row(
+        Modifier.fillMaxWidth().background(p.bg1).padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        T(n.text, if (n.error) p.warn else p.textDim, Modifier.weight(1f), maxLines = 3)
+        Spacer(Modifier.width(10.dp))
+        Link("Dismiss", Modifier, actions.onDismissNotice)
+    }
+    Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
 }
 
 @Composable

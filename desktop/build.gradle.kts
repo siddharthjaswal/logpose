@@ -34,6 +34,17 @@ compose.desktop {
         nativeDistributions {
             packageName = "LogPose"
             packageVersion = "1.0.0"
+            macOS {
+                bundleID = "io.github.siddharthjaswal.logpose.desktop"
+                // M3: double-clicking a `.logpose` in Finder opens it here. jpackage turns this into
+                // the bundle's CFBundleDocumentTypes + an exported UTI; Main.kt receives the file via
+                // `Desktop.setOpenFileHandler`. Only provable on a packaged .app (M5).
+                fileAssociation(
+                    mimeType = "application/vnd.logpose.capture+zip",
+                    extension = "logpose",
+                    description = "LogPose capture",
+                )
+            }
         }
         // `appearance=system` makes the native title bar follow macOS light/dark with the content.
         jvmArgs += listOf("-Dapple.awt.application.name=LogPose", "-Dapple.awt.application.appearance=system")

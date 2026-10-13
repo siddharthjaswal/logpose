@@ -39,6 +39,12 @@ import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
 import io.github.siddharthjaswal.logpose.desktop.timeline.RowGeometry
 import io.github.siddharthjaswal.logpose.desktop.timeline.RowModel
 import io.github.siddharthjaswal.logpose.desktop.timeline.RowModels
+import io.github.siddharthjaswal.logpose.desktop.timeline.SessionMarks
+import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineItem
+import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineItems
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.onClick
+import androidx.compose.ui.input.pointer.isMetaPressed
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.presentation.RowContent
 
@@ -53,6 +59,9 @@ fun Timeline(
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    marks: SessionMarks = SessionMarks.EMPTY,
+    selectedIds: Set<String> = emptySet(),
+    onToggleSelect: (String) -> Unit = {},
 ) {
     val p = LocalPalette.current
     var follow by remember { mutableStateOf(true) }
@@ -64,16 +73,26 @@ fun Timeline(
         }
     }
     val events = snapshot.events
-    LaunchedEffect(snapshot.version) {
-        if (follow && events.isNotEmpty()) listState.scrollToItem(events.size - 1)
-    }
     // Row models are cheap but not free (KindPresenter builds a GenericEvent); compute them once
-    // per snapshot, not once per recomposition of a visible row.
-    val rows = remember(snapshot.version) { events.map(RowModels::of) }
+    // per snapshot, not once per recomposition of a visible row. Markers are merged in by time.
+    val items = remember(snapshot.version, marks) { TimelineItems.merge(events.map(RowModels::of), marks) }
+    LaunchedEffect(snapshot.version, marks) {
+        if (follow && items.isNotEmpty()) listState.scrollToItem(items.size - 1)
+    }
     Box(modifier.background(p.bg0)) {
         LazyColumn(Modifier.fillMaxSize(), state = listState) {
-            itemsIndexed(rows, key = { _, row -> row.event.id }) { _, row ->
-                TimelineRow(row, selected = row.event.id == selectedId, onClick = { onSelect(row.event.id) })
+            itemsIndexed(items, key = { _, item -> item.key }) { _, item ->
+                when (item) {
+                    is TimelineItem.Event -> {
+                        val id = item.row.event.id
+                        TimelineRow(
+                            item.row, selected = id == selectedId || id in selectedIds,
+                            onClick = { onSelect(id) }, onMetaClick = { onToggleSelect(id) },
+                        )
+                    }
+                    is TimelineItem.Mark -> BookmarkRow(item)
+                    is TimelineItem.Shot -> ScreenshotRow(item.shot)
+                }
             }
         }
         VerticalScrollbar(
@@ -83,8 +102,9 @@ fun Timeline(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun TimelineRow(row: RowModel, selected: Boolean, onClick: () -> Unit) {
+fun TimelineRow(row: RowModel, selected: Boolean, onClick: () -> Unit, onMetaClick: () -> Unit = onClick) {
     val p = LocalPalette.current
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
@@ -100,6 +120,8 @@ fun TimelineRow(row: RowModel, selected: Boolean, onClick: () -> Unit) {
             .background(bg)
             .hoverable(interaction)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+            // ⌘-click adds the row to a multi-row selection (Share → only selected rows).
+            .onClick(keyboardModifiers = { isMetaPressed }, onClick = onMetaClick)
             .padding(horizontal = RowGeometry.EDGE.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

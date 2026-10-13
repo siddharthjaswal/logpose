@@ -88,6 +88,39 @@ object Fixtures {
         http("h7", "GET", "/v1/config/app", null, null, offset = 9_000),
     )
 
+    const val START = T0
+
+    /** The app's handshake, as the device sends it at process start. */
+    val hello = io.github.siddharthjaswal.logpose.model.Hello(pkg = "in.shadowfax.gandalf", libVersion = "1.7.3", processId = "run-1")
+
+    /**
+     * [lines] plus what a delivery app's responses really carry — a customer's name, a 10-digit
+     * mobile, a street address and coordinates — so the share sheet has something to scrub.
+     */
+    fun shareLines(): List<String> = listOf(io.github.siddharthjaswal.logpose.capture.CaptureLines.of(hello)) + lines().take(5) +
+        http(
+            "h8", "GET", "/v1/orders/OR-881/customer", 200, 118, 402,
+            """{"order_id":"OR-881","customer":{"id":5521,"name":"Ravi Kumar","phone":"7022730639","email":"ravi.k@example.com"},"drop":{"address":"14, 3rd Cross, Koramangala, Bengaluru 560034","landmark":"Near Forum Mall","lat":12.9352,"lng":77.6245},"slot":"18:00-18:30","note":"Call +91 98450 12345 at the gate"}""",
+            offset = 3_300,
+        ) + lines().drop(5)
+
+    /** A plausible phone screenshot (status bar, an order card, a button) as PNG bytes. */
+    fun phonePng(): ByteArray {
+        val w = 270; val h = 585
+        val img = java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        val g = img.createGraphics()
+        g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+        g.color = java.awt.Color(0xF4F5F7); g.fillRect(0, 0, w, h)
+        g.color = java.awt.Color(0x1F6FEB); g.fillRect(0, 0, w, 64)
+        g.color = java.awt.Color.WHITE; g.fillRoundRect(16, 84, w - 32, 150, 18, 18)
+        g.color = java.awt.Color(0xD0D4DC); for (i in 0..3) g.fillRoundRect(32, 104 + i * 30, (w - 64) - i * 30, 12, 6, 6)
+        g.color = java.awt.Color.WHITE; g.fillRoundRect(16, 250, w - 32, 220, 18, 18)
+        g.color = java.awt.Color(0xE6E8EC); for (i in 0..4) g.fillRoundRect(32, 270 + i * 36, w - 64, 18, 8, 8)
+        g.color = java.awt.Color(0x1F6FEB); g.fillRoundRect(24, h - 80, w - 48, 48, 24, 24)
+        g.dispose()
+        return java.io.ByteArrayOutputStream().also { javax.imageio.ImageIO.write(img, "png", it) }.toByteArray()
+    }
+
     fun store(): EventStore {
         val store = EventStore()
         val parser = TransactionParser()

@@ -74,7 +74,7 @@ fun WirelessSheets(ui: WirelessUi, actions: WirelessActions) {
 }
 
 @Composable
-private fun Modal(onDismiss: () -> Unit, width: Dp, content: @Composable () -> Unit) {
+internal fun Modal(onDismiss: () -> Unit, width: Dp, content: @Composable () -> Unit) {
     val p = LocalPalette.current
     Box(
         Modifier.fillMaxSize().background(Color.Black.copy(alpha = if (p.dark) 0.55f else 0.32f))
@@ -92,7 +92,7 @@ private fun Modal(onDismiss: () -> Unit, width: Dp, content: @Composable () -> U
 }
 
 @Composable
-private fun SheetHeader(title: String, onClose: () -> Unit) {
+internal fun SheetHeader(title: String, onClose: () -> Unit) {
     val p = LocalPalette.current
     Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 14.dp, top = 18.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         T(title, p.text, size = 17.sp, weight = FontWeight.SemiBold)

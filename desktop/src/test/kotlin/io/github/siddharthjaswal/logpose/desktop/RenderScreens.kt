@@ -80,6 +80,7 @@ fun main(args: Array<String>) {
         )
     }
     renderWireless(out, ::state)
+    renderM3(out)
     println("Rendered to ${out.absolutePath}")
 }
 

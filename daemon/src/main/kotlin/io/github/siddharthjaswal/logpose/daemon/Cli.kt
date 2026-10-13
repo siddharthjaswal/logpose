@@ -39,6 +39,11 @@ object Cli {
          * the thing you connect to and the thing that was spawned for you.
          */
         val stdio: Boolean = false,
+        /**
+         * `--open FILE`: serve a capture file (`.logpose` or a library `capture.ndjson`) instead of
+         * tailing a device — an agent reads a capture someone shared, over the same MCP tools.
+         */
+        val open: File? = null,
     ) {
         /** The session's display name — the flag, else the directory's own name. */
         val projectName: String
@@ -114,6 +119,10 @@ object Cli {
                     val v = valueFor(flag, inline) ?: return Command.Exit(2, missing(flag))
                     options = options.copy(name = v)
                 }
+                "--open" -> {
+                    val v = valueFor(flag, inline) ?: return Command.Exit(2, missing(flag))
+                    options = options.copy(open = File(v).let { if (it.isAbsolute) it else File(cwd, v) })
+                }
                 "--stdio" -> options = options.copy(stdio = true)
                 "--no-bodies" -> options = options.copy(exposeBodies = false)
                 "--mocks" -> options = options.copy(mocks = true)
@@ -129,6 +138,13 @@ object Cli {
                 "logpose serve: --stdio and --port are mutually exclusive. --stdio speaks MCP on " +
                     "stdin/stdout for a client that launched this process; --port binds a socket " +
                     "for a client that connects to it. Pick one.\n\n" + usage(),
+            )
+        }
+        if (options.open != null && (options.mocks || options.device != null || options.clear)) {
+            return Command.Exit(
+                2,
+                "logpose serve: --open serves a file, not a device — it can't be combined with " +
+                    "--device, --mocks or --clear.\n\n" + usage(),
             )
         }
         return Command.Serve(options)
@@ -159,6 +175,9 @@ object Cli {
                               rules. Without this flag the write tools decline politely.
           --clear             Run `adb logcat -c` at capture start. OFF by default: the clear is
                               global to the device and would wipe a running IDE's backlog.
+          --open FILE         Serve a capture file (.logpose, or a library capture.ndjson) instead
+                              of tailing a device, so an agent can read a shared capture over MCP.
+                              Read-only: not with --device, --mocks or --clear.
 
         Environment:
           LOGPOSE_TOKEN       Used when --token is absent.
