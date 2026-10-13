@@ -1,6 +1,10 @@
 package io.github.siddharthjaswal.logpose.desktop.timeline
 
+import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
+import io.github.siddharthjaswal.logpose.desktop.waterfall.Flows
+import io.github.siddharthjaswal.logpose.desktop.waterfall.WaterfallRequest
+import io.github.siddharthjaswal.logpose.mock.PushReplay
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.FcmMessage
 import io.github.siddharthjaswal.logpose.model.LogEvent
@@ -19,15 +23,29 @@ sealed interface RowCommand {
     data class ToggleMute(val tx: Transaction) : RowCommand
     data object ClearMutes : RowCommand
     data class ToggleExpand(val groupKey: String) : RowCommand
+    // ---- M4b ----
+    data class ShowWaterfall(val request: WaterfallRequest) : RowCommand
+    data class FilterBy(val grouping: Grouping) : RowCommand
+    data class MockEndpoint(val tx: Transaction) : RowCommand
+    data class ResendPush(val msg: FcmMessage) : RowCommand
+    data class ComposePush(val seed: FcmMessage) : RowCommand
 }
+
+/**
+ * What the M4b items need to know about a row beyond the row itself: every grouping it belongs to
+ * (configured keys first, then its trace — [Flows.groupingsFor]) and whether the Advanced items may
+ * appear (Advanced on). Empty by default, which is exactly the M4a menu.
+ */
+data class MenuContext(val groupings: List<Grouping> = emptyList(), val advanced: Boolean = false)
 
 data class MenuItem(val label: String, val command: RowCommand)
 
 /**
- * The row context menu, item for item the plugin's (`LogPosePanel.ListMouse.maybePopup`) minus
- * what arrives with M4b: no correlation-key or trace waterfall/filter items, no `Mock this
- * endpoint…`, no push re-send. Order and labels match, so a tester moving between the IDE and the
- * app finds the same menu.
+ * The row context menu, item for item the plugin's (`LogPosePanel.ListMouse.maybePopup`): collapse,
+ * then **key-first** `Show waterfall — order_id …` / `Filter by order_id …` pairs, then the kind's
+ * own items — with `Show in flow` on a traced HTTP row that has no key item, `Mock this endpoint…`
+ * and push re-send/compose behind Advanced, and the trace pair on push and structured rows. Order
+ * and labels match, so a tester moving between the IDE and the app finds the same menu.
  */
 object RowMenu {
 
@@ -43,6 +61,7 @@ object RowMenu {
         row: RowCollapse.Row,
         shown: LogEvent,
         collapse: Pair<RowCollapse.Row.Group, Boolean>?,
+        context: MenuContext = MenuContext(),
     ): List<MenuItem> = buildList {
         collapse?.let { (group, expanded) ->
             val label = when (group.groupKind) {
@@ -52,11 +71,26 @@ object RowMenu {
             }
             add(MenuItem(label, RowCommand.ToggleExpand(group.key)))
         }
-        when (shown) {
-            is LogEvent.Http -> addAll(http(shown.tx))
-            is LogEvent.Fcm -> addAll(fcm(shown.msg))
-            else -> addAll(structured(shown))
+        // The key leads: `order_id 21053953` is the id a human knows.
+        context.groupings.filterNot { it.isTrace }.forEach { g ->
+            add(MenuItem("Show waterfall  —  ${g.shortLabel}", RowCommand.ShowWaterfall(WaterfallRequest(g, context.groupings))))
+            add(MenuItem("Filter by ${g.shortLabel}", RowCommand.FilterBy(g)))
         }
+        when (shown) {
+            is LogEvent.Http -> addAll(http(shown.tx, context))
+            is LogEvent.Fcm -> addAll(fcm(shown, context))
+            else -> addAll(structured(shown, context))
+        }
+    }
+
+    /** The trace pair, said out loud as *trace* — never a bare hash beside a key item. */
+    private fun traceItems(event: LogEvent, context: MenuContext): List<MenuItem> {
+        val trace = event.traceId?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val g = context.groupings.firstOrNull { it.isTrace } ?: return emptyList()
+        return listOf(
+            MenuItem("Show waterfall  —  trace $trace", RowCommand.ShowWaterfall(WaterfallRequest(g, context.groupings))),
+            MenuItem("Filter by trace $trace", RowCommand.FilterBy(g)),
+        )
     }
 
     /** ⌘C / the menu on a multi-selection: one line per event, a collapsed row expanded into all of its. */
@@ -65,17 +99,27 @@ object RowMenu {
 
     fun copiedToast(n: Int) = if (n == 1) "Copied 1 row" else "Copied $n rows"
 
-    private fun http(tx: Transaction): List<MenuItem> = buildList {
+    private fun http(tx: Transaction, context: MenuContext): List<MenuItem> = buildList {
         add(MenuItem("Copy as cURL", RowCommand.Copy(CurlBuilder.build(tx), "cURL copied")))
         add(MenuItem("Copy as JSON", RowCommand.Copy(pretty.encodeToString(Transaction.serializer(), tx), "Transaction JSON copied")))
         add(MenuItem("Copy URL", RowCommand.Copy(tx.request.url, "URL copied")))
         tx.response?.body?.text?.let { add(MenuItem("Copy response body", RowCommand.Copy(it, "Response body copied"))) }
+        if (Flows.offersShowInFlow(context.groupings)) {
+            add(MenuItem("Show in flow", RowCommand.ShowWaterfall(WaterfallRequest(context.groupings.first(), context.groupings))))
+        }
+        if (context.advanced) add(MenuItem("Mock this endpoint…", RowCommand.MockEndpoint(tx)))
         val key = MutedEndpoints.keyOf(tx)
         add(MenuItem(if (MutedEndpoints.isMuted(tx)) "Unmute  $key" else "Mute  $key", RowCommand.ToggleMute(tx)))
         if (MutedEndpoints.patterns().isNotEmpty()) add(MenuItem("Clear all mutes", RowCommand.ClearMutes))
     }
 
-    private fun fcm(msg: FcmMessage): List<MenuItem> = buildList {
+    private fun fcm(event: LogEvent.Fcm, context: MenuContext): List<MenuItem> = buildList {
+        val msg = event.msg
+        // A push is where a flow starts, so the first thing offered on one is starting it again.
+        if (context.advanced && PushReplay.canReplay(msg)) {
+            add(MenuItem("Re-send this push", RowCommand.ResendPush(msg)))
+            add(MenuItem("Compose push…", RowCommand.ComposePush(msg)))
+        }
         add(MenuItem("Copy as JSON", RowCommand.Copy(pretty.encodeToString(FcmMessage.serializer(), msg), "FCM JSON copied")))
         if (msg.data.isNotEmpty()) {
             add(
@@ -85,12 +129,13 @@ object RowMenu {
                 ),
             )
         }
+        addAll(traceItems(event, context))
     }
 
-    private fun structured(ev: LogEvent): List<MenuItem> = listOf(
+    private fun structured(ev: LogEvent, context: MenuContext): List<MenuItem> = listOf(
         MenuItem("Copy as JSON", RowCommand.Copy(pretty.encodeToString(Envelope.serializer(), ev.envelope), "Event JSON copied")),
         MenuItem("Copy payload", RowCommand.Copy(pretty.encodeToString(JsonElement.serializer(), ev.envelope.payload), "Payload copied")),
-    )
+    ) + traceItems(ev, context)
 
     /** The lines a copied timeline carries for [rows], in list order, folds expanded into members. */
     fun timelineLines(rows: List<RowCollapse.Row>, events: Map<String, LogEvent>): List<String> =

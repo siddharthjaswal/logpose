@@ -13,6 +13,21 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
+/**
+ * What else follows a capture's lifecycle and reverse channel — the Advanced section's mocks and
+ * push (M4b). Called on whichever thread the event happens on (the UI for start/stop, the reader for
+ * control messages and a stream that ends by itself); implementations hop off it for any I/O.
+ */
+interface CaptureHooks {
+    fun started(serial: String) {}
+
+    /** Every reverse-channel message: hello, mock acks, push acks. */
+    fun control(msg: ControlMessage) {}
+
+    /** Exactly once per session, however it ended — the user's Stop, a device drop, an error. */
+    fun ended(serial: String) {}
+}
+
 /** Something that streams LogPose-tag lines from one device. [LogcatReader] in production. */
 interface LineSource {
     fun start(onLine: (String) -> Unit, onError: (String) -> Unit, onStopped: () -> Unit)
@@ -67,6 +82,12 @@ class CaptureSession(
     @Volatile var recorder: SessionRecorder? = null
         private set
 
+    /** Mocks and push, when the Advanced section is wired in. */
+    @Volatile var hooks: CaptureHooks? = null
+
+    /** Cleared when a session's [CaptureHooks.ended] has fired, so it fires once per session. */
+    private var endedOnce = java.util.concurrent.atomic.AtomicBoolean(true)
+
     @Volatile private var source: LineSource? = null
     @Volatile private var parser = TransactionParser()
     /** Bumped per start, so a reader we already replaced cannot end the session that replaced it. */
@@ -96,8 +117,11 @@ class CaptureSession(
                 rec?.append(CaptureLines.of(msg.hello))
                 rec?.updateMeta { it.copy(appPackage = msg.hello.pkg, libVersion = msg.hello.libVersion) }
             }
+            hooks?.control(msg)
         }
         _state.value = after
+        val ended = java.util.concurrent.atomic.AtomicBoolean(false).also { endedOnce = it }
+        hooks?.started(serial)
         val gen = ++generation
         val s = sourceFor(serial)
         source = s
@@ -113,8 +137,8 @@ class CaptureSession(
                     store.add(event)
                 }
             },
-            onError = { msg -> if (gen == generation) { transition(SessionEvent.Failed(serial, msg)); endRecording(rec) } },
-            onStopped = { if (gen == generation) { transition(SessionEvent.StreamEnded(serial)); endRecording(rec) } },
+            onError = { msg -> if (gen == generation) { transition(SessionEvent.Failed(serial, msg)); endRecording(rec); fireEnded(ended, serial) } },
+            onStopped = { if (gen == generation) { transition(SessionEvent.StreamEnded(serial)); endRecording(rec); fireEnded(ended, serial) } },
         )
     }
 
@@ -128,6 +152,11 @@ class CaptureSession(
         source?.stop()
         source = null
         endRecording(recorder)
+        (before as? SessionState.Running)?.let { fireEnded(endedOnce, it.serial) }
+    }
+
+    private fun fireEnded(flag: java.util.concurrent.atomic.AtomicBoolean, serial: String) {
+        if (flag.compareAndSet(false, true)) hooks?.ended(serial)
     }
 
     private fun endRecording(rec: SessionRecorder?) {

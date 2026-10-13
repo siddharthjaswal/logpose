@@ -30,6 +30,9 @@ import io.github.siddharthjaswal.logpose.capture.CaptureReader
 import io.github.siddharthjaswal.logpose.desktop.ui.ShareActions
 import io.github.siddharthjaswal.logpose.desktop.ui.DetailActions
 import io.github.siddharthjaswal.logpose.desktop.ui.TimelineActions
+import io.github.siddharthjaswal.logpose.desktop.ui.AdvancedActions
+import io.github.siddharthjaswal.logpose.desktop.ui.CorrelationActions
+import io.github.siddharthjaswal.logpose.desktop.ui.WaterfallActions
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isMetaPressed
@@ -119,6 +122,13 @@ private fun App(model: AppModel, adb: AdbStatus) {
     val view by model.view.collectAsState()
     val expanded by model.expanded.collectAsState()
     val pinned by model.pinnedOccurrence.collectAsState()
+    val correlation by model.correlationFilter.collectAsState()
+    val waterfall by model.waterfall.collectAsState()
+    val keys by model.keys.collectAsState()
+    val find by model.find.collectAsState()
+    val advanced by model.advanced.ui.collectAsState()
+    val mcp by model.mcp.ui.collectAsState()
+    val serveBusy by model.serveBusy.collectAsState()
     // A one-second clock, only while a session runs: it is what lets "no LogPose events" appear
     // 20 s in without any event arriving to trigger a recomposition.
     val now by produceState(System.currentTimeMillis(), session) {
@@ -145,6 +155,8 @@ private fun App(model: AppModel, adb: AdbStatus) {
             filter = filter, view = view, expanded = expanded, pinnedOccurrence = pinned,
             elapsedOf = { id -> model.session.store.elapsedMillis(id).takeIf { it > 0 } },
             transitions = { w -> model.session.workerLifecycle.transitions(model.session.workerLifecycle.keyOf(w)) },
+            correlation = correlation, waterfall = waterfall, keys = keys, find = find,
+            advanced = advanced, mcp = mcp, serveBusy = serveBusy,
         ),
         ScreenActions(
             onDownloadAdb = model::downloadPlatformTools,
@@ -181,16 +193,61 @@ private fun App(model: AppModel, adb: AdbStatus) {
                 onToggleExpand = model::toggleExpanded,
                 onCommand = model::run,
                 menuFor = model::menuFor,
+                onFlow = model::openFlow,
             ),
             detail = DetailActions(
                 onClose = { model.selectEvent(null) },
                 onStep = model::pinOccurrence,
                 onCopy = model::copy,
+                onOpenTrace = model::openTrace,
+            ),
+            onClearCorrelation = { model.setCorrelationFilter(null) },
+            waterfall = WaterfallActions(
+                onSelectLane = model::selectLane,
+                onSwitch = { g -> waterfall?.let { model.openWaterfall(it.request.copy(grouping = g)) } },
+                onEditKeys = model::openKeys,
+                onFindByValue = model::openFind,
+                onClose = model::closeWaterfall,
+            ),
+            correlation = CorrelationActions(
+                onKeysChange = model::editKeys,
+                onKeysSave = model::saveKeys,
+                onKeysClose = model::closeKeys,
+                onFindChange = model::updateFind,
+                onFindCommit = model::commitFind,
+                onFindClose = model::closeFind,
+            ),
+            advanced = AdvancedActions(
+                onAdvanced = model::setAdvanced,
+                onWriter = model::setMockWriter,
+                onEditRule = model.advanced::editRule,
+                onToggleRule = model.advanced::setRuleEnabled,
+                onDeleteRule = model.advanced::deleteRule,
+                onDisableAll = model.advanced::disableAll,
+                onEditorChange = model.advanced::updateEditor,
+                onEditorSave = model.advanced::saveEditor,
+                onEditorClose = model.advanced::closeEditor,
+                onScenariosMenu = { model.advanced.toggleScenariosMenu(it) },
+                onSaveRules = { model.advanced.openSaveScenario(false) { model.session.store.snapshot() } },
+                onSnapshot = { model.advanced.openSaveScenario(true) { model.session.store.snapshot() } },
+                onLoadScenario = model.advanced::loadScenario,
+                onDeleteScenario = model.advanced::deleteScenario,
+                onSaveScenarioChange = { ui -> model.advanced.updateSaveScenario(ui) { model.session.store.snapshot() } },
+                onSaveScenarioCommit = { model.advanced.commitSaveScenario { model.session.store.snapshot() } },
+                onSaveScenarioClose = model.advanced::closeSaveScenario,
+                onCompose = { model.advanced.openCompose() },
+                onComposeChange = model.advanced::updateCompose,
+                onComposeSend = model.advanced::sendCompose,
+                onComposeClose = model.advanced::closeCompose,
+                onProjectFolder = { chooseFolder(advanced.location?.projectDir, "Choose your app's project folder")?.let(model::setProjectDir) },
+                onClearProjectFolder = { model.setProjectDir(null) },
+                onServe = model::setServing,
+                onCopy = model::copy,
             ),
             share = ShareActions(
                 onClose = model.share::close,
                 onOptions = model.share::setOptions,
-                onChooseFolder = { chooseFolder(share?.folder)?.let(model.share::setFolder) },
+                onChooseFolder = { chooseFolder(share?.folder, "Save captures to")?.let(model.share::setFolder) },
                 onExport = model.share::export,
                 onReveal = model.share::reveal,
                 onCopyFile = model.share::copyFile,
@@ -210,10 +267,10 @@ private fun chooseCaptureFile(): File? {
 }
 
 /** A folder picker for the share sheet's output (macOS shows folders only with this property set). */
-private fun chooseFolder(current: File?): File? {
+private fun chooseFolder(current: File?, title: String): File? {
     System.setProperty("apple.awt.fileDialogForDirectories", "true")
     try {
-        val dialog = FileDialog(null as Frame?, "Save captures to", FileDialog.LOAD)
+        val dialog = FileDialog(null as Frame?, title, FileDialog.LOAD)
         current?.let { dialog.directory = it.path }
         dialog.isVisible = true
         val name = dialog.file ?: return null

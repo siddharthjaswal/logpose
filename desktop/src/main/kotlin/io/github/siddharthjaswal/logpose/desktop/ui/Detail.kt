@@ -60,6 +60,8 @@ class DetailActions(
     /** The stepper moved to this occurrence — pin it, so a new poll doesn't yank the card forward. */
     val onStep: (String) -> Unit = {},
     val onCopy: (text: String, toast: String) -> Unit = { _, _ -> },
+    /** A trace chip: open that trace as a waterfall (M4b). */
+    val onOpenTrace: (String) -> Unit = {},
 )
 
 private val pretty = Json { prettyPrint = true; encodeDefaults = true }
@@ -142,11 +144,11 @@ private fun Card(modifier: Modifier = Modifier, content: @Composable () -> Unit)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun Chips(chips: List<DetailContent.Chip>, live: Pair<String, String>? = null) {
+private fun Chips(chips: List<DetailContent.Chip>, live: Pair<String, String>? = null, onOpenTrace: (String) -> Unit = {}) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         chips.forEach { chip ->
-            // Trace chips stay visibly links (accent); the waterfall they open arrives with M4b.
-            StatChipView(chip, value = if (live != null && chip.caption == live.first) live.second else chip.value)
+            // A trace chip is a link into that trace's waterfall — the plugin's `onOpenTrace`.
+            StatChipView(chip, value = if (live != null && chip.caption == live.first) live.second else chip.value, onLink = onOpenTrace)
         }
     }
 }
@@ -223,6 +225,7 @@ private fun HttpHero(
             Chips(
                 DetailContent.httpChips(tx, event.envelope),
                 live = if (pending) DetailContent.CAPTION_DURATION to DetailContent.liveDuration(elapsed ?: 0) else null,
+                onOpenTrace = actions.onOpenTrace,
             )
             Spacer(Modifier.height(12.dp))
             Row {
@@ -278,7 +281,7 @@ private fun FcmHero(event: LogEvent.Fcm, actions: DetailActions) {
             Spacer(Modifier.height(6.dp))
             SelectionContainer { T(DetailContent.fcmSummary(msg), p.text, style = Type.monoSmall.copy(fontSize = 13.sp, lineHeight = 18.sp), maxLines = 4) }
             Spacer(Modifier.height(8.dp))
-            Chips(DetailContent.fcmChips(msg, event.envelope))
+            Chips(DetailContent.fcmChips(msg, event.envelope), onOpenTrace = actions.onOpenTrace)
             Spacer(Modifier.height(12.dp))
             PillButton("Copy JSON", filled = false) { actions.onCopy(pretty.encodeToString(FcmMessage.serializer(), msg), "FCM JSON copied") }
         }
@@ -328,7 +331,7 @@ private fun GenericHero(
                 }
             }
             Spacer(Modifier.height(8.dp))
-            Chips(DetailContent.genericChips(event))
+            Chips(DetailContent.genericChips(event), onOpenTrace = actions.onOpenTrace)
             val sections = presentation?.sections.orEmpty()
             val observed = (event as? LogEvent.Worker)?.let { DetailContent.workerTransitions(transitions(it)) }.orEmpty()
             if (sections.isNotEmpty() || observed.isNotEmpty()) {

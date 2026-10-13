@@ -1,6 +1,9 @@
 package io.github.siddharthjaswal.logpose.desktop.timeline
 
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.Grouping
+import io.github.siddharthjaswal.logpose.desktop.waterfall.Flows
+import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.presentation.EventType
@@ -31,6 +34,10 @@ data class TimelineView(
     val empty: FilterPresentation.EmptyState?,
     /** Every event id in the list → the row standing for it (folded members included). */
     val memberIndex: Map<String, RowCollapse.Row>,
+    /** Anchor ids of rows that paint the `⇉ flow` button when armed (M4b) — decided off the UI thread. */
+    val flowable: Set<String> = emptySet(),
+    /** The correlation chip this view was filtered by, if any. */
+    val correlation: Grouping? = null,
 ) {
     val shown: Int get() = filtered.size
 
@@ -54,20 +61,29 @@ object TimelineViews {
         expanded: Set<String> = emptySet(),
         sessionOf: (String) -> Int = { 0 },
         version: Long = 0,
+        /** The correlation chip (M4b): a key or pasted-value grouping the list is narrowed to. */
+        correlation: Grouping? = null,
+        /** Whether [LogEvent] carries the chip's value — the host's cached-haystack match. */
+        inGroup: (LogEvent, Grouping) -> Boolean = { _, _ -> false },
+        /** Whether a row can offer a key grouping — a cache read (`CorrelationIndex.hasCachedKeyValue`). */
+        hasKey: (LogEvent) -> Boolean = { false },
     ): TimelineView {
         // Over the FULL capture: filtering must not break a burst chain or change a call's ordinal.
         val marks = DuplicateDetector.analyze(events.filterIsInstance<LogEvent.Http>().map { it.tx })
-        val passes = { e: LogEvent, s: FilterState -> FilterPresentation.passes(e, s, { it in marks }, null) }
+        val chip = correlation?.let { g -> { e: LogEvent -> inGroup(e, g) } }
+        val passesWith = { e: LogEvent, s: FilterState, withChip: Boolean ->
+            FilterPresentation.passes(e, s, { it in marks }, if (withChip) chip else null)
+        }
+        val passes = { e: LogEvent, s: FilterState -> passesWith(e, s, true) }
         val filtered = events.filter { passes(it, state) }
         val hiddenDb = FilterPresentation.wouldMatchHiddenDb(state, events)
         val empty = if (events.isEmpty() || filtered.isNotEmpty()) null else FilterPresentation.emptyState(
             total = events.size,
             kinds = events.groupingBy { it.kind }.eachCount(),
             state = state,
-            correlationLabel = null,
+            correlationLabel = correlation?.shortLabel,
             wouldMatchHiddenDb = hiddenDb,
-            // No correlation chip in M4a, so the predicate ignores the flag.
-            relaxations = FilterPresentation.relaxations(events, state, null) { e, s, _ -> passes(e, s) },
+            relaxations = FilterPresentation.relaxations(events, state, correlation?.shortLabel) { e, s, withChip -> passesWith(e, s, withChip) },
         )
         // Collapsing LAST, over the filtered list — the store keeps every event.
         val rows = RowCollapse.collapse(filtered, expanded, marks, sessionOf)
@@ -80,6 +96,8 @@ object TimelineViews {
             hiddenDbMatch = hiddenDb,
             empty = empty,
             memberIndex = RowCollapse.memberIndex(rows),
+            flowable = rows.filter { Flows.paintsFlow(it, MutedEndpoints::isMuted, hasKey) }.mapTo(HashSet()) { it.anchorId },
+            correlation = correlation,
         )
     }
 
@@ -129,7 +147,8 @@ object FilterEdits {
     fun clear(state: FilterState, id: FilterPresentation.FilterId): FilterState = when (id) {
         FilterPresentation.FilterId.STATUS -> state.copy(statusClasses = emptySet())
         FilterPresentation.FilterId.METHOD -> state.copy(methods = emptySet())
-        // No correlation chip until M4b; nothing to clear.
+        // The correlation chip lives beside the FilterState (it is a Grouping, not a field): the
+        // host clears it alongside — see AppModel.setCorrelationFilter.
         FilterPresentation.FilterId.CORRELATION -> state
         FilterPresentation.FilterId.HIDE_NOISE -> state.copy(hideNoise = false)
         FilterPresentation.FilterId.DUPES -> state.copy(duplicatesOnly = false)

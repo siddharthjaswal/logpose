@@ -45,6 +45,7 @@ import androidx.compose.ui.window.PopupProperties
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
 import io.github.siddharthjaswal.logpose.desktop.timeline.FilterEdits
 import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineView
+import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.presentation.EventType
 import io.github.siddharthjaswal.logpose.presentation.FilterPresentation
@@ -64,6 +65,9 @@ fun FilterBar(
     onChange: (FilterState) -> Unit,
     modifier: Modifier = Modifier,
     popoverInitiallyOpen: Boolean = false,
+    /** The correlation chip (M4b) — a Grouping beside the FilterState, cleared through [onClearCorrelation]. */
+    correlation: Grouping? = null,
+    onClearCorrelation: () -> Unit = {},
 ) {
     val p = LocalPalette.current
     val density = LocalDensity.current
@@ -113,7 +117,7 @@ fun FilterBar(
                 }
                 Spacer(Modifier.width(8.dp)); VDivider(); Spacer(Modifier.width(8.dp))
                 Box {
-                    FiltersButton(FilterPresentation.badgeCount(state, correlationActive = false), narrow) { popover = !popover }
+                    FiltersButton(FilterPresentation.badgeCount(state, correlationActive = correlation != null), narrow) { popover = !popover }
                     if (popover) {
                         Popup(
                             offset = IntOffset(0, with(density) { 28.dp.roundToPx() }),
@@ -127,7 +131,7 @@ fun FilterBar(
             T(view.countLabel, p.textMuted, style = Type.monoSmall.copy(fontSize = if (narrow) 10.sp else 11.sp))
         }
         // ---- echo row -----------------------------------------------------------------------
-        val chips = FilterPresentation.echoChips(state, correlationLabel = null, narrow = narrow)
+        val chips = FilterPresentation.echoChips(state, correlationLabel = correlation?.shortLabel, narrow = narrow)
         val explainer = FilterPresentation.explainer(state, view.hiddenDbMatch, narrow)
         if (chips.isNotEmpty() || explainer != null) {
             Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
@@ -136,7 +140,9 @@ fun FilterBar(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 chips.forEach { chip ->
-                    RemovableChip(chip.label, chip.tooltip) { onChange(FilterEdits.loosen(state, chip.id)) }
+                    RemovableChip(chip.label, chip.tooltip) {
+                        if (chip.id == FilterPresentation.FilterId.CORRELATION) onClearCorrelation() else onChange(FilterEdits.loosen(state, chip.id))
+                    }
                     Spacer(Modifier.width(8.dp))
                 }
                 // The explainer is the one part allowed to shrink: a long one ellipsizes rather than
@@ -149,7 +155,7 @@ fun FilterBar(
                         Spacer(Modifier.width(8.dp))
                     }
                 }
-                LinkText("Clear all") { onChange(FilterEdits.clearHidden(state)) }
+                LinkText("Clear all") { onChange(FilterEdits.clearHidden(state)); onClearCorrelation() }
             }
         }
     }

@@ -70,6 +70,14 @@ import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineView
 import io.github.siddharthjaswal.logpose.desktop.timeline.TimelineViews
 import io.github.siddharthjaswal.logpose.model.LogEvent
 import io.github.siddharthjaswal.logpose.presentation.FilterState
+import io.github.siddharthjaswal.logpose.analysis.Correlation
+import io.github.siddharthjaswal.logpose.analysis.Grouping
+import io.github.siddharthjaswal.logpose.desktop.app.AdvancedUi
+import io.github.siddharthjaswal.logpose.desktop.app.FindUi
+import io.github.siddharthjaswal.logpose.desktop.app.KeysUi
+import io.github.siddharthjaswal.logpose.desktop.mcp.McpUi
+import io.github.siddharthjaswal.logpose.desktop.waterfall.WaterfallView
+import io.github.siddharthjaswal.logpose.presentation.FilterPresentation
 
 /** Everything the window paints, as plain values — so the off-screen renders use the real screen. */
 data class ScreenState(
@@ -103,6 +111,14 @@ data class ScreenState(
     /** Render seeds: open the Filters popover / a find-in-body query on first composition. */
     val filterPopover: Boolean = false,
     val detailFind: String? = null,
+    // M4b — waterfall, correlation, Advanced, Serve MCP
+    val correlation: Grouping? = null,
+    val waterfall: WaterfallView? = null,
+    val keys: KeysUi? = null,
+    val find: FindUi? = null,
+    val advanced: AdvancedUi = AdvancedUi(),
+    val mcp: McpUi = McpUi(),
+    val serveBusy: Boolean = false,
 )
 
 class ScreenActions(
@@ -126,6 +142,10 @@ class ScreenActions(
     val onFilter: (FilterState) -> Unit = {},
     val timeline: TimelineActions = TimelineActions(onSelect = { onSelectEvent(it) }),
     val detail: DetailActions = DetailActions(onClose = { onSelectEvent(null) }),
+    val onClearCorrelation: () -> Unit = {},
+    val waterfall: WaterfallActions = WaterfallActions(),
+    val correlation: CorrelationActions = CorrelationActions(),
+    val advanced: AdvancedActions = AdvancedActions(),
 )
 
 @Composable
@@ -153,8 +173,12 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
                 state.viewing?.let { ViewingBanner(it, actions) }
                 state.pendingBookmark?.let { BookmarkPrompt(it, state.marks.bookmarks.size + 1, actions) }
                 state.notice?.let { NoticeStrip(it, actions) }
-                val view = state.view ?: remember(state.snapshot.version, state.filter, state.expanded) {
-                    TimelineViews.build(state.snapshot.events, state.filter, state.expanded, version = state.snapshot.version)
+                val view = state.view ?: remember(state.snapshot.version, state.filter, state.expanded, state.correlation) {
+                    TimelineViews.build(
+                        state.snapshot.events, state.filter, state.expanded, version = state.snapshot.version,
+                        correlation = state.correlation,
+                        inGroup = { e, g -> Correlation.containsValue(Correlation.searchableText(e), g.value) },
+                    )
                 }
                 val showTimeline = state.placeholder == Placeholder.None || state.viewing != null
                 val target = DetailModel.resolve(view, state.selectedEventId, state.pinnedOccurrence) { id ->
@@ -165,17 +189,24 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
                     // splitter) — so its narrow layout follows the list's width, not the window's.
                     Column(Modifier.weight(1f).fillMaxHeight()) {
                     if (showTimeline) {
-                        FilterBar(state.filter, view, actions.onFilter, popoverInitiallyOpen = state.filterPopover)
+                        FilterBar(
+                            state.filter, view, actions.onFilter, popoverInitiallyOpen = state.filterPopover,
+                            correlation = state.correlation, onClearCorrelation = actions.onClearCorrelation,
+                        )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
                     }
+                    MocksStrip(state.advanced, actions.advanced)
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         val empty = view.empty
                         when {
                             !showTimeline -> EmptyState(state.placeholder)
                             empty != null -> FilteredToNothing(
                                 empty,
-                                onClearAll = { actions.onFilter(FilterEdits.clearAll(state.filter)) },
-                                onLoosen = { id -> actions.onFilter(FilterEdits.loosen(state.filter, id)) },
+                                onClearAll = { actions.onFilter(FilterEdits.clearAll(state.filter)); actions.onClearCorrelation() },
+                                onLoosen = { id ->
+                                    if (id == FilterPresentation.FilterId.CORRELATION) actions.onClearCorrelation()
+                                    else actions.onFilter(FilterEdits.loosen(state.filter, id))
+                                },
                             )
                             else -> Timeline(
                                 view, state.selectedEventId, Modifier.fillMaxSize(),
@@ -185,7 +216,14 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
                         }
                     }
                     }
-                    if (target != null) {
+                    val flow = state.waterfall
+                    if (flow != null) {
+                        Box(Modifier.width(1.dp).fillMaxHeight().background(p.borderSubtle))
+                        WaterfallCard(
+                            flow, state.selectedEventId, hostAge = { state.elapsedOf(it) ?: 0L },
+                            Modifier.width(540.dp).fillMaxHeight(), actions.waterfall,
+                        )
+                    } else if (target != null) {
                         Box(Modifier.width(1.dp).fillMaxHeight().background(p.borderSubtle))
                         DetailPane(
                             target, { view.duplicateMarks[it.id] }, Modifier.width(470.dp).fillMaxHeight(),
@@ -198,6 +236,11 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
         }
         WirelessSheets(state.wireless, actions.wireless)
         ShareSheet(state.share, actions.share)
+        KeysSheet(state.keys, actions.correlation)
+        FindSheet(state.find, actions.correlation)
+        MockEditorSheet(state.advanced.editor, actions.advanced)
+        ComposePushSheet(state.advanced.compose, actions.advanced)
+        SaveScenarioSheet(state.advanced.saveScenario, state.advanced.location?.label ?: "this Mac", actions.advanced)
     }
 }
 
@@ -221,6 +264,7 @@ private fun Sidebar(state: ScreenState, actions: ScreenActions, modifier: Modifi
             entries.forEach { e -> DeviceRow(e, state, running, actions) }
         }
         Link("How to connect a phone", Modifier.padding(horizontal = 16.dp, vertical = 6.dp), actions.wireless.onHowToConnect)
+        DeveloperPanel(state.advanced, state.mcp, state.serveBusy, actions.advanced)
         val adb = state.adb as? AdbStatus.Ready
         if (adb != null) {
             T(

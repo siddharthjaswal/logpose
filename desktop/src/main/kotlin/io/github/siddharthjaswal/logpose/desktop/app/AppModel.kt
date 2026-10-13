@@ -48,6 +48,18 @@ import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
+import io.github.siddharthjaswal.logpose.analysis.Correlation
+import io.github.siddharthjaswal.logpose.analysis.FindByValue
+import io.github.siddharthjaswal.logpose.analysis.FindQuery
+import io.github.siddharthjaswal.logpose.analysis.Grouping
+import io.github.siddharthjaswal.logpose.desktop.correlation.KeysDraft
+import io.github.siddharthjaswal.logpose.desktop.correlation.Vocabulary
+import io.github.siddharthjaswal.logpose.desktop.mcp.DesktopMcp
+import io.github.siddharthjaswal.logpose.desktop.timeline.MenuContext
+import io.github.siddharthjaswal.logpose.desktop.waterfall.Flows
+import io.github.siddharthjaswal.logpose.desktop.waterfall.WaterfallRequest
+import io.github.siddharthjaswal.logpose.desktop.waterfall.WaterfallView
+import io.github.siddharthjaswal.logpose.settings.CorrelationSettings
 
 /** Where adb stands — the first thing the window decides. */
 sealed interface AdbStatus {
@@ -69,11 +81,18 @@ data class ViewingFile(val name: String, val file: File, val events: Int, val ma
 /** A one-line message under the toolbar — a screenshot that failed, a file that wouldn't open. */
 data class Notice(val text: String, val error: Boolean = false, val id: Long = System.nanoTime())
 
+/** The keys sheet: the draft rows and where they will be saved. */
+data class KeysUi(val draft: KeysDraft, val where: String, val loading: Boolean = false)
+
+/** *Find by value…*: what was typed and what core says back (count before commit). */
+data class FindUi(val text: String = "", val preview: FindByValue.Preview = FindByValue.Preview("", null, FindByValue.Tone.NEUTRAL))
+
 class AppModel(
     private val scope: CoroutineScope,
     sessionsDir: File = SessionFiles.defaultDir(AdbLocator.appSupportDir()),
     sessionOverride: CaptureSession? = null,
-    settings: KeyValueStore = RememberedDevices.forApp(AdbLocator.appSupportDir()),
+    private val settings: KeyValueStore = RememberedDevices.forApp(AdbLocator.appSupportDir()),
+    appSupport: File = AdbLocator.appSupportDir(),
 ) {
     /**
      * Every session is recorded to `sessions/<timestamp>-<device>.ndjson` (M3) — the store is only
@@ -130,10 +149,219 @@ class AppModel(
 
     val share = ShareController(scope, writtenBy = "LogPose for Mac ${appVersion()}")
 
+    /** The device a mock-writer decision is about: the capturing one, else the selected one. */
+    private fun currentSerial(): String? =
+        (session.state.value as? SessionState.Running)?.serial ?: _selectedSerial.value.takeIf { _viewing.value == null }
+
+    /** Advanced (PRD §5.5): mocks, scenarios, push — and the one-mock-writer-per-device rule. */
+    val advanced = AdvancedController(
+        scope, settings, appSupport,
+        currentSerial = ::currentSerial,
+        capturing = { serial -> (session.state.value as? SessionState.Running)?.serial == serial },
+        say = { text, error -> say(text, error) },
+    )
+
+    /** Serve MCP (PRD §7). */
+    val mcp = DesktopMcp(settings, session, advanced, projectName = {
+        advanced.location.projectDir?.name ?: "LogPose for Mac"
+    })
+
     init {
         // Mutes are a global view preference (the plugin keeps them application-wide too), kept in
         // the app's settings file beside the remembered devices.
         MutedEndpoints.store = settings
+        session.hooks = advanced
+    }
+
+    // ---- M4b: correlation, waterfall ------------------------------------------------------------
+
+    private val _correlationFilter = MutableStateFlow<Grouping?>(null)
+    /** The correlation chip in the echo row: a key or pasted-value grouping the list is narrowed to. */
+    val correlationFilter: StateFlow<Grouping?> = _correlationFilter.asStateFlow()
+
+    /** Bumped when the vocabulary changes, so the view and the waterfall re-derive. */
+    private val keysVersion = MutableStateFlow(0)
+
+    private val _waterfallRequest = MutableStateFlow<WaterfallRequest?>(null)
+    private val _waterfall = MutableStateFlow<WaterfallView?>(null)
+    /** Non-null while the detail pane shows a flow; its members are an immutable snapshot. */
+    val waterfall: StateFlow<WaterfallView?> = _waterfall.asStateFlow()
+
+    private val _keys = MutableStateFlow<KeysUi?>(null)
+    val keys: StateFlow<KeysUi?> = _keys.asStateFlow()
+
+    private val _find = MutableStateFlow<FindUi?>(null)
+    val find: StateFlow<FindUi?> = _find.asStateFlow()
+    private var findJob: Job? = null
+
+    private val _serveBusy = MutableStateFlow(false)
+    val serveBusy: StateFlow<Boolean> = _serveBusy.asStateFlow()
+
+    /** The correlation store for the current location — the project's shared file, opened fresh, or the app's. */
+    private fun correlationStore(): KeyValueStore = Vocabulary.correlationStore(advanced.location, settings)
+
+    /** Reads the vocabulary (off the UI thread) into the index and re-extracts what's captured. */
+    fun reloadKeys() {
+        scope.launch(Dispatchers.IO) {
+            val keys = CorrelationSettings.keys(correlationStore())
+            session.correlation.setKeys(keys)
+            session.store.snapshot().forEach { session.correlation.warmValues(it) }
+            keysVersion.value++
+        }
+    }
+
+    private fun groupingsFor(event: LogEvent): List<Grouping> =
+        Flows.groupingsFor(event, session.correlation.matchable(event))
+
+    private fun inGroup(event: LogEvent, g: Grouping): Boolean = Correlation.containsValue(session.correlation.textOf(event), g.value)
+
+    fun openWaterfall(request: WaterfallRequest) { _waterfallRequest.value = request }
+
+    fun closeWaterfall() { _waterfallRequest.value = null }
+
+    /** The row's `⇉ flow` button: the row becomes selected (as a click on it would) and its best grouping opens. */
+    fun openFlow(row: RowCollapse.Row) {
+        scope.launch {
+            val request = withContext(Dispatchers.Default) { Flows.fromRowButton(row.lead, session.correlation.matchable(row.lead)) } ?: return@launch
+            selectEvent(row.anchorId, keepWaterfall = true)
+            openWaterfall(request)
+        }
+    }
+
+    /** A detail card's trace chip. */
+    fun openTrace(traceId: String) = openWaterfall(Flows.fromTraceChip(traceId))
+
+    /** A lane click: selects that event's row — which, as in the plugin, is also how the card is left. */
+    fun selectLane(id: String) {
+        val view = _view.value
+        val holder = view.memberIndex[id]
+        if (holder is RowCollapse.Row.Group && holder.key !in _expanded.value) _expanded.value = _expanded.value + holder.key
+        if (holder == null) { say("That row is hidden by the current filter"); return }
+        selectEvent(holder.anchorId.takeIf { holder.isGroup } ?: id)
+        if (holder.isGroup) pinOccurrence(id)
+    }
+
+    /** Narrowing the timeline to a grouping: a removable chip for a key, the search box for a trace. */
+    fun filterBy(grouping: Grouping) {
+        if (grouping.isTrace) {
+            _correlationFilter.value = null
+            setFilter(_filter.value.copy(urlQuery = grouping.value))
+        } else {
+            _correlationFilter.value = grouping
+        }
+    }
+
+    fun setCorrelationFilter(grouping: Grouping?) { _correlationFilter.value = grouping }
+
+    /** Opens the keys sheet, suggestions computed off the UI thread from the capture. */
+    fun openKeys() {
+        val where = advanced.location.label
+        _keys.value = KeysUi(KeysDraft(emptyList(), false, emptyList()), where, loading = true)
+        scope.launch {
+            val draft = withContext(Dispatchers.Default) {
+                val store = correlationStore()
+                val suggestions = runCatching { Correlation.suggest(session.store.snapshot()) }.getOrDefault(emptyList())
+                KeysDraft.open(CorrelationSettings.keys(store), suggestions, firstTime = !CorrelationSettings.configured(store))
+            }
+            if (_keys.value != null) _keys.value = KeysUi(draft, where)
+        }
+    }
+
+    fun editKeys(draft: KeysDraft) { _keys.value = _keys.value?.copy(draft = draft) }
+
+    fun closeKeys() { _keys.value = null }
+
+    /** Persists the vocabulary, drops a chip whose key went away, and re-extracts off the UI thread. */
+    fun saveKeys() {
+        val ui = _keys.value ?: return
+        if (ui.draft.problem() != null) return
+        val keys = ui.draft.result()
+        _keys.value = null
+        _correlationFilter.value?.let { active ->
+            if (active.kind == Grouping.Kind.KEY && keys.none { it.name.equals(active.key, true) && it.enabled }) _correlationFilter.value = null
+        }
+        scope.launch(Dispatchers.IO) {
+            CorrelationSettings.setKeys(correlationStore(), keys)
+            session.correlation.setKeys(keys)
+            session.store.snapshot().forEach { session.correlation.warmValues(it) }
+            keysVersion.value++
+        }
+    }
+
+    fun openFind() { _find.value = FindUi() }
+
+    fun closeFind() { findJob?.cancel(); _find.value = null }
+
+    /** Debounced (180ms, the plugin's), counted off the UI thread over cached haystacks. */
+    fun updateFind(text: String) {
+        _find.value = _find.value?.copy(text = text) ?: return
+        findJob?.cancel()
+        findJob = scope.launch {
+            delay(180)
+            val preview = withContext(Dispatchers.Default) { findPreview(text) }
+            _find.value = _find.value?.takeIf { it.text == text }?.copy(preview = preview) ?: _find.value
+        }
+    }
+
+    /** core's parse + preview; the second parse honours a key that opted in to short values. */
+    fun findPreview(text: String): FindByValue.Preview {
+        val events = session.store.snapshot()
+        val keys = session.correlation.keys()
+        var query = Correlation.parseFindQuery(text)
+        val shortKey = (query as? FindQuery.TooShort)?.key
+        if (shortKey != null && keys.any { it.name.equals(shortKey, true) && it.enabled && it.allowShortValues }) {
+            query = Correlation.parseFindQuery(text, allowShortValues = true)
+        }
+        return FindByValue.preview(
+            query,
+            matchCount = { g -> Flows.membersOf(g, events, keys, session.correlation::textOf).size },
+            keyLabelFor = { v -> mcpKeyLabel(events, v) },
+        )
+    }
+
+    private fun mcpKeyLabel(events: List<LogEvent>, value: String): String? {
+        val uncached = ArrayList<LogEvent>()
+        for (i in events.indices.reversed()) {
+            val cached = session.correlation.cachedValues(events[i])
+            if (cached == null) { uncached.add(events[i]); continue }
+            cached.firstOrNull { it.value.equals(value, ignoreCase = true) }?.let { return it.key }
+        }
+        if (uncached.isEmpty()) return null
+        return Correlation.keyLabelFor(uncached.asReversed(), session.correlation.keys(), value)
+    }
+
+    /** Enter / *Show waterfall*: settles a pending keystroke first, so a fast typist never opens a stale group. */
+    fun commitFind() {
+        val ui = _find.value ?: return
+        scope.launch {
+            findJob?.cancel()
+            val preview = withContext(Dispatchers.Default) { findPreview(ui.text) }
+            val g = preview.grouping
+            if (g == null) { _find.value = ui.copy(preview = preview); return@launch }
+            _find.value = null
+            openWaterfall(Flows.fromFind(g))
+        }
+    }
+
+    // ---- Advanced + Serve MCP -------------------------------------------------------------------
+
+    fun setAdvanced(on: Boolean) { advanced.setAdvanced(on); mcp.refresh() }
+
+    fun setMockWriter(serial: String, on: Boolean) { advanced.setWriter(serial, on); mcp.refresh() }
+
+    fun setProjectDir(dir: File?) {
+        advanced.setProjectDir(dir)
+        // After the location settles (setProjectDir hops to IO itself), re-read the vocabulary.
+        scope.launch { delay(150); reloadKeys() }
+    }
+
+    fun setServing(on: Boolean) {
+        if (_serveBusy.value) return
+        _serveBusy.value = true
+        scope.launch {
+            withContext(Dispatchers.IO) { if (on) mcp.start() else mcp.stop() }
+            _serveBusy.value = false
+        }
     }
 
     // ---- M4a: filter, folds, the derived timeline view -----------------------------------------
@@ -168,17 +396,41 @@ class AppModel(
     private fun launchView() {
         if (viewJob != null) return
         viewJob = scope.launch {
-            combine(feed.snapshots, _filter, _expanded, muteVersion) { snap, f, e, _ -> Triple(snap, f, e) }
+            combine(feed.snapshots, _filter, _expanded, muteVersion, combine(_correlationFilter, keysVersion) { c, _ -> c }) { snap, f, e, _, c -> ViewInputs(snap, f, e, c) }
                 .conflate()
-                .collect { (snap, f, e) ->
+                .collect { (snap, f, e, c) ->
                     val built = withContext(Dispatchers.Default) {
                         // Body search reaches the CorrelationIndex haystack (bodies, not headers), for
                         // queries of 3+ characters — FilterState's own rule, through its textOf hook.
-                        TimelineViews.build(snap.events, f.copy(textOf = session.correlation::textOf), e, session.store::sessionOf, ++builds)
+                        TimelineViews.build(
+                            snap.events, f.copy(textOf = session.correlation::textOf), e, session.store::sessionOf, ++builds,
+                            correlation = c, inGroup = ::inGroup, hasKey = session.correlation::hasCachedKeyValue,
+                        )
                     }
                     _view.value = built
                     val pruned = TimelineViews.prune(e, built)
                     if (pruned.size != e.size) _expanded.value = pruned
+                }
+        }
+    }
+
+    private data class ViewInputs(val snap: TimelineSnapshot, val f: FilterState, val e: Set<String>, val c: Grouping?)
+
+    /** The waterfall's members, re-derived off the UI thread on every snapshot, request or key change. */
+    private var waterfallJob: Job? = null
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun launchWaterfall() {
+        if (waterfallJob != null) return
+        waterfallJob = scope.launch {
+            combine(feed.snapshots, _waterfallRequest, keysVersion) { snap, r, _ -> snap to r }
+                .conflate()
+                .collect { (snap, request) ->
+                    _waterfall.value = request?.let { r ->
+                        withContext(Dispatchers.Default) {
+                            WaterfallView(r, Flows.membersOf(r.grouping, snap.events, session.correlation.keys(), session.correlation::textOf))
+                        }
+                    }
                 }
         }
     }
@@ -238,7 +490,8 @@ class AppModel(
         }
         val expanded = _expanded.value
         val collapse = TimelineViews.naturalGroupFor(view, row, expanded, session.store::sessionOf)?.let { it to (it.key in expanded) }
-        return RowMenu.items(row, shownEvent(row), collapse)
+        val shown = shownEvent(row)
+        return RowMenu.items(row, shown, collapse, MenuContext(groupingsFor(shown), advanced = advanced.ui.value.advanced))
     }
 
     fun run(command: RowCommand) {
@@ -247,6 +500,11 @@ class AppModel(
             is RowCommand.ToggleMute -> toggleMute(command.tx)
             RowCommand.ClearMutes -> clearMutes()
             is RowCommand.ToggleExpand -> toggleExpanded(command.groupKey)
+            is RowCommand.ShowWaterfall -> openWaterfall(command.request)
+            is RowCommand.FilterBy -> filterBy(command.grouping)
+            is RowCommand.MockEndpoint -> advanced.openMockEditor(command.tx)
+            is RowCommand.ResendPush -> advanced.resendPush(command.msg)
+            is RowCommand.ComposePush -> advanced.openCompose(command.seed)
         }
     }
 
@@ -263,7 +521,12 @@ class AppModel(
     fun start() {
         if (feedJob == null) feedJob = feed.launchIn(scope)
         launchView()
+        launchWaterfall()
         locateAdb()
+        reloadKeys()
+        // The mock-writer decision follows the device in focus and the session's state.
+        scope.launch { combine(_selectedSerial, session.state, _viewing) { a, b, c -> Triple(a, b, c) }.collect { advanced.refresh(); mcp.refresh() } }
+        if (mcp.wasServing()) setServing(true)
     }
 
     fun locateAdb() {
@@ -338,6 +601,7 @@ class AppModel(
     fun startSession() {
         val serial = _selectedSerial.value ?: return
         if (_viewing.value != null) return
+        _waterfallRequest.value = null
         _selectedEventId.value = null
         _selectedIds.value = emptySet()
         _marks.value = SessionMarks.EMPTY
@@ -358,12 +622,15 @@ class AppModel(
     }
 
     fun clearTimeline() {
+        _waterfallRequest.value = null
         session.store.clear()
         _selectedEventId.value = null
         _selectedIds.value = emptySet()
     }
 
-    fun selectEvent(id: String?) {
+    fun selectEvent(id: String?, keepWaterfall: Boolean = false) {
+        // Any explicit selection leaves the waterfall — the card follows the row again (the plugin's rule).
+        if (!keepWaterfall) _waterfallRequest.value = null
         // A different row has no occurrence to remember; the same row keeps its pin.
         if (id != _selectedEventId.value) _pinnedOccurrence.value = null
         _selectedEventId.value = id
@@ -448,6 +715,7 @@ class AppModel(
             }
             if (session.state.value is SessionState.Running) stopSession()
             _pendingBookmark.value = null
+            _waterfallRequest.value = null
             _selectedEventId.value = null
             _selectedIds.value = emptySet()
             viewedCapture = capture
@@ -472,6 +740,7 @@ class AppModel(
 
     fun backToLive() {
         if (_viewing.value == null) return
+        _waterfallRequest.value = null
         _viewing.value = null
         viewedCapture = null
         _marks.value = SessionMarks.EMPTY
@@ -508,6 +777,9 @@ class AppModel(
 
     fun shutdown() {
         wireless.shutdown()
+        // A writer's fail-safe clear first, while adb and the controller are still wired.
+        advanced.shutdown()
+        mcp.stop(remember = false)
         session.stop()
         // Give the recorder a moment to flush its last lines; it is a daemon thread otherwise.
         session.recorder?.awaitClosed(2_000)

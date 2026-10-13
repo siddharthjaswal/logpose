@@ -80,6 +80,8 @@ class TimelineActions(
     val onCommand: (RowCommand) -> Unit = {},
     /** The context menu for a row, built when it opens (it reads the current selection). */
     val menuFor: (RowCells) -> List<MenuItem> = { emptyList() },
+    /** The `⇉ flow` button (M4b): open the row's best grouping as a waterfall. */
+    val onFlow: (RowCollapse.Row) -> Unit = {},
 )
 
 /** The live tick's period: the plugin's 250ms timer, and only while a live row is on screen. */
@@ -135,6 +137,7 @@ fun Timeline(
                             item.cells,
                             selected = Selection.isSelected(row, selectedId, selectedIds),
                             elapsedOf = elapsedOf, tick = tick, actions = actions,
+                            flow = row.anchorId in view.flowable,
                         )
                     }
                     is TimelineItem.Mark -> BookmarkRow(item)
@@ -156,6 +159,8 @@ fun TimelineRow(
     elapsedOf: (String) -> Long? = { null },
     tick: State<Long> = remember { mutableLongStateOf(0) },
     actions: TimelineActions = TimelineActions(),
+    /** Whether an armed row paints `⇉ flow` over its time cell ([Flows.paintsFlow], decided off-thread). */
+    flow: Boolean = false,
 ) {
     val p = LocalPalette.current
     val row = cells.row
@@ -199,13 +204,18 @@ fun TimelineRow(
                     }
                     Spacer(Modifier.width(RowGeometry.GAP.dp))
                     val armed = selected || hovered
+                    // The flow button replaces the time cell on an armed row, exactly where the plugin
+                    // paints it (the band right of cURL); null leaves the time cell as it is.
+                    val flowCell: (@Composable () -> Unit)? = if (armed && flow) {
+                        { ActionCell("⇉ flow", RowGeometry.TIME) { actions.onFlow(row) } }
+                    } else null
                     when (cells) {
-                        is RowCells.Http -> HttpCells(cells, hovered, armed, elapsedOf, tick, actions)
-                        is RowCells.Fcm -> FcmCells(cells)
-                        is RowCells.Db -> DbCells(cells)
+                        is RowCells.Http -> HttpCells(cells, hovered, armed, elapsedOf, tick, actions, flowCell)
+                        is RowCells.Fcm -> FcmCells(cells, flowCell)
+                        is RowCells.Db -> DbCells(cells, flowCell)
                         is RowCells.Txn -> TxnCells(cells, hovered)
-                        is RowCells.Worker -> WorkerCells(cells, elapsedOf, tick)
-                        is RowCells.Generic -> GenericCells(cells)
+                        is RowCells.Worker -> WorkerCells(cells, elapsedOf, tick, flowCell)
+                        is RowCells.Generic -> GenericCells(cells, flowCell)
                     }
                 }
             }
@@ -239,6 +249,7 @@ private fun RowScope.HttpCells(
     elapsedOf: (String) -> Long?,
     tick: State<Long>,
     actions: TimelineActions,
+    flowCell: (@Composable () -> Unit)?,
 ) {
     val p = LocalPalette.current
     val h = c.content
@@ -297,7 +308,7 @@ private fun RowScope.HttpCells(
                 Meta(h.size, RowGeometry.SIZE, shade(p.textMuted))
             }
             Spacer(Modifier.width(RowGeometry.META_GAP.dp))
-            Meta(h.duration, RowGeometry.TIME, shade(p.textMuted))
+            flowCell?.invoke() ?: Meta(h.duration, RowGeometry.TIME, shade(p.textMuted))
         }
     }
 }
@@ -314,7 +325,7 @@ private const val SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 fun spinner(tick: Long): String = SPINNER[((tick / LIVE_TICK_MS) % SPINNER.length).toInt()].toString()
 
 @Composable
-private fun RowScope.FcmCells(c: RowCells.Fcm) {
+private fun RowScope.FcmCells(c: RowCells.Fcm, flowCell: (@Composable () -> Unit)?) {
     val p = LocalPalette.current
     // TOKEN / NOTIF / DATA is a label, not a severity — neutral.
     Pill(c.content.label, p.textDim, fill = p.bg2, style = Type.pill.copy(fontWeight = FontWeight.Bold))
@@ -328,11 +339,11 @@ private fun RowScope.FcmCells(c: RowCells.Fcm) {
     }
     Meta(c.content.keys, RowGeometry.SIZE, p.textMuted)
     Spacer(Modifier.width(RowGeometry.META_GAP.dp))
-    Meta(c.time, RowGeometry.TIME, p.textMuted)
+    flowCell?.invoke() ?: Meta(c.time, RowGeometry.TIME, p.textMuted)
 }
 
 @Composable
-private fun RowScope.DbCells(c: RowCells.Db) {
+private fun RowScope.DbCells(c: RowCells.Db, flowCell: (@Composable () -> Unit)?) {
     val p = LocalPalette.current
     val d = c.content
     val read = d.weight == RowContent.Weight.REGULAR
@@ -350,7 +361,7 @@ private fun RowScope.DbCells(c: RowCells.Db) {
     }
     Meta(d.fact, RowGeometry.FACT, p.textMuted)
     Spacer(Modifier.width(RowGeometry.META_GAP.dp))
-    Meta(c.time, RowGeometry.TIME, p.textMuted)
+    flowCell?.invoke() ?: Meta(c.time, RowGeometry.TIME, p.textMuted)
 }
 
 /** `transaction ✓ · 4 statements · 128ms`, faded unless it failed (then full strength, ✕ in danger). */
@@ -374,7 +385,7 @@ private fun RowScope.TxnCells(c: RowCells.Txn, hovered: Boolean) {
 }
 
 @Composable
-private fun RowScope.WorkerCells(c: RowCells.Worker, elapsedOf: (String) -> Long?, tick: State<Long>) {
+private fun RowScope.WorkerCells(c: RowCells.Worker, elapsedOf: (String) -> Long?, tick: State<Long>, flowCell: (@Composable () -> Unit)?) {
     val p = LocalPalette.current
     val w = c.content
     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
@@ -393,7 +404,7 @@ private fun RowScope.WorkerCells(c: RowCells.Worker, elapsedOf: (String) -> Long
     }
     Meta(w.fact, RowGeometry.FACT, p.textMuted)
     Spacer(Modifier.width(RowGeometry.META_GAP.dp))
-    if (c.live) LiveMeta(c, elapsedOf, tick) else Meta(c.time, RowGeometry.TIME, p.textMuted)
+    if (c.live) LiveMeta(c, elapsedOf, tick) else flowCell?.invoke() ?: Meta(c.time, RowGeometry.TIME, p.textMuted)
 }
 
 /**
@@ -423,7 +434,7 @@ private fun StateToken(token: RowContent.StateToken, tick: State<Long>) {
 }
 
 @Composable
-private fun RowScope.GenericCells(c: RowCells.Generic) {
+private fun RowScope.GenericCells(c: RowCells.Generic, flowCell: (@Composable () -> Unit)?) {
     val p = LocalPalette.current
     val g = c.content
     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
@@ -435,7 +446,7 @@ private fun RowScope.GenericCells(c: RowCells.Generic) {
     }
     Meta(g.fact, if (c.analytics) RowGeometry.FACT_ANALYTICS else RowGeometry.FACT, p.textMuted)
     Spacer(Modifier.width(RowGeometry.META_GAP.dp))
-    Meta(c.time, RowGeometry.TIME, p.textMuted)
+    flowCell?.invoke() ?: Meta(c.time, RowGeometry.TIME, p.textMuted)
 }
 
 /** The live time cell: reads the shared tick (so only live cells recompose) and the host clock. */

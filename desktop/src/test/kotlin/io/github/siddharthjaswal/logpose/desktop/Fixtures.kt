@@ -209,6 +209,37 @@ object Fixtures {
         return java.io.ByteArrayOutputStream().also { javax.imageio.ImageIO.write(img, "png", it) }.toByteArray()
     }
 
+    /**
+     * M4b: one accept flow for the waterfall — all carrying OR-881, most on trace `trc-flow`: a push
+     * (a point), a fetch, the accept that failed (danger lane), the sync worker (the slowest span),
+     * a tap, an ETA call still in flight (open, pulsing) and a db write the device sent no clock for
+     * (untimed). Offsets are within the m4a capture's last minute, after its rows.
+     */
+    fun flowLines(): List<String> {
+        val b = 50_000L
+        return listOf(
+            line(Envelope.KIND_FCM, "fl-push", T0 + b, T0 + b, FcmMessage.serializer(),
+                FcmMessage(id = "fl-push", receivedAtMillis = T0 + b, notification = FcmNotification("Order OR-881", "Customer is waiting"),
+                    data = mapOf("channel" to "orders", "order_id" to "OR-881")), traceId = "trc-flow"),
+            http("fl-get", "GET", "/v1/orders/OR-881", 200, 420, 512, """{"order_id":"OR-881","status":"ASSIGNED"}""", offset = b + 120, traceId = "trc-flow"),
+            http("fl-accept", "POST", "/v1/orders/OR-881/accept", 500, 910, 96, """{"error":"internal"}""", offset = b + 600, reqBody = """{"order_id":"OR-881"}""", traceId = "trc-flow"),
+            work("fl-sync", WorkerEvent.STATE_SUCCEEDED, b + 700, b + 2_650, enq = b + 700, run = b + 1_100),
+            line(Envelope.KIND_ANALYTICS, "fl-tap", T0 + b + 1_800, T0 + b + 1_800, GenericEvent.serializer(),
+                GenericEvent("order_accept_tap", "order_id OR-881", listOf(Badge("ANALYTICS"))), traceId = "trc-flow"),
+            http("fl-eta", "GET", "/v1/orders/OR-881/eta", null, null, offset = b + 2_200, traceId = "trc-flow"),
+            line(Envelope.KIND_DB, "fl-db", 0, 0, DbQuery.serializer(),
+                DbQuery("UPDATE orders SET status = ? WHERE order_id = ?", listOf("ACCEPT_FAILED", "OR-881"), "gandalf.db", rows = 1)),
+        )
+    }
+
+    /** [m4aLines] + [flowLines] through the real parser. */
+    fun m4bStore(): EventStore {
+        val store = EventStore()
+        val parser = TransactionParser()
+        (m4aLines() + flowLines()).forEach { l -> parser.accept(l)?.let(store::add) }
+        return store
+    }
+
     fun store(): EventStore {
         val store = EventStore()
         val parser = TransactionParser()

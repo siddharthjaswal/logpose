@@ -71,7 +71,10 @@ val renderScreens by tasks.registering(JavaExec::class) {
     description = "Renders the desktop UI off-screen to PNGs."
     classpath = sourceSets.test.get().runtimeClasspath
     mainClass.set("io.github.siddharthjaswal.logpose.desktop.RenderScreensKt")
-    args(providers.gradleProperty("shotsDir").orElse(layout.buildDirectory.dir("screens").map { it.asFile.path }).get())
+    args(
+        providers.gradleProperty("shotsDir").orElse(layout.buildDirectory.dir("screens").map { it.asFile.path }).get(),
+        providers.gradleProperty("shotsOnly").orElse("all").get(),
+    )
     jvmArgs("-Djava.awt.headless=true")
 }
 
@@ -89,6 +92,24 @@ val liveGate by tasks.registering(JavaExec::class) {
     args(
         providers.gradleProperty("shotsDir").orElse(layout.buildDirectory.dir("screens").map { it.asFile.path }).get(),
         providers.gradleProperty("gateSeconds").orElse("20").get(),
+    )
+    jvmArgs("-Djava.awt.headless=true")
+}
+
+/**
+ * The M4b live gate: Serve MCP + the app as mock writer against a real device, headless.
+ *
+ *   ./gradlew :desktop:m4bGate -PgateSerial=emulator-5554 -PserveSeconds=45
+ */
+val m4bGate by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Serves MCP and mocks a real device through the app model, then checks the clear."
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("io.github.siddharthjaswal.logpose.desktop.M4bGateKt")
+    args(
+        providers.gradleProperty("gateSerial").orElse("emulator-5554").get(),
+        providers.gradleProperty("serveSeconds").orElse("45").get(),
+        providers.gradleProperty("startRevision").orElse("0").get(),
     )
     jvmArgs("-Djava.awt.headless=true")
 }
