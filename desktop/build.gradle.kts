@@ -279,3 +279,19 @@ val sampleCapture by tasks.registering(JavaExec::class) {
     args(providers.gradleProperty("sampleDir").orElse(layout.buildDirectory.dir("sample").map { it.asFile.path }).get())
     jvmArgs("-Djava.awt.headless=true")
 }
+
+/**
+ * Live wireless check against a phone already connected over Wi-Fi (no QR scan): Bonjour-direct
+ * discovery and resolve, optionally a Bonjour-only reconnect (disconnects and restores the phone),
+ * the connection doctor end to end, and proof that no dns-sd process is left. See WirelessLive.kt.
+ *
+ *   ./gradlew :desktop:wirelessLive [-Preconnect=true]
+ */
+val wirelessLive by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Checks Bonjour discovery, Bonjour reconnect and the connection doctor against a real phone."
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("io.github.siddharthjaswal.logpose.desktop.WirelessLiveKt")
+    args(providers.gradleProperty("reconnect").orElse("false").get())
+    jvmArgs("-Djava.awt.headless=true")
+}

@@ -39,6 +39,31 @@ A Compose Desktop app for people who don't use Android Studio — QA testers fir
   `desktop-v*` release and shows *Update available — Download* in the sidebar footer, linking to
   the release page. Nothing is downloaded or sent; it can be switched off in the same footer.
 
+### Fixed — Mac app wireless pairing
+- **QR pairing no longer depends on adb's mDNS discovery on macOS.** Diagnosed on a healthy home
+  network where pairing hung at "pairing" in both LogPose and Android Studio: macOS's mDNSResponder
+  (`dns-sd -B _adb-tls-pairing._tcp`) saw the phone's pairing service immediately and resolved it,
+  while adb 37.0.1's built-in discovery (`[adb discovery 0.0.0]`; the old Bonjour backend is gone)
+  never listed it across fresh servers — with the phone in Wi-Fi power-save (RTT 11–247 ms), adb's
+  discovery gives up where mDNSResponder retries. LogPose now races adb's discovery against macOS
+  Bonjour via `/usr/bin/dns-sd` (browse / resolve / address, every process tracked and killed) and
+  runs `adb pair <ip:port>` at whichever address appears first; the connect step, the pairing-code
+  flow and remembered-device reconnects resolve the phone's `_adb-tls-connect._tcp` port the same
+  way. adb's own auto-connect is still detected.
+
+### Added — Mac app connection doctor
+- **Staged progress** while pairing — waiting → phone found (via macOS Bonjour / adb) → pairing with
+  `<ip>` → connecting → connected — each with its elapsed time.
+- **Stall help:** after 15 s without progress (or on failure) LogPose checks the connection and
+  shows the top finding inline, with *Try pairing code · Use USB cable · Enter IP & port manually ·
+  Run connection check · Copy diagnostics*.
+- **Check connection** (sidebar and *How to connect*): Bonjour vs adb discovery, network isolation,
+  same subnet, ping latency (Wi-Fi power-save), VPN (only tunnels that carry routes or known VPN
+  clients — idle `utun` interfaces don't count), macOS firewall, competing adb servers/versions
+  (*Use Android Studio's adb*), Local Network permission (*Open Local Network settings*), and the
+  phone-side rules. **Copy diagnostics** copies a Markdown report with no pairing secrets.
+- **Enter IP & port manually** — a connect-only form for an already-paired phone; needs no mDNS.
+
 ### Added (plugin)
 - **Open Capture File…** — open a `.logpose` someone shared (in Slack, say) as a read-only timeline
   in Android Studio: capture pauses, the file replays through the same parser the live capture

@@ -32,7 +32,7 @@ class PairingFlowTest {
         }
         val seen = mutableListOf<PairingState>()
         val result = flow(adb, t).runQr(code) { seen += it }
-        assertEquals(PairingState.Connected("$guid._adb-tls-connect._tcp", "Pixel 9a", guid, null), result)
+        assertEquals(PairingState.Connected("$guid._adb-tls-connect._tcp", "Pixel 9a", guid, null, Via.ADB_AUTO), result)
         val kinds = seen.map { it::class.simpleName }.distinct()
         assertEquals(listOf("WaitingForScan", "Pairing", "Connecting", "Connected"), kinds)
         assertEquals(0, adb.count("connect")) // adb auto-connected; we never had to dial
@@ -52,7 +52,7 @@ class PairingFlowTest {
             }
         }
         val result = flow(adb, t).runQr(code) {}
-        assertEquals(PairingState.Connected("192.168.1.20:41234", "SM S918B", guid, "192.168.1.20:41234"), result)
+        assertEquals(PairingState.Connected("192.168.1.20:41234", "SM S918B", guid, "192.168.1.20:41234", Via.ADB), result)
     }
 
     @Test fun `QR - a silent network times out as client isolation`() = runBlocking {
@@ -132,7 +132,7 @@ class PairingFlowTest {
             assertTrue(line.title.isNotBlank() && line.body.isNotBlank(), "$s")
             assertEquals(s is PairingState.TimedOut || s is PairingState.Failed, line.problem, "$s")
         }
-        assertEquals("Scan this code on your phone…", PairingCopy.describe(states[0]).title)
+        assertEquals("Waiting for your phone to scan…", PairingCopy.describe(states[0]).title)
         assertTrue(PairingCopy.describe(PairingState.TimedOut(TimeoutCause.NETWORK_SILENT)).body.contains("client isolation"))
         assertTrue(PairingCopy.describe(PairingState.TimedOut(TimeoutCause.NETWORK_SILENT)).body.contains("cable"))
     }

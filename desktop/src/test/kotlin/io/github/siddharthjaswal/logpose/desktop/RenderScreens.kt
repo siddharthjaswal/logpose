@@ -42,6 +42,7 @@ fun main(args: Array<String>) {
     val out = File(args.firstOrNull() ?: "build/screens").apply { mkdirs() }
     // `-PshotsOnly=m4b` renders one milestone's screens instead of all of them.
     if (args.getOrNull(1) == "m4b") { renderM4b(out); println("Rendered to ${out.absolutePath}"); return }
+    if (args.getOrNull(1) == "doctor") { renderDoctor(out); println("Rendered to ${out.absolutePath}"); return }
     val pixel = Adb.DeviceInfo("37211FDJH00ABC", "device", "Pixel_9a")
     val events = Fixtures.store().snapshot()
     val running = SessionState.Running(pixel.serial, System.currentTimeMillis())
@@ -95,6 +96,7 @@ fun main(args: Array<String>) {
     renderM3(out)
     renderM4a(out)
     renderM4b(out)
+    renderDoctor(out)
     println("Rendered to ${out.absolutePath}")
 }
 

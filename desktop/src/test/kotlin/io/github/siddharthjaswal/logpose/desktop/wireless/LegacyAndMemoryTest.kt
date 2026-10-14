@@ -140,7 +140,7 @@ class ReconnectTest {
         val adb = FakeAdb { args -> if (args.first() == "connect") "connected to ${args[1]}" else error("$args") }
         val services = listOf(AdbOutput.MdnsService("adb-A-1", AdbOutput.ServiceType.CONNECT, "192.168.1.20", 45555))
         val o = Reconnector(adb).attempt(tls, services, mdnsWorks = true, devices = emptyList())
-        assertEquals(Reconnector.Outcome(true, "192.168.1.20:45555", "192.168.1.20:45555"), o)
+        assertEquals(Reconnector.Outcome(true, "192.168.1.20:45555", "192.168.1.20:45555", Via.ADB), o)
     }
 
     @Test fun `tls not advertising is not dialled when mdns works, but is when mdns is broken`() {
@@ -148,7 +148,7 @@ class ReconnectTest {
         assertEquals(Reconnector.Outcome(false, null), Reconnector(adb).attempt(tls, emptyList(), mdnsWorks = true, devices = emptyList()))
         assertEquals(0, adb.count("connect"))
         val o = Reconnector(adb).attempt(tls, emptyList(), mdnsWorks = false, devices = emptyList())
-        assertEquals(Reconnector.Outcome(false, "192.168.1.20:41234"), o)
+        assertEquals(Reconnector.Outcome(false, "192.168.1.20:41234", via = Via.TYPED), o)
         assertEquals(1, adb.count("connect"))
     }
 

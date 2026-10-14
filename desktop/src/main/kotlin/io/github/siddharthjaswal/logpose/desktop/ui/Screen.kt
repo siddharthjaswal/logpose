@@ -268,7 +268,10 @@ private fun Sidebar(state: ScreenState, actions: ScreenActions, modifier: Modifi
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             entries.forEach { e -> DeviceRow(e, state, running, actions) }
         }
-        Link("How to connect a phone", Modifier.padding(horizontal = 16.dp, vertical = 6.dp), actions.wireless.onHowToConnect)
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Link("How to connect a phone", onClick = actions.wireless.onHowToConnect)
+            Link("Check connection", onClick = actions.wireless.onCheckConnection)
+        }
         DeveloperPanel(state.advanced, state.mcp, state.serveBusy, actions.advanced)
         val adb = state.adb as? AdbStatus.Ready
         if (adb != null) {

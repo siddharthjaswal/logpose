@@ -519,7 +519,16 @@ class AppModel(
     }
 
     /** Wi-Fi pairing, *Switch to wireless*, remembered phones and their auto-reconnect (M2). */
-    val wireless = WirelessController(scope, settings, onConnected = { serial -> if (session.state.value !is SessionState.Running) _selectedSerial.value = serial })
+    val wireless = WirelessController(
+        scope, settings,
+        onConnected = { serial -> if (session.state.value !is SessionState.Running) _selectedSerial.value = serial },
+        appVersion = appVersion(),
+        // The connection doctor's "Use Android Studio's adb": one adb for both tools ends the server tug-of-war.
+        onUseAdb = { path ->
+            AdbLocator.install(path)
+            _adb.value = AdbStatus.Ready(path, downloaded = false)
+        },
+    )
 
     fun start() {
         if (feedJob == null) feedJob = feed.launchIn(scope)

@@ -8,6 +8,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,11 +41,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.siddharthjaswal.logpose.desktop.app.AddTab
 import io.github.siddharthjaswal.logpose.desktop.app.CodeForm
+import io.github.siddharthjaswal.logpose.desktop.app.DoctorUi
 import io.github.siddharthjaswal.logpose.desktop.app.Sheet
 import io.github.siddharthjaswal.logpose.desktop.app.WirelessUi
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
 import io.github.siddharthjaswal.logpose.desktop.wireless.AdbOutput
+import io.github.siddharthjaswal.logpose.desktop.wireless.Check
+import io.github.siddharthjaswal.logpose.desktop.wireless.CheckId
 import io.github.siddharthjaswal.logpose.desktop.wireless.FailReason
+import io.github.siddharthjaswal.logpose.desktop.wireless.FixAction
+import io.github.siddharthjaswal.logpose.desktop.wireless.PairingProgress
+import io.github.siddharthjaswal.logpose.desktop.wireless.Verdict
 import io.github.siddharthjaswal.logpose.desktop.wireless.Onboarding
 import io.github.siddharthjaswal.logpose.desktop.wireless.PairingCopy
 import io.github.siddharthjaswal.logpose.desktop.wireless.PairingState
@@ -61,6 +69,17 @@ class WirelessActions(
     val onSwitchToWireless: (serial: String, name: String) -> Unit = { _, _ -> },
     val onForget: (id: String) -> Unit = {},
     val onDismissLegacy: () -> Unit = {},
+    /** Opens the Check-connection sheet (and runs the doctor). */
+    val onCheckConnection: () -> Unit = {},
+    /** Runs the doctor again inside the sheet. */
+    val onRunCheck: () -> Unit = {},
+    val onCopyDiagnostics: () -> Unit = {},
+    val onToggleReport: () -> Unit = {},
+    /** A finding's fix button. */
+    val onFix: (FixAction) -> Unit = {},
+    /** *Enter IP & port manually* — the connect-only form. */
+    val onConnectByIp: () -> Unit = {},
+    val onPairInstead: () -> Unit = {},
 )
 
 /** The modal layer over the window: the Add-device sheet or the How-to-connect checklist. */
@@ -68,8 +87,9 @@ class WirelessActions(
 fun WirelessSheets(ui: WirelessUi, actions: WirelessActions) {
     when (val sheet = ui.sheet) {
         Sheet.None -> Unit
-        is Sheet.AddDevice -> Modal(actions.onCloseSheet, width = 680.dp) { AddDeviceSheet(sheet.tab, ui, actions) }
+        is Sheet.AddDevice -> Modal(actions.onCloseSheet, width = 720.dp) { AddDeviceSheet(sheet.tab, ui, actions) }
         Sheet.HowToConnect -> Modal(actions.onCloseSheet, width = 640.dp) { HowToConnect(actions) }
+        Sheet.ConnectionCheck -> Modal(actions.onCloseSheet, width = 720.dp) { ConnectionCheckSheet(ui.check, actions) }
     }
 }
 
@@ -141,47 +161,182 @@ private fun TabChip(text: String, selected: Boolean, onClick: () -> Unit) {
 @Composable
 private fun QrTab(ui: WirelessUi, actions: WirelessActions) {
     val p = LocalPalette.current
-    Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-        // Dark modules on a white plate in both themes: phone scanners expect dark-on-light, and an
-        // inverted code fails on many of them.
-        Box(Modifier.size(232.dp).background(Color.White, RoundedCornerShape(10.dp)).border(1.dp, p.borderSubtle, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
-            val qr = ui.qr
-            // A timed-out or failed attempt has stopped listening for this code: don't leave a
-            // scannable-looking code up that nothing will answer.
-            val spent = ui.pairing is PairingState.Failed || ui.pairing is PairingState.TimedOut
-            val paired = ui.pairing is PairingState.Connected
-            if (qr != null && !spent && !paired) {
-                val matrix = remember(qr.payload) { QrMatrix.encode(qr.payload) }
-                QrCanvas(matrix, Modifier.size(216.dp))
-            } else {
-                val noMdns = (ui.pairing as? PairingState.Failed)?.reason == FailReason.MDNS_UNAVAILABLE
-                val label = when {
-                    paired -> "Paired"
-                    noMdns -> "QR pairing unavailable"
-                    spent -> "Code expired"
-                    else -> "Preparing code…"
-                }
-                T(label, Color(0xFF6C707E))
-            }
-        }
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            T("On the phone (Android 11 or newer):", p.text, weight = FontWeight.SemiBold)
-            NumberedStep(1, "Open Settings → Developer options → Wireless debugging, and turn it on.")
-            NumberedStep(2, "Tap Pair device with QR code.")
-            NumberedStep(3, "Point the phone's camera at this code.")
-            Spacer(Modifier.height(4.dp))
-            PairingStatus(ui.pairing, ui.mdns, preparing = true)
-            val state = ui.pairing
-            if (state is PairingState.Connected) Row { Button("Done", actions.onCloseSheet, primary = true) }
-            if (state is PairingState.TimedOut || state is PairingState.Failed) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button("Try again", actions.onNewQr, primary = true)
-                    Button("Pairing code", { actions.onSelectTab(AddTab.CODE) })
-                    Button("Use the cable", { actions.onSelectTab(AddTab.CABLE) })
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            // Dark modules on a white plate in both themes: phone scanners expect dark-on-light, and an
+            // inverted code fails on many of them.
+            Box(Modifier.size(232.dp).background(Color.White, RoundedCornerShape(10.dp)).border(1.dp, p.borderSubtle, RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+                val qr = ui.qr
+                // A timed-out or failed attempt has stopped listening for this code: don't leave a
+                // scannable-looking code up that nothing will answer.
+                val spent = ui.pairing is PairingState.Failed || ui.pairing is PairingState.TimedOut
+                val paired = ui.pairing is PairingState.Connected
+                // Once the phone has answered, the code has done its job.
+                val scanned = ui.pairing is PairingState.Pairing || ui.pairing is PairingState.Connecting
+                if (qr != null && !spent && !paired && !scanned) {
+                    val matrix = remember(qr.payload) { QrMatrix.encode(qr.payload) }
+                    QrCanvas(matrix, Modifier.size(216.dp))
+                } else {
+                    val noMdns = (ui.pairing as? PairingState.Failed)?.reason == FailReason.MDNS_UNAVAILABLE
+                    val label = when {
+                        paired -> "Paired"
+                        scanned -> "Scanned"
+                        noMdns -> "QR pairing unavailable"
+                        spent -> "Code expired"
+                        else -> "Preparing code…"
+                    }
+                    T(label, Color(0xFF6C707E))
                 }
             }
-            T("Phone and Mac must be on the same Wi-Fi.", p.textMuted, style = Type.small)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                val state = ui.pairing
+                val found = state != null && state !is PairingState.WaitingForScan
+                if (!found) {
+                    T("On the phone (Android 11 or newer):", p.text, weight = FontWeight.SemiBold)
+                    NumberedStep(1, "Open Settings → Developer options → Wireless debugging, and turn it on.")
+                    NumberedStep(2, "Tap Pair device with QR code.")
+                    NumberedStep(3, "Point the phone's camera at this code.")
+                    Spacer(Modifier.height(2.dp))
+                }
+                PairingProgressView(ui, preparing = true)
+                if (state is PairingState.Connected) Row { Button("Done", actions.onCloseSheet, primary = true) }
+                T("Phone and Mac must be on the same Wi-Fi.", p.textMuted, style = Type.small)
+            }
         }
+        val state = ui.pairing
+        if (ui.stall != null || state is PairingState.TimedOut || state is PairingState.Failed) {
+            StallPanel(ui, actions, onQr = true)
+        }
+    }
+}
+
+/**
+ * The staged progress (each stage with its time), or the problem box once the attempt failed.
+ * Falls back to the single line when there's no trace (renders of older states).
+ */
+@Composable
+private fun PairingProgressView(ui: WirelessUi, preparing: Boolean) {
+    val state = ui.pairing
+    val rows = PairingProgress.rows(state, ui.trace, ui.nowMillis)
+    if (rows.isEmpty() || state == null || PairingCopy.describe(state).problem) {
+        PairingStatus(state, ui.mdns, preparing)
+        return
+    }
+    PairingStages(rows, state)
+}
+
+@Composable
+private fun PairingStages(rows: List<PairingProgress.Row>, state: PairingState) {
+    val p = LocalPalette.current
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        rows.forEach { r ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) {
+                    when (r.status) {
+                        PairingProgress.Status.DONE ->
+                            if (r.stage == io.github.siddharthjaswal.logpose.desktop.wireless.Stage.CONNECTED) Box(Modifier.size(10.dp).background(p.ok, RoundedCornerShape(5.dp)))
+                            else CheckMark(p.textDim)
+                        PairingProgress.Status.ACTIVE ->
+                            if (state is PairingState.WaitingForScan) {
+                                val left = 1f - (state.elapsedMillis.toFloat() / state.timeoutMillis).coerceIn(0f, 1f)
+                                CircularProgressIndicator(left, Modifier.size(13.dp), color = p.accent, strokeWidth = 2.dp)
+                            } else CircularProgressIndicator(Modifier.size(13.dp), color = p.accent, strokeWidth = 2.dp)
+                        PairingProgress.Status.FAILED -> Box(Modifier.size(9.dp).background(p.warn, RoundedCornerShape(5.dp)))
+                        PairingProgress.Status.PENDING -> Box(Modifier.size(7.dp).border(1.dp, p.textMuted, RoundedCornerShape(4.dp)))
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                val color = when (r.status) {
+                    PairingProgress.Status.ACTIVE -> p.text
+                    PairingProgress.Status.DONE -> if (r.stage == io.github.siddharthjaswal.logpose.desktop.wireless.Stage.CONNECTED) p.ok else p.textDim
+                    PairingProgress.Status.FAILED -> p.warn
+                    PairingProgress.Status.PENDING -> p.textMuted
+                }
+                T(r.label, color, Modifier.weight(1f), weight = if (r.status == PairingProgress.Status.ACTIVE || r.stage == io.github.siddharthjaswal.logpose.desktop.wireless.Stage.CONNECTED && r.status == PairingProgress.Status.DONE) FontWeight.SemiBold else null)
+                r.elapsedMillis?.let { T(PairingProgress.formatElapsed(it), p.textMuted, style = Type.monoTiny) }
+            }
+        }
+        if (state is PairingState.WaitingForScan) {
+            T("${(state.timeoutMillis - state.elapsedMillis).coerceAtLeast(0) / 1000}s left on this code", p.textMuted, Modifier.padding(start = 24.dp), style = Type.small)
+        }
+    }
+}
+
+/** A small tick for finished stages and passing checks. */
+@Composable
+private fun CheckMark(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier.size(11.dp)) {
+        val w = size.width
+        val path = androidx.compose.ui.graphics.Path().apply {
+            moveTo(w * 0.12f, w * 0.55f); lineTo(w * 0.40f, w * 0.82f); lineTo(w * 0.90f, w * 0.22f)
+        }
+        drawPath(path, color, style = Stroke(w * 0.16f, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+    }
+}
+
+/**
+ * Under the QR code once pairing stalls (no new stage for 15 s) or ends badly: what the connection
+ * doctor found — the top finding in plain words — and every way forward.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun StallPanel(ui: WirelessUi, actions: WirelessActions, onQr: Boolean) {
+    val p = LocalPalette.current
+    val stall = ui.stall
+    val state = ui.pairing
+    val failed = state is PairingState.TimedOut || state is PairingState.Failed
+    val top = stall?.result?.top
+    val serious = top != null && top.verdict.rank <= Verdict.WARNING.rank
+    Column(
+        Modifier.fillMaxWidth()
+            .background(if (serious) p.warnPlate else p.bg2, RoundedCornerShape(8.dp))
+            .border(1.dp, p.borderSubtle, RoundedCornerShape(8.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        val stuckFor = ui.trace?.let { (ui.nowMillis - it.lastProgressAt).coerceAtLeast(0) }
+        val heading = when {
+            failed -> "What LogPose found"
+            stuckFor != null && stuckFor >= 1_000 -> "No progress for ${PairingProgress.formatElapsed(stuckFor)} — LogPose checked your connection"
+            else -> "LogPose checked your connection"
+        }
+        T(heading, p.textMuted, style = Type.small, weight = FontWeight.SemiBold)
+        when {
+            stall == null || (stall.running && stall.result == null) -> Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(13.dp), color = p.accent, strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                T(if (stall == null) "Checking the network…" else "Checking your Wi-Fi, VPN and adb…", p.textDim)
+            }
+            top == null -> T(
+                "Nothing on this Mac looks wrong. Keep the phone on \"Pair device with QR code\" with the screen on — or use one of the options below.",
+                p.text, style = Type.body.copy(lineHeight = 17.sp), maxLines = 4,
+            )
+            else -> FindingText(top)
+        }
+        val own = top?.actions.orEmpty()
+        val standard = listOf(FixAction.PAIRING_CODE, FixAction.USE_CABLE, FixAction.CONNECT_BY_IP)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (failed && onQr) Button("Try again", actions.onNewQr, primary = true)
+            // Isolation blocks a pairing code just the same — don't offer what the finding says won't work.
+            val noCode = !onQr || top?.id == CheckId.ISOLATION
+            (own + standard).distinct().filter { !(noCode && it == FixAction.PAIRING_CODE) }.forEach { a -> Button(a.label, { actions.onFix(a) }) }
+            Button("Run connection check", actions.onCheckConnection)
+            Button(if (stall?.copied == true) "Copied" else "Copy diagnostics", actions.onCopyDiagnostics)
+        }
+    }
+}
+
+@Composable
+private fun FindingText(c: Check) {
+    val p = LocalPalette.current
+    val color = when (c.verdict) {
+        Verdict.PROBLEM -> p.danger
+        Verdict.WARNING -> p.warn
+        else -> p.text
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        T(c.title, color, weight = FontWeight.SemiBold, maxLines = 3, style = Type.body.copy(lineHeight = 17.sp))
+        T(c.detail, p.text, style = Type.small.copy(lineHeight = 16.sp), maxLines = 6)
     }
 }
 
@@ -270,6 +425,16 @@ private fun CodeTab(ui: WirelessUi, actions: WirelessActions) {
                 Field("IP address & port", form.pairAddress, "192.168.1.20:37755", Modifier.weight(1.4f)) { actions.onFormChange(form.copy(pairAddress = it)) }
                 Field("Pairing code", form.code, "123456", Modifier.weight(1f)) { actions.onFormChange(form.copy(code = it)) }
             }
+            T("No network discovery needed: LogPose dials the address you type.", p.textMuted, style = Type.small)
+            InlineLink("Already paired this phone? Enter its IP address & port to connect", actions.onConnectByIp)
+        } else if (form.manual) {
+            T("Connect to a phone that's already paired", p.text, weight = FontWeight.SemiBold)
+            NumberedStep(1, "On the phone: Developer options → Wireless debugging (the main screen).")
+            NumberedStep(2, "Under \"IP address & Port\" it shows something like 192.168.1.20:41234 — type that here.")
+            Field("IP address & port (from the Wireless debugging screen)", form.connectAddress, "192.168.1.20:41234", Modifier.fillMaxWidth()) {
+                actions.onFormChange(form.copy(connectAddress = it))
+            }
+            InlineLink("Not paired yet? Pair with a code instead", actions.onPairInstead)
         } else {
             T("One more step: tell LogPose where to connect", p.text, weight = FontWeight.SemiBold)
             NumberedStep(1, "Go back to the main Wireless debugging screen on the phone.")
@@ -283,9 +448,16 @@ private fun CodeTab(ui: WirelessUi, actions: WirelessActions) {
             Button(if (form.askConnectAddress) "Connect" else "Pair", actions.onPairWithCode, primary = true, enabled = !busy)
             if (busy) CircularProgressIndicator(Modifier.size(14.dp), color = p.accent, strokeWidth = 2.dp)
         }
-        PairingStatus(ui.pairing, ui.mdns)
+        PairingProgressView(ui, preparing = false)
         if (ui.pairing is PairingState.Connected) Row { Button("Done", actions.onCloseSheet, primary = true) }
+        if (ui.stall != null) StallPanel(ui, actions, onQr = false)
     }
+}
+
+@Composable
+private fun InlineLink(text: String, onClick: () -> Unit) {
+    val p = LocalPalette.current
+    T(text, p.accent, Modifier.clickable(onClick = onClick), style = Type.small, weight = FontWeight.Medium)
 }
 
 @Composable
@@ -367,7 +539,116 @@ private fun HowToConnect(actions: WirelessActions) {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button("Add a device", actions.onAddDevice, primary = true)
+                Button("Check connection", actions.onCheckConnection)
                 Button("Done", actions.onCloseSheet)
+            }
+        }
+    }
+}
+
+// ── Check connection ────────────────────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ConnectionCheckSheet(check: DoctorUi, actions: WirelessActions) {
+    val p = LocalPalette.current
+    Column {
+        SheetHeader("Check connection", actions.onCloseSheet)
+        Column(
+            Modifier.heightIn(max = 660.dp).verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, bottom = 22.dp, top = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            T("LogPose looked at this Mac, your Wi-Fi and adb. It only reads — nothing here changes a setting.", p.textDim, maxLines = 2)
+            val result = check.result
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(if (check.copied) "Copied" else "Copy diagnostics", actions.onCopyDiagnostics, primary = true, enabled = result != null)
+                Button(if (check.showReport) "Hide report" else "Preview report", actions.onToggleReport, enabled = result != null)
+                Button("Check again", actions.onRunCheck, enabled = !check.running)
+                Button("Add a device", actions.onAddDevice)
+            }
+            if (check.showReport && result != null) {
+                T("This is exactly what Copy diagnostics puts on the clipboard. No pairing codes or passwords; your home folder shows as ~.", p.textMuted, style = Type.small, maxLines = 2)
+                Box(
+                    Modifier.fillMaxWidth().heightIn(max = 300.dp).background(p.bg0, RoundedCornerShape(6.dp))
+                        .border(1.dp, p.borderSubtle, RoundedCornerShape(6.dp)).verticalScroll(rememberScrollState()).padding(10.dp),
+                ) {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        T(result.markdown, p.textDim, style = Type.monoSmall.copy(lineHeight = 15.sp), maxLines = 400)
+                    }
+                }
+            }
+            if (check.running) Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(13.dp), color = p.accent, strokeWidth = 2.dp)
+                Spacer(Modifier.width(8.dp))
+                T(if (result == null) "Checking… this takes about five seconds." else "Checking again…", p.textDim)
+            }
+            if (result != null) {
+                Column(
+                    Modifier.fillMaxWidth().border(1.dp, p.borderSubtle, RoundedCornerShape(8.dp)),
+                ) {
+                    result.checks.forEachIndexed { i, c ->
+                        if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
+                        CheckRow(c, actions)
+                    }
+                }
+            }
+            Column(
+                Modifier.fillMaxWidth().background(p.bg2, RoundedCornerShape(8.dp)).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                T("Local Network permission (macOS 15 and later)", p.text, weight = FontWeight.SemiBold)
+                T(
+                    "macOS asks once whether LogPose may reach devices on your Wi-Fi. If you clicked Don't Allow, " +
+                        "wireless pairing can't work until you turn LogPose on there.",
+                    p.textDim, style = Type.small.copy(lineHeight = 16.sp), maxLines = 3,
+                )
+                Row { Button(FixAction.OPEN_LOCAL_NETWORK.label, { actions.onFix(FixAction.OPEN_LOCAL_NETWORK) }) }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun CheckRow(c: Check, actions: WirelessActions) {
+    val p = LocalPalette.current
+    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.Top) {
+        Box(Modifier.width(18.dp).padding(top = 1.dp), contentAlignment = Alignment.TopCenter) { VerdictMark(c.verdict) }
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            val color = when (c.verdict) {
+                Verdict.PROBLEM -> p.danger
+                Verdict.WARNING -> p.warn
+                else -> p.text
+            }
+            T(c.title, color, weight = FontWeight.SemiBold, maxLines = 3, style = Type.body.copy(lineHeight = 17.sp))
+            T(c.detail, p.textDim, style = Type.small.copy(lineHeight = 16.sp), maxLines = 6)
+            // Local Network has its own block below; its button isn't repeated here.
+            val shown = c.actions.filter { !(c.id == CheckId.LOCAL_NETWORK && c.verdict == Verdict.OK) }
+            if (shown.isNotEmpty()) FlowRow(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                shown.forEach { a -> Button(a.label, { actions.onFix(a) }) }
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        T(c.verdict.word, p.textMuted, style = Type.small)
+    }
+}
+
+/** A round mark per verdict: tick (OK), "!" (warning / problem), "i" (note), "?" (can't check). */
+@Composable
+private fun VerdictMark(v: Verdict) {
+    val p = LocalPalette.current
+    when (v) {
+        Verdict.OK -> CheckMark(p.textDim, Modifier.padding(top = 2.dp))
+        else -> {
+            val (fg, glyph) = when (v) {
+                Verdict.PROBLEM -> p.danger to "!"
+                Verdict.WARNING -> p.warn to "!"
+                Verdict.INFO -> p.accent to "i"
+                else -> p.textMuted to "?"
+            }
+            Box(Modifier.size(15.dp).border(1.5.dp, fg, RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) {
+                T(glyph, fg, style = Type.small.copy(fontSize = 10.sp, lineHeight = 10.sp), weight = FontWeight.Bold)
             }
         }
     }

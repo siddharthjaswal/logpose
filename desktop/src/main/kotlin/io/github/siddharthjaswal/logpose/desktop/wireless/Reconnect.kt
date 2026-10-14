@@ -42,31 +42,45 @@ class ReconnectScheduler(
 /** One reconnect try for a remembered phone. Blocking adb calls — `Dispatchers.IO`. */
 class Reconnector(private val adb: AdbCommands) {
 
-    data class Outcome(val connected: Boolean, val address: String?, val serial: String? = null)
+    data class Outcome(val connected: Boolean, val address: String?, val serial: String? = null, val via: Via? = null)
 
     /**
-     * TLS phones are looked up by guid in [services] because their connect port changes whenever
-     * Wireless debugging restarts; if mDNS works and the phone isn't advertising, it isn't on this
-     * network and nothing is dialled (no blocking connect to a dead address). If mDNS doesn't work on
-     * this Mac, the last address is tried. Legacy phones don't advertise; their fixed ip:5555 is dialled.
-     * A stale `offline` transport is dropped first, or adb answers "already connected" forever.
+     * TLS phones are looked up by guid because their connect port changes whenever Wireless debugging
+     * restarts — Bonjour first ([bonjour], macOS mDNSResponder, which sees phones adb's discovery
+     * misses; a sighting is resolved to ip:port on the spot, bounded by [resolveMillis]), then
+     * [services] (`adb mdns services`). If discovery works and the phone isn't advertising, it isn't on
+     * this network and nothing is dialled (no blocking connect to a dead address). If neither
+     * discovery works on this Mac, the last address is tried. Legacy phones don't advertise; their
+     * fixed ip:5555 is dialled. A stale `offline` transport is dropped first, or adb answers "already
+     * connected" forever.
      */
     fun attempt(
         device: RememberedDevice,
         services: List<AdbOutput.MdnsService>,
         mdnsWorks: Boolean,
         devices: List<Adb.DeviceInfo>,
+        bonjour: BonjourSession = BonjourSession.None,
+        resolveMillis: Long = 5_000,
     ): Outcome {
-        val address = when (device.kind) {
-            RememberedDevice.Kind.TLS -> services.firstOrNull { it.type == AdbOutput.ServiceType.CONNECT && it.instance == device.guid }?.address
-                ?: device.address?.takeIf { !mdnsWorks }
-            RememberedDevice.Kind.LEGACY -> device.address
-        } ?: return Outcome(false, null)
+        val found: Pair<Via, String>? = when (device.kind) {
+            RememberedDevice.Kind.TLS -> {
+                val guid = device.guid
+                // Bonjour first: mDNSResponder's answer is current, adb's list can hold a stale port.
+                guid?.let { g -> bonjour.awaitEndpoint(g, AdbOutput.ServiceType.CONNECT, resolveMillis)?.let { Via.BONJOUR to it.address } }
+                    ?: services.firstOrNull { it.type == AdbOutput.ServiceType.CONNECT && it.instance == guid }?.let { Via.ADB to it.address }
+                    ?: device.address?.takeIf { !mdnsWorks && !bonjour.available }?.let { Via.TYPED to it }
+            }
+            RememberedDevice.Kind.LEGACY -> device.address?.let { Via.TYPED to it }
+        }
+        val (via, address) = found ?: return Outcome(false, null)
         devices.firstOrNull { device.matches(it.serial) && !it.ready }?.let { adb.disconnect(it.serial) }
         return when (val r = adb.connect(address)) {
-            is AdbOutput.ConnectResult.Connected -> Outcome(true, address, r.serial)
-            is AdbOutput.ConnectResult.AlreadyConnected -> Outcome(true, address, r.serial)
-            else -> Outcome(false, address)
+            is AdbOutput.ConnectResult.Connected -> Outcome(true, address, r.serial, via)
+            is AdbOutput.ConnectResult.AlreadyConnected -> Outcome(true, address, r.serial, via)
+            else -> {
+                if (via == Via.BONJOUR) device.guid?.let(bonjour::invalidate)
+                Outcome(false, address, via = via)
+            }
         }
     }
 }

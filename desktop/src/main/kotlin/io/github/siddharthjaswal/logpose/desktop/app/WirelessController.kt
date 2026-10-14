@@ -2,7 +2,20 @@ package io.github.siddharthjaswal.logpose.desktop.app
 
 import io.github.siddharthjaswal.logpose.desktop.wireless.AdbCommands
 import io.github.siddharthjaswal.logpose.desktop.wireless.AdbOutput
+import io.github.siddharthjaswal.logpose.desktop.wireless.BonjourBrowser
+import io.github.siddharthjaswal.logpose.desktop.wireless.BonjourSession
+import io.github.siddharthjaswal.logpose.desktop.wireless.Check
+import io.github.siddharthjaswal.logpose.desktop.wireless.ConnectionDoctor
+import io.github.siddharthjaswal.logpose.desktop.wireless.Diagnostics
+import io.github.siddharthjaswal.logpose.desktop.wireless.DnsSdSession
+import io.github.siddharthjaswal.logpose.desktop.wireless.DoctorContext
+import io.github.siddharthjaswal.logpose.desktop.wireless.DoctorFacts
+import io.github.siddharthjaswal.logpose.desktop.wireless.DoctorProbe
 import io.github.siddharthjaswal.logpose.desktop.wireless.FailReason
+import io.github.siddharthjaswal.logpose.desktop.wireless.FixAction
+import io.github.siddharthjaswal.logpose.desktop.wireless.PairingLog
+import io.github.siddharthjaswal.logpose.desktop.wireless.PairingProgress
+import io.github.siddharthjaswal.logpose.desktop.wireless.PairingTrace
 import io.github.siddharthjaswal.logpose.desktop.wireless.LegacySwitch
 import io.github.siddharthjaswal.logpose.desktop.wireless.PairingFlow
 import io.github.siddharthjaswal.logpose.desktop.wireless.PairingState
@@ -33,15 +46,41 @@ sealed interface Sheet {
     data object None : Sheet
     data class AddDevice(val tab: AddTab) : Sheet
     data object HowToConnect : Sheet
+    /** The connection doctor, on demand: every check, its verdict and fix, and *Copy diagnostics*. */
+    data object ConnectionCheck : Sheet
 }
+
+/** One connection-doctor run: what it saw, what it concluded, and the shareable write-up. */
+data class DoctorResult(val facts: DoctorFacts, val checks: List<Check>, val markdown: String) {
+    val top: Check? get() = ConnectionDoctor.top(checks)
+
+    companion object {
+        fun of(facts: DoctorFacts, nowMillis: Long = System.currentTimeMillis()): DoctorResult {
+            val checks = ConnectionDoctor.diagnose(facts)
+            return DoctorResult(facts, checks, Diagnostics.markdown(facts, checks, nowMillis))
+        }
+    }
+}
+
+/** The doctor's state, for the stall panel and the Check-connection sheet alike. */
+data class DoctorUi(
+    val running: Boolean = false,
+    val result: DoctorResult? = null,
+    /** The Markdown preview is expanded. */
+    val showReport: Boolean = false,
+    /** "Copied" feedback after *Copy diagnostics*. */
+    val copied: Boolean = false,
+)
 
 /** What the tester typed into the pairing-code form; kept in state so it survives a tab switch. */
 data class CodeForm(
     val pairAddress: String = "",
     val code: String = "",
     val connectAddress: String = "",
-    /** Shown once pairing worked but discovery couldn't find the connect port. */
+    /** Shown once pairing worked but discovery couldn't find the connect port — or chosen by hand ([manual]). */
     val askConnectAddress: Boolean = false,
+    /** *Enter IP & port manually*: the connect-only form for a phone that is already paired. */
+    val manual: Boolean = false,
     val error: String? = null,
 )
 
@@ -58,6 +97,14 @@ data class WirelessUi(
     val remembered: List<RememberedDevice> = emptyList(),
     val reconnecting: Set<String> = emptySet(),
     val legacy: LegacyStatus? = null,
+    /** The running (or last) pairing attempt's record — stages, timings, which discovery won. */
+    val trace: PairingTrace? = null,
+    /** Wall clock for the elapsed times, ticked once a second while pairing. */
+    val nowMillis: Long = 0,
+    /** The doctor run when pairing stalled (or ended badly), shown inline on the Add-device sheet. */
+    val stall: DoctorUi? = null,
+    /** The Check-connection sheet's doctor run. */
+    val check: DoctorUi = DoctorUi(),
 )
 
 /**
@@ -69,10 +116,26 @@ class WirelessController(
     private val settings: KeyValueStore,
     private val adb: AdbCommands = AdbCommands.Real,
     private val onConnected: (serial: String) -> Unit = {},
+    private val bonjour: BonjourBrowser = BonjourBrowser.shared,
+    private val probe: DoctorProbe = DoctorProbe(adb, { Adb.resolve() }, bonjour),
+    private val appVersion: String? = null,
+    /** *Use Android Studio's adb*: the app model re-points core's adb at [String]. */
+    private val onUseAdb: (String) -> Unit = {},
+    private val copyText: (String) -> Unit = { text ->
+        java.awt.Toolkit.getDefaultToolkit().systemClipboard.setContents(java.awt.datatransfer.StringSelection(text), null)
+    },
+    private val openUrl: (String) -> Unit = { url -> runCatching { ProcessBuilder("/usr/bin/open", url).start() } },
 ) {
     private val remembered = RememberedDevices(settings)
     private val scheduler = ReconnectScheduler()
     private val reconnector = Reconnector(adb)
+
+    /** The running pairing attempt's Bonjour session and log, so a stall check can reuse what it saw. */
+    @Volatile private var liveSession: BonjourSession? = null
+    @Volatile private var liveLog: PairingLog? = null
+    private var tickerJob: Job? = null
+    private var stallJob: Job? = null
+    private var checkJob: Job? = null
 
     private val _ui = MutableStateFlow(WirelessUi(remembered = remembered.all()))
     val ui: StateFlow<WirelessUi> = _ui.asStateFlow()
@@ -90,33 +153,169 @@ class WirelessController(
     fun openAddDevice(tab: AddTab = AddTab.QR) = selectTab(tab)
 
     fun selectTab(tab: AddTab) {
-        pairingJob?.cancel()
-        _ui.update { it.copy(sheet = Sheet.AddDevice(tab), pairing = null, form = it.form.copy(error = null)) }
+        stopPairing()
+        _ui.update { it.copy(sheet = Sheet.AddDevice(tab), pairing = null, trace = null, stall = null, form = it.form.copy(error = null)) }
         if (tab == AddTab.QR) startQr()
     }
 
+    /** *Enter IP & port manually*: the pairing-code tab in its connect-only mode — no mDNS at all. */
+    fun connectByIp() {
+        selectTab(AddTab.CODE)
+        _ui.update { it.copy(form = it.form.copy(askConnectAddress = true, manual = true, pairAddress = "", code = "", error = null)) }
+    }
+
+    /** Back from the connect-only form to pairing with a code. */
+    fun pairInstead() = _ui.update { it.copy(form = it.form.copy(askConnectAddress = false, manual = false, error = null)) }
+
     fun closeSheet() {
-        pairingJob?.cancel()
+        stopPairing()
+        checkJob?.cancel()
         if (_ui.value.sheet == Sheet.HowToConnect) {
             scope.launch(Dispatchers.IO) { settings.setBoolean(ONBOARDING_SEEN, true, false) }
         }
-        _ui.update { it.copy(sheet = Sheet.None, pairing = null, qr = null) }
+        _ui.update { it.copy(sheet = Sheet.None, pairing = null, qr = null, trace = null, stall = null, check = DoctorUi()) }
     }
 
-    /** A fresh code and a fresh 90 s discovery window. */
-    fun startQr() {
+    /** Cancels the attempt; its coroutine's `finally` kills the dns-sd browses. */
+    private fun stopPairing() {
         pairingJob?.cancel()
+        tickerJob?.cancel()
+        stallJob?.cancel()
+    }
+
+    /** A fresh code and a fresh 90 s discovery window, with adb's discovery and macOS Bonjour racing. */
+    fun startQr() {
+        stopPairing()
         val code = QrPairingCodes.generate()
-        _ui.update { it.copy(qr = code, pairing = null) }
+        _ui.update { it.copy(qr = code, pairing = null, trace = null, stall = null) }
         pairingJob = scope.launch {
             val mdns = withContext(Dispatchers.IO) { adb.mdnsCheck() }
             _ui.update { it.copy(mdns = mdns) }
-            if (mdns is AdbOutput.MdnsCheck.Unavailable) {
+            val bonjourOk = withContext(Dispatchers.IO) { bonjour.available }
+            if (mdns is AdbOutput.MdnsCheck.Unavailable && !bonjourOk) {
                 _ui.update { it.copy(pairing = PairingState.Failed(FailReason.MDNS_UNAVAILABLE, mdns.detail)) }
                 return@launch
             }
-            val result = withContext(Dispatchers.IO) { PairingFlow(adb).runQr(code) { s -> _ui.update { it.copy(pairing = s) } } }
+            runFlow(setOf(AdbOutput.ServiceType.PAIRING, AdbOutput.ServiceType.CONNECT)) { flow, report -> flow.runQr(code, report) }
+        }
+    }
+
+    /**
+     * Runs one attempt with its own Bonjour session (killed when the attempt ends or is cancelled),
+     * a 1 s ticker for elapsed times, and the stall watch: no new stage for 15 s — or a failure —
+     * runs the connection doctor once for that stage and shows its top finding inline.
+     */
+    private suspend fun runFlow(types: Set<AdbOutput.ServiceType>, block: suspend (PairingFlow, (PairingState) -> Unit) -> PairingState) {
+        val session = withContext(Dispatchers.IO) { DnsSdSession(bonjour, types) }
+        val log = PairingLog()
+        liveSession = session
+        liveLog = log
+        tickerJob?.cancel()
+        tickerJob = scope.launch { tick(log) }
+        try {
+            val result = withContext(Dispatchers.IO) {
+                PairingFlow(adb, bonjour = session, log = log).let { flow -> block(flow) { s -> _ui.update { it.copy(pairing = s, trace = log.snapshot(), nowMillis = System.currentTimeMillis()) } } }
+            }
+            _ui.update { it.copy(trace = log.snapshot()) }
             handleResult(result)
+            if (result is PairingState.TimedOut || result is PairingState.Failed) runStallDoctor(log.snapshot(), session)
+        } finally {
+            tickerJob?.cancel()
+            liveSession = null
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { session.close() }
+        }
+    }
+
+    private suspend fun tick(log: PairingLog) {
+        var checkedStage: Any? = null
+        while (kotlin.coroutines.coroutineContext.isActive) {
+            val now = System.currentTimeMillis()
+            val trace = log.snapshot()
+            _ui.update { it.copy(nowMillis = now, trace = trace) }
+            val state = _ui.value.pairing
+            if (PairingProgress.stalled(state, trace, now) && checkedStage != trace.currentStage) {
+                checkedStage = trace.currentStage
+                liveSession?.let { runStallDoctor(trace, it) }
+            }
+            delay(1_000)
+        }
+    }
+
+    private fun runStallDoctor(trace: PairingTrace, session: BonjourSession?) {
+        stallJob?.cancel()
+        _ui.update { it.copy(stall = (it.stall ?: DoctorUi()).copy(running = true, copied = false)) }
+        stallJob = scope.launch {
+            val ctx = doctorContext(trace)
+            val result = withContext(Dispatchers.IO) { runCatching { DoctorResult.of(probe.run(ctx, session)) }.getOrNull() }
+            _ui.update { it.copy(stall = DoctorUi(running = false, result = result ?: it.stall?.result)) }
+        }
+    }
+
+    private fun doctorContext(trace: PairingTrace?): DoctorContext {
+        val list = _ui.value.remembered
+        return DoctorContext(
+            targetPairing = trace?.serviceName,
+            targetGuids = setOfNotNull(trace?.guid) + list.mapNotNull { it.guid },
+            knownAddresses = list.mapNotNull { it.address },
+            pairing = trace,
+            appVersion = appVersion,
+        )
+    }
+
+    /** *Check connection*: opens the sheet and runs the doctor (again). */
+    fun openConnectionCheck() {
+        stopPairing()
+        _ui.update { it.copy(sheet = Sheet.ConnectionCheck, pairing = null, stall = null) }
+        runCheck()
+    }
+
+    /** Runs the doctor for the Check-connection sheet, including the last pairing attempt's trace. */
+    fun runCheck() {
+        checkJob?.cancel()
+        val trace = _ui.value.trace
+        _ui.update { it.copy(check = it.check.copy(running = true, copied = false)) }
+        checkJob = scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { DoctorResult.of(probe.run(doctorContext(trace))) }.getOrNull() }
+            _ui.update { it.copy(check = it.check.copy(running = false, result = result ?: it.check.result)) }
+        }
+    }
+
+    fun toggleReport() = _ui.update { it.copy(check = it.check.copy(showReport = !it.check.showReport)) }
+
+    /**
+     * *Copy diagnostics*: the latest doctor run as Markdown, refreshed with the attempt's current
+     * trace; when the doctor hasn't run yet, it runs first. Never includes the pairing password.
+     */
+    fun copyDiagnostics() {
+        val ui = _ui.value
+        val fromCheck = ui.sheet == Sheet.ConnectionCheck
+        val existing = if (fromCheck) ui.check.result else ui.stall?.result ?: ui.check.result
+        scope.launch {
+            val base = existing ?: withContext(Dispatchers.IO) { runCatching { DoctorResult.of(probe.run(doctorContext(ui.trace), liveSession)) }.getOrNull() } ?: return@launch
+            val facts = base.facts.copy(pairing = ui.trace ?: base.facts.pairing)
+            val text = Diagnostics.markdown(facts, ConnectionDoctor.diagnose(facts))
+            copyText(text)
+            _ui.update {
+                if (fromCheck) it.copy(check = it.check.copy(copied = true, result = it.check.result ?: base))
+                else it.copy(stall = (it.stall ?: DoctorUi()).copy(copied = true, result = it.stall?.result ?: base))
+            }
+        }
+    }
+
+    /** A finding's button. */
+    fun fix(action: FixAction) {
+        when (action) {
+            FixAction.USE_CABLE -> selectTab(AddTab.CABLE)
+            FixAction.PAIRING_CODE -> selectTab(AddTab.CODE)
+            FixAction.CONNECT_BY_IP -> connectByIp()
+            FixAction.RETRY_QR -> selectTab(AddTab.QR)
+            FixAction.OPEN_LOCAL_NETWORK -> scope.launch(Dispatchers.IO) { openUrl(LOCAL_NETWORK_SETTINGS) }
+            FixAction.OPEN_FIREWALL -> scope.launch(Dispatchers.IO) { openUrl(FIREWALL_SETTINGS) }
+            FixAction.USE_STUDIO_ADB -> {
+                val path = (_ui.value.check.result ?: _ui.value.stall?.result)?.facts?.studioAdb ?: return
+                onUseAdb(path)
+                if (_ui.value.sheet == Sheet.ConnectionCheck) runCheck()
+            }
         }
     }
 
@@ -141,12 +340,10 @@ class WirelessController(
     private fun setFormError(message: String) = _ui.update { it.copy(form = it.form.copy(error = message)) }
 
     private fun launchPairing(block: suspend (PairingFlow, (PairingState) -> Unit) -> PairingState) {
-        pairingJob?.cancel()
-        _ui.update { it.copy(form = it.form.copy(error = null), pairing = null) }
-        pairingJob = scope.launch {
-            val result = withContext(Dispatchers.IO) { block(PairingFlow(adb)) { s -> _ui.update { it.copy(pairing = s) } } }
-            handleResult(result)
-        }
+        stopPairing()
+        _ui.update { it.copy(form = it.form.copy(error = null), pairing = null, trace = null, stall = null) }
+        // The connect step resolves the paired phone's connect service through Bonjour as well as adb.
+        pairingJob = scope.launch { runFlow(setOf(AdbOutput.ServiceType.CONNECT), block) }
     }
 
     private suspend fun handleResult(result: PairingState) {
@@ -162,7 +359,7 @@ class WirelessController(
             }
             is PairingState.TimedOut -> if (result.cause == TimeoutCause.CONNECT_NOT_FOUND) {
                 // Paired: the code is spent, so the form's next step only needs the connect address.
-                _ui.update { it.copy(form = it.form.copy(askConnectAddress = true, pairAddress = "", code = "")) }
+                _ui.update { it.copy(form = it.form.copy(askConnectAddress = true, manual = false, pairAddress = "", code = "")) }
             }
             else -> Unit
         }
@@ -212,7 +409,30 @@ class WirelessController(
      */
     suspend fun reconnectLoop(devices: () -> List<Adb.DeviceInfo>, periodMillis: Long = 4_000) {
         var mdnsWorks: Boolean? = null
+        // One `dns-sd -B _adb-tls-connect._tcp` for as long as the loop runs and TLS phones are
+        // remembered: a returning phone shows up (with its new port) the moment it advertises.
+        var session: BonjourSession? = null
+        try {
+            reconnectTicks(devices, periodMillis, { mdnsWorks }, { mdnsWorks = it }) { want ->
+                if (want && session == null) session = DnsSdSession(bonjour, setOf(AdbOutput.ServiceType.CONNECT))
+                if (!want) { session?.close(); session = null }
+                session ?: BonjourSession.None
+            }
+        } finally {
+            withContext(kotlinx.coroutines.NonCancellable + Dispatchers.IO) { session?.close() }
+        }
+    }
+
+    private suspend fun reconnectTicks(
+        devices: () -> List<Adb.DeviceInfo>,
+        periodMillis: Long,
+        mdnsWorksNow: () -> Boolean?,
+        setMdnsWorks: (Boolean) -> Unit,
+        bonjourFor: (Boolean) -> BonjourSession,
+    ) {
         while (kotlin.coroutines.coroutineContext.isActive) {
+            val wantBonjour = remembered.all().any { it.kind == RememberedDevice.Kind.TLS }
+            val session = withContext(Dispatchers.IO) { bonjourFor(wantBonjour) }
             val list = remembered.all()
             if (list.isNotEmpty()) {
                 val current = devices()
@@ -221,10 +441,10 @@ class WirelessController(
                 if (due.isNotEmpty()) {
                     _ui.update { it.copy(reconnecting = due.map { d -> d.id }.toSet()) }
                     withContext(Dispatchers.IO) {
-                        if (mdnsWorks == null) mdnsWorks = adb.mdnsCheck() is AdbOutput.MdnsCheck.Available
+                        if (mdnsWorksNow() == null) setMdnsWorks(adb.mdnsCheck() is AdbOutput.MdnsCheck.Available)
                         val services = if (due.any { it.kind == RememberedDevice.Kind.TLS }) adb.mdnsServices() else emptyList()
                         for (d in due) {
-                            val outcome = reconnector.attempt(d, services, mdnsWorks == true, current)
+                            val outcome = reconnector.attempt(d, services, mdnsWorksNow() == true, current, session)
                             scheduler.record(d.id, System.currentTimeMillis(), outcome.connected)
                             if (outcome.connected && outcome.address != null && outcome.address != d.address) {
                                 remembered.updateAddress(d.id, outcome.address)
@@ -239,11 +459,16 @@ class WirelessController(
     }
 
     fun shutdown() {
-        pairingJob?.cancel()
+        stopPairing()
+        checkJob?.cancel()
         legacyJob?.cancel()
+        liveSession?.close()
+        bonjour.closeAll() // no dns-sd outlives the window
     }
 
     companion object {
         const val ONBOARDING_SEEN = "logpose.desktop.onboarding.seen"
+        const val LOCAL_NETWORK_SETTINGS = "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
+        const val FIREWALL_SETTINGS = "x-apple.systempreferences:com.apple.preference.security?Firewall"
     }
 }

@@ -922,6 +922,24 @@ debugging → Pair device with QR code*, or type the six-digit pairing code. *Ho
 in the sidebar walks through turning on developer options. Remembered phones reconnect on
 their own.
 
+**Wireless pairing stuck?** On macOS, adb's own network discovery (adb 37's built-in backend)
+can miss a phone's pairing service that macOS itself sees instantly — especially when the phone is
+in Wi-Fi power-save and answers late. That's why QR pairing hangs at "pairing" in Android Studio
+on some Macs. LogPose doesn't depend on it: it races adb's discovery against macOS Bonjour
+(`/usr/bin/dns-sd`) and pairs at whichever address turns up first, and the progress line says
+which one found the phone. If it still stalls for 15 seconds, LogPose checks your connection and
+says what it found. The usual fixes:
+
+- **Keep the phone awake** on the *Wireless debugging* screen until it says Connected.
+- **Same Wi-Fi, no isolation.** Office and guest Wi-Fi often block devices from seeing each other —
+  use the cable, or join the phone's hotspot from the Mac. A pairing code won't help there either.
+- **Pause a VPN** (Zscaler, GlobalProtect, AnyConnect…) while pairing.
+- **Allow Local Network** for LogPose in *System Settings → Privacy & Security → Local Network*.
+- **Enter IP & port manually** (pairing-code tab) works without any network discovery.
+
+*Check connection* in the sidebar runs the same checks any time; **Copy diagnostics** puts a
+Markdown report (no pairing codes or passwords) on the clipboard for a support thread.
+
 **Share to Slack.** **Share** → pick the scope (whole session, since a bookmark, ±N minutes
 around one) → the PII scrubber is on by default and the preview shows exactly what leaves the
 Mac → **Export**, then drag the file into Slack and paste the copied summary. ⌘B drops a bookmark
