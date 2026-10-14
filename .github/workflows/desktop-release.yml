@@ -36,6 +36,10 @@ jobs:
   dmg:
     name: Build dmg (arm64)
     runs-on: macos-14   # Apple silicon
+    outputs:
+      version: ${{ steps.name.outputs.version }}
+      dmg_name: ${{ steps.name.outputs.dmg_name }}
+      signed: ${{ steps.mode.outputs.signed }}
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
@@ -124,6 +128,7 @@ jobs:
           xcrun stapler validate "$DMG"
 
       - name: Name and checksum the dmg
+        id: name
         env:
           SIGNED: ${{ steps.mode.outputs.signed }}
         run: |
@@ -133,6 +138,8 @@ jobs:
           ( cd out && shasum -a 256 "$NAME" > "$NAME.sha256" )
           echo "DMG_NAME=$NAME" >> "$GITHUB_ENV"
           echo "DMG_SHA256=$(cut -d' ' -f1 "out/$NAME.sha256")" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dmg_name=$NAME" >> "$GITHUB_OUTPUT"
 
       - name: Fill in the Homebrew cask
         run: |
@@ -178,3 +185,37 @@ jobs:
       - name: Remove the temporary keychain
         if: always() && steps.mode.outputs.signed == 'true'
         run: security delete-keychain "$RUNNER_TEMP/logpose-signing.keychain-db" || true
+
+  readme:
+    # Point the README's "Download LogPose for Mac" links (between <!-- mac-download --> markers) at
+    # this release's dmg, so there is always one link to the newest Mac build — GitHub's
+    # releases/latest/download/… can't do it while "Latest" stays on the library/plugin line.
+    # Never moves the link backwards: re-running an older tag leaves a newer link alone.
+    name: Update README download link
+    needs: dmg
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Rewrite the link and push
+        env:
+          VERSION: ${{ needs.dmg.outputs.version }}
+          DMG_NAME: ${{ needs.dmg.outputs.dmg_name }}
+          SIGNED: ${{ needs.dmg.outputs.signed }}
+          REPO: ${{ github.repository }}
+        run: |
+          current="$(grep -o 'Download LogPose for Mac [0-9][0-9.]*' README.md | head -n 1 | awk '{print $NF}')"
+          if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$current" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ]; then
+            echo "README already links $current, newer than $VERSION; leaving it."; exit 0
+          fi
+          if [ "$SIGNED" = "true" ]; then LABEL="Apple silicon"; else LABEL="Apple silicon, unsigned"; fi
+          URL="https://github.com/$REPO/releases/download/desktop-v$VERSION/$DMG_NAME"
+          BLOCK="<!-- mac-download --><a href=\"$URL\">Download LogPose for Mac $VERSION</a> ($LABEL)<!-- /mac-download -->"
+          BLOCK="$BLOCK" perl -0pi -e 's{<!-- mac-download -->.*?<!-- /mac-download -->}{$ENV{BLOCK}}g' README.md
+          if git diff --quiet README.md; then echo "README already up to date."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -qm "README: download link for LogPose for Mac $VERSION" README.md
+          for i in 1 2 3; do git push origin HEAD:main && exit 0; git pull --rebase -q origin main; done
+          exit 1

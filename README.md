@@ -15,6 +15,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/siddharthjaswal/logpose" alt="License"></a>
 </p>
 
+<p align="center">
+  <!-- mac-download --><a href="https://github.com/siddharthjaswal/logpose/releases/download/desktop-v1.1.0/LogPose-1.1.0-arm64-unsigned.dmg">Download LogPose for Mac 1.1.0</a> (Apple silicon, unsigned)<!-- /mac-download -->
+</p>
+
 LogPose is named after the navigational device from *One Piece* that reads an island's
 "log" to point you the right way. This one reads your **logcat** and points you straight at
 the request you care about — then lets you **serve a mock back to the device** without
@@ -898,9 +902,11 @@ the same timeline the plugin draws. When something breaks, **Share** turns the s
 scrubbed `.logpose` file and a Slack-ready summary; the developer opens that file in Android Studio
 or in the app and sees exactly what you saw. It needs no Android SDK, no IDE and no account.
 
-**Download.** Apple silicon (arm64), macOS 11 or later. Grab `LogPose-<version>-arm64.dmg` from
-the [Releases](https://github.com/siddharthjaswal/logpose/releases) page (tags `desktop-v*`), open
-it and drag **LogPose** to Applications. A Homebrew tap is planned
+**Download.** Apple silicon (arm64), macOS 11 or later: <!-- mac-download --><a href="https://github.com/siddharthjaswal/logpose/releases/download/desktop-v1.1.0/LogPose-1.1.0-arm64-unsigned.dmg">Download LogPose for Mac 1.1.0</a> (Apple silicon, unsigned)<!-- /mac-download -->.
+Open the dmg and drag **LogPose** to Applications. Older versions are on the
+[Releases](https://github.com/siddharthjaswal/logpose/releases) page (tags `desktop-v*`); a build
+without a Developer ID is named `LogPose-<version>-arm64-unsigned.dmg`, a signed one
+`LogPose-<version>-arm64.dmg`. A Homebrew tap is planned
 (`brew install --cask siddharthjaswal/logpose/logpose`).
 
 **First run.**
