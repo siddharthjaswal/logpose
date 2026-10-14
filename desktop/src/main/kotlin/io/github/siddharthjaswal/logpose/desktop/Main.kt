@@ -58,6 +58,8 @@ private fun requestOpen(files: List<File>) {
 }
 
 fun main(args: Array<String>) {
+    // `LogPose.app/Contents/MacOS/LogPose --self-check`: proves the packaged runtime, no window (M5).
+    if (args.firstOrNull() == "--self-check") kotlin.system.exitProcess(SelfCheck.run())
     // Must be installed before the app finishes launching, or macOS's first open-file event is lost.
     runCatching {
         if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.APP_OPEN_FILE)) {
@@ -129,6 +131,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
     val advanced by model.advanced.ui.collectAsState()
     val mcp by model.mcp.ui.collectAsState()
     val serveBusy by model.serveBusy.collectAsState()
+    val updates by model.updates.ui.collectAsState()
     // A one-second clock, only while a session runs: it is what lets "no LogPose events" appear
     // 20 s in without any event arriving to trigger a recomposition.
     val now by produceState(System.currentTimeMillis(), session) {
@@ -156,7 +159,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
             elapsedOf = { id -> model.session.store.elapsedMillis(id).takeIf { it > 0 } },
             transitions = { w -> model.session.workerLifecycle.transitions(model.session.workerLifecycle.keyOf(w)) },
             correlation = correlation, waterfall = waterfall, keys = keys, find = find,
-            advanced = advanced, mcp = mcp, serveBusy = serveBusy,
+            advanced = advanced, mcp = mcp, serveBusy = serveBusy, updates = updates,
         ),
         ScreenActions(
             onDownloadAdb = model::downloadPlatformTools,
@@ -244,6 +247,8 @@ private fun App(model: AppModel, adb: AdbStatus) {
                 onServe = model::setServing,
                 onCopy = model::copy,
             ),
+            onUpdatesEnabled = model.updates::setEnabled,
+            onDownloadUpdate = model.updates::openDownload,
             share = ShareActions(
                 onClose = model.share::close,
                 onOptions = model.share::setOptions,

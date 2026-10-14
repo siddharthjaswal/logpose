@@ -9,7 +9,8 @@ format may still change.
 ### Added — LogPose for Mac (in progress) and the `.logpose` capture file
 
 A Compose Desktop app for people who don't use Android Studio — QA testers first
-([`docs/mac-app-prd.md`](docs/mac-app-prd.md)). Not released yet; milestones M1–M3 are in.
+([`docs/mac-app-prd.md`](docs/mac-app-prd.md)). Not released yet; milestones M1–M4 are in and M5
+(distribution) is wired, waiting on an Apple Developer account for signing.
 
 - **Connect without an SDK or a cable.** The app finds an existing `adb` or downloads Google's
   platform-tools on first run (versioned archive, size + SHA-1 checked against Google's own
@@ -25,6 +26,18 @@ A Compose Desktop app for people who don't use Android Studio — QA testers fir
 - **The `.logpose` file** is one format in `:core` — a zip of a manifest, one `Envelope` per line
   (the library's own line format, so a library `capture.ndjson` opens too) and screenshots. It opens
   in the Mac app, in the plugin, and in the daemon.
+
+- **Distribution (M5).** `./gradlew :desktop:packageDmg` builds an arm64 `.dmg` (macOS 11+) with
+  the compass icon, a trimmed bundled runtime (`jdk.httpserver` for Serve MCP, `jdk.crypto.ec` for
+  HTTPS), the `.logpose` document type with an exported UTI, and the Local Network usage string +
+  Bonjour service types that macOS 15 needs before wireless pairing can work. Releases are
+  `desktop-v<version>` tags, built by `.github/workflows/desktop-release.yml`, which signs,
+  notarizes and staples when the Apple secrets exist and otherwise publishes a clearly labeled
+  unsigned dmg. `LogPose.app/Contents/MacOS/LogPose --self-check` proves a packaged build's
+  runtime. A Homebrew cask template lives in `packaging/homebrew/`.
+- **Update check.** At most once a day the app asks GitHub's public Releases API for a newer
+  `desktop-v*` release and shows *Update available — Download* in the sidebar footer, linking to
+  the release page. Nothing is downloaded or sent; it can be switched off in the same footer.
 
 ### Added (plugin)
 - **Open Capture File…** — open a `.logpose` someone shared (in Slack, say) as a read-only timeline

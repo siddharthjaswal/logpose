@@ -300,3 +300,83 @@ Security*. Acceptable for an internal pilot; not for handing to QA teams.
 - At Shadowfax: within a month, a measurable share of app bugs arrive **with a `.logpose` attached**
   — the number that actually means fewer "can't reproduce" threads.
 - Developers open shared captures in both the app and the plugin (the loop works end to end).
+
+## Status
+
+*Updated 2026-10-13.*
+
+| Milestone | State | Commit |
+|---|---|---|
+| **M1** — shell + cable capture | done | `4ac046f` |
+| **M2** — wireless (QR, pairing code, legacy `tcpip`, auto-reconnect) | done | `c7b3735` |
+| **M3** — record and share (the QA MVP) | done | `75585cb` |
+| **M4a** — timeline + detail parity | done | `3273054` |
+| **M4b** — waterfall, correlation, Advanced, Serve MCP | done | `e39420f` (+ fix `8559f3b`: mock-coexistence read-only wipe and silent takeover) |
+| **M5** — distribution | built and verified unsigned; signing waits on an account | pending (uncommitted) |
+| **M6** — direct Slack upload + Shadowfax dogfood | not started | — |
+
+### M5 — what shipped
+
+- **Identity.** The app versions on its own: `desktopVersion = "1.0.0"` in
+  `desktop/build.gradle.kts` (macOS requires MAJOR > 0, so not 0.x); bundle id
+  `io.github.siddharthjaswal.logpose.desktop` (unchanged since M3); the plugin's compass mark as
+  `packaging/macos/LogPose.icns` (16–1024 pt, @1x/@2x, rasterized with Skia — RELEASING.md).
+- **The bundle.** arm64 `.dmg`, `LSMinimumSystemVersion` 11.0 (what the JBR 17 runtime and Skiko's
+  natives are linked for), developer-tools category, copyright. The `.logpose` association is
+  written by hand — a Viewer document type owning an exported UTI
+  `io.github.siddharthjaswal.logpose.capture` — because jpackage's own claims a `****` wildcard.
+  `NSLocalNetworkUsageDescription` + `NSBonjourServices` (`_adb-tls-pairing._tcp`,
+  `_adb-tls-connect._tcp`, `_adb._tcp`) so macOS 15 can ask for Local Network access instead of
+  silently failing wireless pairing.
+- **Runtime.** jlink modules = Compose's defaults + exactly what `suggestRuntimeModules` reports
+  (`java.instrument`, `jdk.httpserver`, `jdk.unsupported`) + `jdk.crypto.ec`. Proven on the
+  packaged app with `LogPose --self-check` (Serve MCP round-trip with 21 tools, HTTPS + XML to
+  Google's SDK manifest, HTTPS + JSON to GitHub, an off-screen Compose frame); the same check
+  against a runtime without `jdk.httpserver`/`jdk.crypto.ec` fails all three network checks.
+- **Signing/notarization** activate only when `MACOS_SIGNING_IDENTITY` / `APPLE_ID` /
+  `APPLE_APP_PASSWORD` / `APPLE_TEAM_ID` are in the environment; otherwise a working unsigned app.
+- **Release pipeline.** `desktop-v<version>` tags → `.github/workflows/desktop-release.yml`
+  (macOS arm64 runner): sign + notarize + staple when the six secrets exist, else an unsigned dmg
+  labeled as such; release created with `make_latest: false`. The tag never matches the plugin's
+  `v*` release workflow, and JitPack only builds tags someone requests.
+- **Update check** (no Sparkle/Conveyor): at launch, at most daily, an anonymous GET of the GitHub
+  Releases API, filtered to published non-prerelease `desktop-v*` tags; a newer one shows
+  *Update available — Download* in the sidebar footer (opens the release page). Off switch in the
+  footer; never runs for a `dev` build; off the UI thread with 5 s / 10 s timeouts.
+- **Homebrew.** Cask template `packaging/homebrew/logpose.rb`; each release attaches a filled-in
+  copy for a tap (`siddharthjaswal/homebrew-logpose`). homebrew/cask proper needs a signed,
+  notarized app.
+
+### Conveyor — evaluated, not adopted (for now)
+
+[Conveyor](https://conveyor.hydraulic.dev) (Hydraulic) packages Compose Desktop apps and would
+add: Sparkle-based delta auto-update on macOS (a real in-place updater, not a link), signing and
+notarization from any OS (it signs without Xcode, so CI could be Linux), Windows/Linux packages and
+a generated download page from the same config — and it is free for open-source projects. The
+cost: a new proprietary build tool and config (`conveyor.conf`) beside Gradle, a licence key tied
+to the public repo, its own release/hosting model to learn, and one more moving part in the
+signing chain — for one platform (arm64 macOS) whose packaging Compose's `nativeDistributions`
+already does. **Decision:** stay on `nativeDistributions` + the hand-rolled update check. Revisit
+if (a) testers ask for silent in-place updates, (b) Windows or Linux builds become a goal, or
+(c) signing from macOS CI turns out to be painful.
+
+### What remains
+
+**For M6:** Slack app + Keychain token + channel/thread picker; then the Shadowfax QA dogfood week.
+
+**Human-only verifications** (cannot be done from an agent session):
+
+1. **Phone pairing on a real Mac and phone** — run [`docs/mac-app-wireless-test.md`](mac-app-wireless-test.md),
+   now from the **packaged** app, including the macOS 15 *Local Network* prompt appearing on first
+   pairing (and pairing working after *Allow*).
+2. **Slack drag** — drag an exported `.logpose` from the share sheet into a Slack message and
+   open it on the other end (app and plugin).
+3. **Gatekeeper flow for the unsigned dmg** on a clean macOS 15 account (*Open Anyway*).
+4. **Signing** once an Apple Developer account exists (open question 2): enrol, create a
+   *Developer ID Application* certificate, add the six repository secrets (RELEASING.md →
+   *Mac app*), push `desktop-v1.0.0`, then check `spctl -a -vv` says *Notarized Developer ID* and
+   `xcrun stapler validate` passes on the downloaded dmg.
+5. **Homebrew tap** repository creation, then homebrew/cask submission after the first signed release.
+
+Open question 6 (Intel) stays at "arm64 only until someone asks": an x64 build needs an Intel
+runner (`macos-13`) and an x64 JDK, since the bundled runtime is the build machine's.

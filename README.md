@@ -889,6 +889,57 @@ Two seams are worth knowing:
   directory. Configure it once, in either half. (A vocabulary from an older plugin or a
   hand-seeded `daemon.properties` is migrated into the shared file automatically on first use.)
 
+## LogPose for Mac
+
+A standalone Mac app for the people who test an Android app but don't live in Android Studio —
+QA testers first. Plug in (or pair over Wi-Fi) a phone running a build with the LogPose
+interceptor, press **Start**, test, and every request, push, DB query and worker event lands in
+the same timeline the plugin draws. When something breaks, **Share** turns the session into a
+scrubbed `.logpose` file and a Slack-ready summary; the developer opens that file in Android Studio
+or in the app and sees exactly what you saw. It needs no Android SDK, no IDE and no account.
+
+**Download.** Apple silicon (arm64), macOS 11 or later. Grab `LogPose-<version>-arm64.dmg` from
+the [Releases](https://github.com/siddharthjaswal/logpose/releases) page (tags `desktop-v*`), open
+it and drag **LogPose** to Applications. A Homebrew tap is planned
+(`brew install --cask siddharthjaswal/logpose/logpose`).
+
+**First run.**
+
+1. **Unsigned builds** (until the app is signed and notarized, the release says *unsigned*):
+   macOS refuses the first launch. Go to *System Settings → Privacy & Security*, scroll to
+   *"LogPose" was blocked…* and click **Open Anyway** (macOS 15+; on older macOS, right-click
+   LogPose.app → *Open*). Do this only for a dmg from this repository's Releases page.
+2. **adb.** If this Mac already has `adb` (an Android SDK, Homebrew), LogPose uses it. If not, it
+   asks before downloading Google's platform-tools (~16 MB) into
+   `~/Library/Application Support/LogPose`, checking size and SHA-1 against Google's manifest.
+3. **Local Network.** The first time you pair a phone over Wi-Fi, macOS asks whether LogPose may
+   find and connect to devices on your local network. Click **Allow** — wireless debugging is
+   exactly that. (Changed your mind? *System Settings → Privacy & Security → Local Network*.)
+
+**Connect a phone.** By cable: enable USB debugging, plug in, accept the prompt on the phone.
+Over Wi-Fi (Android 11+): **+ Add device** → scan the QR code from *Developer options → Wireless
+debugging → Pair device with QR code*, or type the six-digit pairing code. *How to connect a phone*
+in the sidebar walks through turning on developer options. Remembered phones reconnect on
+their own.
+
+**Share to Slack.** **Share** → pick the scope (whole session, since a bookmark, ±N minutes
+around one) → the PII scrubber is on by default and the preview shows exactly what leaves the
+Mac → **Export**, then drag the file into Slack and paste the copied summary. ⌘B drops a bookmark
+while you test; the screenshot button grabs the phone's screen into the capture.
+
+**Open a `.logpose`.** Double-click it in Finder (the app owns the file type), or in Android
+Studio use **Open Capture File…** in the LogPose tool window — or `logpose serve --open <file>`
+so a coding agent can read it over MCP.
+
+**Updates.** Once a day the app asks GitHub's public Releases API whether a newer Mac release
+exists and, if so, shows *Update available — Download* in the sidebar footer, linking to the
+release page. Nothing is downloaded automatically and nothing about you or your devices is sent;
+*Update check: on/off* in the same footer turns it off.
+
+Building it yourself: `./gradlew :desktop:run`, or `./gradlew :desktop:packageDmg` for an
+(unsigned) dmg in `desktop/build/compose/binaries/main/dmg/`. Release process:
+[`RELEASING.md`](RELEASING.md#mac-app).
+
 ## Repository layout
 
 ```
@@ -896,6 +947,8 @@ logpose/
 ├── src/…                 # the IntelliJ / Android Studio plugin (this build)
 ├── core/                 # the IDE-free half: wire model, parser, store, analysis, MCP tools
 ├── daemon/               # `logpose serve` — capture + MCP with no IDE (plain JVM, fat jar)
+├── desktop/              # LogPose for Mac — Compose Desktop app over :core
+├── packaging/            # Mac app icon (macos/) and Homebrew cask template (homebrew/)
 └── logpose-android/      # the drop-in OkHttp interceptor (separate Gradle build)
 ```
 
@@ -932,6 +985,9 @@ for the device-side setup.
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).
+- [ ] **Mac app signed + notarized** — the release workflow (`desktop-release.yml`) signs and
+      notarizes as soon as the Apple Developer secrets exist; until then releases are unsigned.
+- [ ] Homebrew tap for the Mac app (`packaging/homebrew/logpose.rb`), then homebrew/cask once signed.
 - [ ] Maven Central for the interceptor (optional, more "official" than JitPack).
 
 ### Quality & trust

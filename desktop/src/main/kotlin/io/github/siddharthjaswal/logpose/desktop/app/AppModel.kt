@@ -161,6 +161,9 @@ class AppModel(
         say = { text, error -> say(text, error) },
     )
 
+    /** The once-a-day *Update available* check (M5); inert for a `dev` build. */
+    val updates = UpdateController(scope, settings, appVersion())
+
     /** Serve MCP (PRD §7). */
     val mcp = DesktopMcp(settings, session, advanced, projectName = {
         advanced.location.projectDir?.name ?: "LogPose for Mac"
@@ -527,6 +530,7 @@ class AppModel(
         // The mock-writer decision follows the device in focus and the session's state.
         scope.launch { combine(_selectedSerial, session.state, _viewing) { a, b, c -> Triple(a, b, c) }.collect { advanced.refresh(); mcp.refresh() } }
         if (mcp.wasServing()) setServing(true)
+        updates.start()
     }
 
     fun locateAdb() {

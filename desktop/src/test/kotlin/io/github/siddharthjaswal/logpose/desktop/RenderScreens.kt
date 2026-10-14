@@ -1,5 +1,8 @@
 package io.github.siddharthjaswal.logpose.desktop
 
+import io.github.siddharthjaswal.logpose.desktop.app.UpdateUi
+import io.github.siddharthjaswal.logpose.desktop.update.UpdateCheck
+
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.unit.Density
@@ -80,6 +83,13 @@ fun main(args: Array<String>) {
             state(devices = listOf(pixel.copy(state = "unauthorized")), session = SessionState.Idle, snapshot = TimelineSnapshot.EMPTY),
             ScreenActions(),
         )
+    }
+    // M5: the sidebar footer with a newer Mac release known (and the update-check switch).
+    val newer = UpdateCheck.Release("desktop-v1.1.0", UpdateCheck.Version(1, 1, 0), UpdateCheck.RELEASE_PAGE_PREFIX + "tag/desktop-v1.1.0")
+    for (dark in listOf(true, false)) {
+        shot(out, "m5-update-available-${if (dark) "dark" else "light"}", dark) {
+            LogPoseScreen(state().copy(updates = UpdateUi("1.0.0", enabled = true, available = newer)), ScreenActions())
+        }
     }
     renderWireless(out, ::state)
     renderM3(out)

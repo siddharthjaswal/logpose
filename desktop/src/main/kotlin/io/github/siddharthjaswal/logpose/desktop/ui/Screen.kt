@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.siddharthjaswal.logpose.desktop.adb.AdbLocator
+import io.github.siddharthjaswal.logpose.desktop.app.UpdateUi
 import io.github.siddharthjaswal.logpose.desktop.adb.PlatformTools
 import io.github.siddharthjaswal.logpose.desktop.app.AdbStatus
 import io.github.siddharthjaswal.logpose.desktop.app.Placeholder
@@ -119,6 +120,8 @@ data class ScreenState(
     val advanced: AdvancedUi = AdvancedUi(),
     val mcp: McpUi = McpUi(),
     val serveBusy: Boolean = false,
+    // M5 — the update line in the sidebar footer
+    val updates: UpdateUi = UpdateUi(),
 )
 
 class ScreenActions(
@@ -146,6 +149,8 @@ class ScreenActions(
     val waterfall: WaterfallActions = WaterfallActions(),
     val correlation: CorrelationActions = CorrelationActions(),
     val advanced: AdvancedActions = AdvancedActions(),
+    val onUpdatesEnabled: (Boolean) -> Unit = {},
+    val onDownloadUpdate: () -> Unit = {},
 )
 
 @Composable
@@ -271,6 +276,28 @@ private fun Sidebar(state: ScreenState, actions: ScreenActions, modifier: Modifi
                 if (adb.downloaded) "adb: downloaded platform-tools" else "adb: ${adb.path}",
                 p.textMuted, Modifier.padding(horizontal = 16.dp), style = Type.monoTiny, maxLines = 2,
             )
+        }
+        UpdateFooter(state.updates, actions)
+    }
+}
+
+/** The app's version, the *Update available* link when GitHub has a newer Mac release, and the opt-out. */
+@Composable
+private fun UpdateFooter(u: UpdateUi, actions: ScreenActions) {
+    val p = LocalPalette.current
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        val available = u.available
+        if (available != null) {
+            Hint("LogPose ${available.version} is out — opens the release page on GitHub.") {
+                Link("Update available — Download", onClick = actions.onDownloadUpdate)
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            T("LogPose ${u.version}", p.textMuted, style = Type.monoTiny)
+            Spacer(Modifier.weight(1f))
+            Hint("Once a day, LogPose asks GitHub whether a newer Mac release exists. Nothing about you, your phones or your captures is sent.") {
+                LinkText(if (u.enabled) "Update check: on" else "Update check: off") { actions.onUpdatesEnabled(!u.enabled) }
+            }
         }
     }
 }
