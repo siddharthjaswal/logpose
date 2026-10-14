@@ -44,6 +44,7 @@ fun main(args: Array<String>) {
     if (args.getOrNull(1) == "m4b") { renderM4b(out); println("Rendered to ${out.absolutePath}"); return }
     if (args.getOrNull(1) == "doctor") { renderDoctor(out); println("Rendered to ${out.absolutePath}"); return }
     if (args.getOrNull(1) == "emulators") { renderEmulators(out); println("Rendered to ${out.absolutePath}"); return }
+    if (args.getOrNull(1) == "redesign") { renderRedesign(out); println("Rendered to ${out.absolutePath}"); return }
     val pixel = Adb.DeviceInfo("37211FDJH00ABC", "device", "Pixel_9a")
     val events = Fixtures.store().snapshot()
     val running = SessionState.Running(pixel.serial, System.currentTimeMillis())
@@ -86,7 +87,7 @@ fun main(args: Array<String>) {
             ScreenActions(),
         )
     }
-    // M5: the sidebar footer with a newer Mac release known (and the update-check switch).
+    // M5: the status bar with a newer Mac release known.
     val newer = UpdateCheck.Release("desktop-v1.1.0", UpdateCheck.Version(1, 1, 0), UpdateCheck.RELEASE_PAGE_PREFIX + "tag/desktop-v1.1.0")
     for (dark in listOf(true, false)) {
         shot(out, "m5-update-available-${if (dark) "dark" else "light"}", dark) {
@@ -99,6 +100,7 @@ fun main(args: Array<String>) {
     renderM4b(out)
     renderDoctor(out)
     renderEmulators(out)
+    renderRedesign(out)
     println("Rendered to ${out.absolutePath}")
 }
 

@@ -3,7 +3,7 @@ package io.github.siddharthjaswal.logpose.desktop.device
 import io.github.siddharthjaswal.logpose.logcat.Adb
 
 /**
- * adb's state words, translated for a QA tester (PRD §5.1): the sidebar never shows `unauthorized`
+ * adb's state words, translated for a QA tester (PRD §5.1): the device switcher never shows `unauthorized`
  * or `offline`, it says what to *do*.
  */
 data class DeviceStatus(

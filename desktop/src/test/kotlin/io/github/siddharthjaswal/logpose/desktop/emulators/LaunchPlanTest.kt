@@ -49,4 +49,10 @@ class LaunchPlanTest {
         assertEquals(2560, LaunchPlan.ramFloorFromLog(log))
         assertEquals(null, LaunchPlan.ramFloorFromLog("INFO | boot completed"))
     }
+
+    @Test fun `a stock launch carries only -avd and -port, whatever else is asked`() {
+        val plan = LaunchPlan.build(LaunchPlan.Options("Pixel_9a", 5556, 1536, coldBoot = true, lowRam = true, stock = true), setOf("-memory", "-gpu", "-lowram", "-no-snapshot-load"))
+        assertEquals(listOf("-avd", "Pixel_9a", "-port", "5556"), plan.args)
+        assertEquals(emptyList<String>(), plan.skipped)
+    }
 }

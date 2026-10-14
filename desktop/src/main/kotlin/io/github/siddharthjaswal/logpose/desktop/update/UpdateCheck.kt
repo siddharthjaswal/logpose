@@ -12,7 +12,7 @@ import java.net.URI
 /**
  * The update check — deliberately not Sparkle or Conveyor (docs/mac-app-prd.md, *Status*): once a
  * day at most, one anonymous GET to GitHub's public Releases API, and if a newer **Mac app** release
- * exists the sidebar shows a quiet *Update available — Download* link to its release page. Nothing
+ * exists the status bar shows a quiet *Update available* link to its release page. Nothing
  * is downloaded or installed, and nothing about the user, their devices or their captures is sent
  * (the request carries only a User-Agent naming the app version, which GitHub's API requires).
  *

@@ -167,6 +167,9 @@ class AppModel(
     /** The Emulators sheet: lean AVD launches, config.ini slimming, opt-in guest tweaks. */
     val emulators = EmulatorController(scope, settings)
 
+    /** Pane sizes and collapsed states (persisted), and which toolbar/status-bar popover is open. */
+    val layout = LayoutController(scope, settings)
+
     /** Serve MCP (PRD §7). */
     val mcp = DesktopMcp(settings, session, advanced, projectName = {
         advanced.location.projectDir?.name ?: "LogPose for Mac"

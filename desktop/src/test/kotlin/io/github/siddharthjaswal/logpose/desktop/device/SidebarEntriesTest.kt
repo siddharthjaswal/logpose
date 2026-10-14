@@ -54,4 +54,10 @@ class SidebarEntriesTest {
         assertEquals("R5CT20ABCDE", SidebarEntries.shortSerial(tlsSerial))
         assertEquals("192.168.1.31:5555", SidebarEntries.shortSerial("192.168.1.31:5555"))
     }
+
+    @Test fun `a disconnected remembered phone says how to bring it back, unless it's being retried`() {
+        val e = SidebarEntries.build(emptyList(), listOf(absentTls), paused = setOf("adb-OLD-1"))
+        assertEquals("Disconnected — Reconnect to use it again", e.single().status.label)
+        assertEquals("Reconnecting…", SidebarEntries.build(emptyList(), listOf(absentTls), setOf("adb-OLD-1"), setOf("adb-OLD-1")).single().status.label)
+    }
 }

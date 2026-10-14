@@ -35,10 +35,11 @@ import io.github.siddharthjaswal.logpose.desktop.ui.CorrelationActions
 import io.github.siddharthjaswal.logpose.desktop.ui.WaterfallActions
 import io.github.siddharthjaswal.logpose.desktop.ui.EmulatorActions
 import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.isMetaPressed
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.KeyShortcut
+import androidx.compose.ui.window.FrameWindowScope
+import androidx.compose.ui.window.MenuBar
+import io.github.siddharthjaswal.logpose.desktop.app.Popover
+import io.github.siddharthjaswal.logpose.desktop.ui.ChromeActions
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import java.awt.Desktop
@@ -61,6 +62,8 @@ private fun requestOpen(files: List<File>) {
 fun main(args: Array<String>) {
     // `LogPose.app/Contents/MacOS/LogPose --self-check`: proves the packaged runtime, no window (M5).
     if (args.firstOrNull() == "--self-check") kotlin.system.exitProcess(SelfCheck.run())
+    // The window's MenuBar goes to the macOS menu bar, not a Swing bar inside the window.
+    System.setProperty("apple.laf.useScreenMenuBar", "true")
     // Must be installed before the app finishes launching, or macOS's first open-file event is lost.
     runCatching {
         if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.APP_OPEN_FILE)) {
@@ -76,13 +79,12 @@ private fun app() = application {
     lateinit var model: AppModel
     Window(
         onCloseRequest = ::exitApplication, title = "LogPose", state = windowState,
-        // ⌘B anywhere in the window drops a bookmark at "now".
-        onPreviewKeyEvent = { e ->
-            if (e.type == KeyEventType.KeyDown && e.isMetaPressed && e.key == Key.B && model.canBookmark) { model.beginBookmark(); true } else false
-        },
+        // Not resizable below what the toolbar needs; the panes take it from there (PaneLayout).
     ) {
+        window.minimumSize = java.awt.Dimension(760, 480)
         val scope = rememberCoroutineScope()
         model = remember { AppModel(scope).also { it.start() } }
+        AppMenuBar(model)
         DisposableEffect(Unit) { onDispose { model.shutdown() } }
         val requests by openRequests.collectAsState()
         LaunchedEffect(requests) {
@@ -99,6 +101,8 @@ private fun app() = application {
             // Remembered Wi-Fi phones: retried on the same visibility rule (a hidden app dials nothing).
             LaunchedEffect(Unit) { model.reconnectRemembered() }
             LaunchedEffect(Unit) { model.wireless.showOnboardingIfFirstRun() }
+            // The AVD list once at launch, so the device switcher and the welcome know them at once.
+            LaunchedEffect(Unit) { model.emulators.refresh() }
         }
         LogPoseTheme(dark = isSystemInDarkTheme()) {
             App(model, adb)
@@ -134,6 +138,8 @@ private fun App(model: AppModel, adb: AdbStatus) {
     val serveBusy by model.serveBusy.collectAsState()
     val updates by model.updates.ui.collectAsState()
     val emulators by model.emulators.ui.collectAsState()
+    val layout by model.layout.layout.collectAsState()
+    val popover by model.layout.popover.collectAsState()
     // A one-second clock, only while a session runs: it is what lets "no LogPose events" appear
     // 20 s in without any event arriving to trigger a recomposition.
     val now by produceState(System.currentTimeMillis(), session) {
@@ -151,6 +157,10 @@ private fun App(model: AppModel, adb: AdbStatus) {
         verdict = model.quietVerdict(now),
         eventCount = snapshot.events.size,
     )
+    // Stopped AVDs stay current while something shows them: the switcher, or the no-device welcome.
+    if (popover == Popover.SWITCHER || placeholder == Placeholder.NoDevice) {
+        LaunchedEffect(Unit) { model.emulators.watch() }
+    }
     LogPoseScreen(
         ScreenState(
             adb, devices, selectedSerial, session, snapshot, selectedEventId, placeholder, wireless,
@@ -163,6 +173,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
             correlation = correlation, waterfall = waterfall, keys = keys, find = find,
             advanced = advanced, mcp = mcp, serveBusy = serveBusy, updates = updates,
             emulators = emulators,
+            layout = layout, popover = popover,
         ),
         ScreenActions(
             onDownloadAdb = model::downloadPlatformTools,
@@ -190,11 +201,13 @@ private fun App(model: AppModel, adb: AdbStatus) {
                 onFix = model.wireless::fix,
                 onConnectByIp = model.wireless::connectByIp,
                 onPairInstead = model.wireless::pairInstead,
+                onDisconnect = model.wireless::disconnect,
+                onReconnect = model.wireless::reconnectNow,
             ),
             onBookmark = model::beginBookmark,
             onCommitBookmark = model::commitBookmark,
             onScreenshot = model::takeScreenshot,
-            onOpenFile = { chooseCaptureFile()?.let(model::openCaptureFile) },
+            onOpenFile = { openFile() },
             onBackToLive = model::backToLive,
             onShare = model::openShare,
             onDismissNotice = model::dismissNotice,
@@ -275,6 +288,15 @@ private fun App(model: AppModel, adb: AdbStatus) {
                 onDismissLaunch = model.emulators::dismissLaunch,
                 onShutDown = model.emulators::shutDown,
                 onUndoGuest = model.emulators::undoGuest,
+                onLaunchLean = model.emulators::launchLean,
+                onLaunchStock = model.emulators::launchStock,
+                onOpenLaunchOptions = model.emulators::openLaunchOptions,
+                onShowLaunch = model.emulators::showLaunch,
+            ),
+            chrome = ChromeActions(
+                onTogglePopover = model.layout::toggle,
+                onClosePopover = model.layout::close,
+                onLayout = model.layout::set,
             ),
             share = ShareActions(
                 onClose = model.share::close,
@@ -287,6 +309,69 @@ private fun App(model: AppModel, adb: AdbStatus) {
             ),
         ),
     )
+}
+
+private var openFile: () -> Unit = {}
+
+/**
+ * The macOS menu bar: every toolbar verb with its shortcut, plus the Device and View menus. The
+ * shortcuts live here (the platform's key equivalents), so they work from any focused control.
+ */
+@Composable
+private fun FrameWindowScope.AppMenuBar(model: AppModel) {
+    val session by model.sessionState.collectAsState()
+    val adb by model.adb.collectAsState()
+    val advanced by model.advanced.ui.collectAsState()
+    val mcp by model.mcp.ui.collectAsState()
+    val layout by model.layout.layout.collectAsState()
+    val viewing by model.viewing.collectAsState()
+    val selected by model.selectedSerial.collectAsState()
+    val devices by model.devices.collectAsState()
+    val updates by model.updates.ui.collectAsState()
+    val running = session is SessionState.Running
+    val ready = adb is AdbStatus.Ready
+    openFile = { chooseCaptureFile()?.let(model::openCaptureFile) }
+    fun meta(key: Key, shift: Boolean = false) = KeyShortcut(key, meta = true, shift = shift)
+    MenuBar {
+        Menu("File") {
+            Item("Open Capture File…", shortcut = meta(Key.O), onClick = { openFile() })
+            Item("Share…", shortcut = meta(Key.E, shift = true), enabled = viewing != null || model.canShare, onClick = model::openShare)
+            if (viewing != null) Item("Back to Live Capture", onClick = model::backToLive)
+        }
+        Menu("Session") {
+            val canStart = viewing == null && devices.any { it.serial == selected && it.ready }
+            if (running) Item("Stop Session", shortcut = meta(Key.R), onClick = model::stopSession)
+            else Item("Start Session", shortcut = meta(Key.R), enabled = canStart, onClick = model::startSession)
+            Item("Bookmark", shortcut = meta(Key.B), enabled = running, onClick = model::beginBookmark)
+            Item("Take Screenshot", shortcut = meta(Key.S, shift = true), enabled = running, onClick = model::takeScreenshot)
+            Separator()
+            Item("Clear Timeline", enabled = viewing == null, onClick = model::clearTimeline)
+        }
+        Menu("Device") {
+            Item("Choose Device…", shortcut = meta(Key.K), enabled = ready, onClick = { model.layout.open(Popover.SWITCHER) })
+            // ⌘D as well, the brief's second binding; macOS shows one shortcut per item, so it has its own.
+            Item("Devices and Emulators", shortcut = meta(Key.D), enabled = ready, onClick = { model.layout.open(Popover.SWITCHER) })
+            Separator()
+            Item("Add Device…", shortcut = meta(Key.N), enabled = ready, onClick = { model.wireless.openAddDevice() })
+            Item("Manage Emulators…", enabled = ready, onClick = model.emulators::open)
+            Item("Check Connection", enabled = ready, onClick = model.wireless::openConnectionCheck)
+            Item("How to Connect a Phone", onClick = model.wireless::openHowToConnect)
+        }
+        Menu("View") {
+            CheckboxItem("Detail Pane", checked = !layout.detailCollapsed, shortcut = meta(Key.One), onCheckedChange = { model.layout.toggleTimelineOnly() })
+            CheckboxItem("Timeline", checked = !layout.timelineCollapsed, shortcut = meta(Key.Two), onCheckedChange = { model.layout.toggleDetailOnly() })
+            CheckboxItem("Mocks Pane", checked = !layout.mocksCollapsed, shortcut = meta(Key.Three), enabled = advanced.advanced, onCheckedChange = { model.layout.toggleMocks() })
+            Separator()
+            Item("Reset Layout", onClick = model.layout::reset)
+        }
+        Menu("Developer") {
+            CheckboxItem("Advanced", checked = advanced.advanced, onCheckedChange = { model.setAdvanced(it) })
+            CheckboxItem("Serve MCP", checked = mcp.serving, onCheckedChange = { model.setServing(it) })
+            Item("MCP Connect Command…", onClick = { model.layout.open(Popover.MCP) })
+            Separator()
+            CheckboxItem("Check for Updates Daily", checked = updates.enabled, onCheckedChange = { model.updates.setEnabled(it) })
+        }
+    }
 }
 
 /** The native macOS open panel, filtered to captures. Runs on the AWT thread (it is modal). */

@@ -6,6 +6,30 @@ format may still change.
 
 ## [Unreleased]
 
+### Changed — LogPose for Mac: the window, redesigned
+
+- **No device sidebar.** The device in focus is a chip at the left of the toolbar; click it or press
+  ⌘K / ⌘D for the device menu — a searchable list of connected phones and running emulators, the
+  AVDs you can boot (**Launch lean**, **Launch**, options; boot progress shows inline), and
+  remembered Wi-Fi phones (**Reconnect**), with *Add device*, *Manage emulators*, *Check
+  connection* and *How to connect a phone* at the bottom. ↑/↓, ⏎ and Esc work. Hover a row for
+  Disconnect (Wi-Fi), Shut down (emulator), Forget and Switch to wireless. Instructions such as
+  "Tap Allow on the phone" and the ANDROID SLIMMED badge still show, in the chip and the menu.
+- **A status bar** with the capture state, the adb in use, `MCP :63343 ●` (click for the connect
+  command, Copy and the token — Serve MCP's switch lives there), *Update available* and the version.
+- **Developer settings** — *Advanced*, the project folder, the daily update check, the adb path —
+  move to a popover under the toolbar's gear.
+- **Resizable, collapsible panes.** Drag the boundary between the timeline and the detail (or a
+  waterfall), or under Advanced's mocks pane; double-click resets. ⌘1 hides the detail, ⌘2 hides
+  the timeline, ⌘3 collapses the mocks pane. Sizes and collapsed panes persist across launches. A
+  narrow window floats the detail over the list instead of crushing both.
+- **A welcome screen** when nothing is connected: connect over Wi-Fi (QR), use a USB cable, or start
+  one of your emulators — plus *Open a .logpose file…*.
+- **A macOS menu bar** (File, Session, Device, View, Developer) with every action and shortcut:
+  ⌘O open, ⇧⌘E share, ⌘R start/stop, ⌘B bookmark, ⇧⌘S screenshot, ⌘N add device.
+- Toolbar tidied: icon buttons with tooltips for bookmark, screenshot, open and clear; *Start
+  session* / *Stop* and *Share* keep their labels.
+
 ### Added — LogPose for Mac (in progress) and the `.logpose` capture file
 
 A Compose Desktop app for people who don't use Android Studio — QA testers first

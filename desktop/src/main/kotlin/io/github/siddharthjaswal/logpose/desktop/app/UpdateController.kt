@@ -13,7 +13,7 @@ import kotlinx.coroutines.withContext
 import java.awt.Desktop
 import java.net.URI
 
-/** The sidebar footer's update line. */
+/** The update state: the status bar's *Update available* and the Developer popover's switch. */
 data class UpdateUi(
     val version: String = "dev",
     val enabled: Boolean = true,

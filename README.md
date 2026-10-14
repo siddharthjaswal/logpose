@@ -922,11 +922,21 @@ without a Developer ID is named `LogPose-<version>-arm64-unsigned.dmg`, a signed
    find and connect to devices on your local network. Click **Allow** — wireless debugging is
    exactly that. (Changed your mind? *System Settings → Privacy & Security → Local Network*.)
 
+**The window.** The device you're capturing sits at the left of the toolbar; click it (or ⌘K) for
+the device menu: search, your connected phones and running emulators, the AVDs you can boot (one
+click: **Launch lean**), remembered Wi-Fi phones (**Reconnect**), and *Add device*, *Manage
+emulators*, *Check connection*, *How to connect a phone*. ↑/↓ and ⏎ work in it. The timeline and
+the detail pane get the whole width; drag the boundary between them (double-click resets), and
+⌘1 / ⌘2 / ⌘3 collapse the detail, the timeline or Advanced's mocks pane — sizes and collapsed
+panes are remembered. The status bar at the bottom shows the capture, which adb is in use, the MCP
+server (click it for the connect command) and the version. Developer settings — *Advanced*, the
+daily update check — live under the toolbar's gear. Everything is in the menu bar too.
+
 **Connect a phone.** By cable: enable USB debugging, plug in, accept the prompt on the phone.
-Over Wi-Fi (Android 11+): **+ Add device** → scan the QR code from *Developer options → Wireless
-debugging → Pair device with QR code*, or type the six-digit pairing code. *How to connect a phone*
-in the sidebar walks through turning on developer options. Remembered phones reconnect on
-their own.
+Over Wi-Fi (Android 11+): **Add device** (in the device menu, or on the welcome screen when nothing
+is connected) → scan the QR code from *Developer options → Wireless debugging → Pair device with QR
+code*, or type the six-digit pairing code. *How to connect a phone* walks through turning on
+developer options. Remembered phones reconnect on their own.
 
 **Wireless pairing stuck?** On macOS, adb's own network discovery (adb 37's built-in backend)
 can miss a phone's pairing service that macOS itself sees instantly — especially when the phone is
@@ -943,7 +953,7 @@ says what it found. The usual fixes:
 - **Allow Local Network** for LogPose in *System Settings → Privacy & Security → Local Network*.
 - **Enter IP & port manually** (pairing-code tab) works without any network discovery.
 
-*Check connection* in the sidebar runs the same checks any time; **Copy diagnostics** puts a
+*Check connection* in the device menu runs the same checks any time; **Copy diagnostics** puts a
 Markdown report (no pairing codes or passwords) on the clipboard for a support thread.
 
 **Share to Slack.** **Share** → pick the scope (whole session, since a bookmark, ±N minutes
@@ -955,7 +965,9 @@ while you test; the screenshot button grabs the phone's screen into the capture.
 Studio use **Open Capture File…** in the LogPose tool window — or `logpose serve --open <file>`
 so a coding agent can read it over MCP.
 
-**Emulators, with less of your Mac's memory.** *Emulators* in the sidebar lists your AVDs
+**Emulators, with less of your Mac's memory.** The device menu lists your stopped AVDs with
+**Launch lean** (live boot progress inline) and **Launch** (as Android Studio's ▶ would); *Manage
+emulators…* opens the full panel, which lists your AVDs
 (`~/.android/avd`) with their image, `hw.ramSize`, GPU mode and — for a running one — the qemu
 process's memory as Activity Monitor counts it (`footprint`, or `ps` RSS, labelled). **Slim this
 AVD** lowers `hw.ramSize` (1024 / 1536 / 2048 MB) and sets `hw.gpu.mode=host`, editing config.ini
@@ -972,9 +984,9 @@ The idea comes from [avdslim](https://github.com/kdbhalala/avdslim) (MIT); LogPo
 the safe subset and bundles none of it.
 
 **Updates.** Once a day the app asks GitHub's public Releases API whether a newer Mac release
-exists and, if so, shows *Update available — Download* in the sidebar footer, linking to the
-release page. Nothing is downloaded automatically and nothing about you or your devices is sent;
-*Update check: on/off* in the same footer turns it off.
+exists and, if so, shows *Update available* in the status bar, linking to the release page.
+Nothing is downloaded automatically and nothing about you or your devices is sent; *Check for
+updates daily* under the toolbar's gear turns it off.
 
 Building it yourself: `./gradlew :desktop:run`, or `./gradlew :desktop:packageDmg` for an
 (unsigned) dmg in `desktop/build/compose/binaries/main/dmg/`. Release process:

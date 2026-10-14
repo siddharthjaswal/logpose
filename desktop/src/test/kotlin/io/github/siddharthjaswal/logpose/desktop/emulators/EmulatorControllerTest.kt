@@ -118,6 +118,41 @@ class EmulatorControllerTest {
         w.controller.close()
     }
 
+    @Test fun `the switcher's Launch lean runs the sheet's defaults with no sheet, then clears its progress`() {
+        val w = World()
+        w.controller.refresh()
+        await(w.controller, "rows") { it.rows.isNotEmpty() && it.supported.isNotEmpty() }
+        w.controller.launchLean("Pixel_9a")
+        await(w.controller, "running") { it.rows.single().isRunning && it.launch == null }
+        assertEquals(
+            listOf(w.sdk.path + "/emulator/emulator", "-avd", "Pixel_9a", "-port", "5554", "-memory", "1536", "-gpu", "host", "-no-snapshot-save", "-no-boot-anim", "-lowram"),
+            w.spawned.single(),
+        )
+        assertFalse(w.controller.ui.value.open, "no sheet opened")
+        assertEquals(EmulatorPanel.Overview, w.controller.ui.value.panel)
+        assertTrue(w.disabled.isEmpty(), "guest slimming stays opt-in")
+    }
+
+    @Test fun `Launch boots as Android Studio would, with only -avd and -port`() {
+        val w = World()
+        w.controller.refresh()
+        await(w.controller, "rows") { it.rows.isNotEmpty() && it.supported.isNotEmpty() }
+        w.controller.launchStock("Pixel_9a")
+        await(w.controller, "spawned") { w.spawned.isNotEmpty() }
+        assertEquals(listOf(w.sdk.path + "/emulator/emulator", "-avd", "Pixel_9a", "-port", "5554"), w.spawned.single())
+    }
+
+    @Test fun `Options and Details open the sheet on the right panel`() {
+        val w = World()
+        w.controller.refresh()
+        await(w.controller, "rows") { it.rows.isNotEmpty() }
+        w.controller.openLaunchOptions("Pixel_9a")
+        val ui = w.controller.ui.value
+        assertTrue(ui.open)
+        assertEquals("Pixel_9a", (ui.panel as EmulatorPanel.LaunchOptions).avd)
+        w.controller.close()
+    }
+
     @Test fun `slim is refused while the AVD runs, and the file is untouched`() {
         val w = World()
         w.started = true

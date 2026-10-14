@@ -26,6 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,7 +38,6 @@ import io.github.siddharthjaswal.logpose.desktop.advanced.PushDraft
 import io.github.siddharthjaswal.logpose.desktop.app.AdvancedUi
 import io.github.siddharthjaswal.logpose.desktop.app.MockEditorUi
 import io.github.siddharthjaswal.logpose.desktop.app.SaveScenarioUi
-import io.github.siddharthjaswal.logpose.desktop.mcp.McpUi
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
 import io.github.siddharthjaswal.logpose.desktop.theme.Palette
 import io.github.siddharthjaswal.logpose.mock.DeviceCapability
@@ -106,13 +106,32 @@ private fun syncLine(p: Palette, device: MocksController.DeviceState?, writer: B
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun MocksStrip(ui: AdvancedUi, actions: AdvancedActions) {
+fun MocksStrip(
+    ui: AdvancedUi,
+    actions: AdvancedActions,
+    /** The most the pane may take — the splitter under it sets this. */
+    maxHeight: Dp = 220.dp,
+    /** ⌘3: just the header line (caption, sync, rule count). */
+    collapsed: Boolean = false,
+    onToggleCollapsed: (() -> Unit)? = null,
+) {
     if (!ui.advanced) return
     val p = LocalPalette.current
     val sync = syncLine(p, ui.device, ui.writer)
-    Column(Modifier.fillMaxWidth().background(p.bg0).padding(start = 10.dp, end = 10.dp, top = 7.dp, bottom = 8.dp)) {
+    Column(
+        Modifier.fillMaxWidth().background(p.bg0).heightIn(max = if (collapsed) 40.dp else maxHeight)
+            .padding(start = 10.dp, end = 10.dp, top = 7.dp, bottom = if (collapsed) 7.dp else 8.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
+            if (onToggleCollapsed != null) {
+                GlyphButton(if (collapsed) "▸" else "▾", if (collapsed) "Show the mocks pane  ⌘3" else "Collapse the mocks pane  ⌘3", onClick = onToggleCollapsed)
+                Spacer(Modifier.width(2.dp))
+            }
             T("MOCKS", p.textDim, style = Type.small.copy(fontSize = 10.5.sp), weight = FontWeight.Bold)
+            if (collapsed && ui.rules.isNotEmpty()) {
+                Spacer(Modifier.width(6.dp))
+                T("${ui.rules.count { it.enabled }}/${ui.rules.size} on", p.textMuted, style = Type.small)
+            }
             Spacer(Modifier.width(7.dp))
             Hint(sync.tip) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -135,6 +154,7 @@ fun MocksStrip(ui: AdvancedUi, actions: AdvancedActions) {
                 LinkText("+ Push…", onClick = actions.onCompose)
             }
         }
+        if (collapsed) return@Column
         val serial = ui.serial
         if (!ui.writer) {
             Spacer(Modifier.height(6.dp))
@@ -165,14 +185,13 @@ fun MocksStrip(ui: AdvancedUi, actions: AdvancedActions) {
             }
         }
         if (ui.rules.isNotEmpty()) Spacer(Modifier.height(4.dp))
-        Column(Modifier.heightIn(max = 168.dp).verticalScroll(rememberScrollState())) {
+        Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
             ui.rules.forEach { RuleRow(it, ui.device?.hits?.get(it.id) ?: 0, ui, actions) }
         }
         if (ui.rules.isEmpty() && ui.writer) {
             T("No rules yet — right-click a request → Mock this endpoint…", p.textMuted, Modifier.padding(top = 4.dp), style = Type.small)
         }
     }
-    Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderStrong))
 }
 
 @Composable
@@ -462,70 +481,5 @@ fun SaveScenarioSheet(ui: SaveScenarioUi?, where: String, actions: AdvancedActio
                 }
             }
         }
-    }
-}
-
-/**
- * The sidebar's developer corner: the *Advanced* toggle (off by default — the app stays a
- * recorder), the project folder that shares keys and scenarios with the IDE, and *Serve MCP* with
- * the ready-made `claude mcp add …` line.
- */
-@Composable
-fun DeveloperPanel(ui: AdvancedUi, mcp: McpUi, serveBusy: Boolean, actions: AdvancedActions) {
-    val p = LocalPalette.current
-    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            ToggleSwitch(ui.advanced) { actions.onAdvanced(!ui.advanced) }
-            Spacer(Modifier.width(8.dp))
-            Hint("Mocks, scenarios and push injection — for reproducing a state. Off keeps the app a plain recorder.") {
-                T("Advanced", p.text, style = Type.small, weight = FontWeight.Bold)
-            }
-        }
-        if (ui.advanced) {
-            val loc = ui.location
-            Hint(loc?.label) {
-                T(
-                    if (loc?.shared == true) "Keys & scenarios: ${loc.projectDir?.name}/.logpose" else "Keys & scenarios: on this Mac",
-                    p.textMuted, style = Type.small, maxLines = 2,
-                )
-            }
-            Row {
-                LinkText(if (loc?.shared == true) "Change project folder…" else "Use a project folder…", onClick = actions.onProjectFolder)
-                if (loc?.shared == true) { Spacer(Modifier.width(10.dp)); LinkText("Use this Mac", onClick = actions.onClearProjectFolder) }
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            ToggleSwitch(mcp.serving) { if (!serveBusy) actions.onServe(!mcp.serving) }
-            Spacer(Modifier.width(8.dp))
-            Hint("Expose this window's live capture to a coding agent over MCP on 127.0.0.1 — so a developer can point Claude Code at this session while you test.") {
-                T(if (serveBusy) "Serve MCP…" else "Serve MCP", p.text, style = Type.small, weight = FontWeight.Bold)
-            }
-            if (mcp.serving && mcp.port != null) {
-                Spacer(Modifier.width(6.dp))
-                T(":${mcp.port}", p.textMuted, style = Type.monoTiny)
-            }
-        }
-        mcp.error?.let { T(it, p.danger, style = Type.small, maxLines = 3) }
-        val command = mcp.command
-        if (mcp.serving && command != null) {
-            mcp.portNote?.let { T(it, p.warn, style = Type.small, maxLines = 2) }
-            Box(Modifier.fillMaxWidth().background(p.bg0, RoundedCornerShape(6.dp)).border(1.dp, p.borderSubtle, RoundedCornerShape(6.dp)).padding(8.dp)) {
-                T(command, p.text, style = Type.monoTiny.copy(lineHeight = 13.sp), maxLines = 6)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                PillButton("Copy", filled = true) { actions.onCopy(command, "MCP connect command copied — paste it in your terminal") }
-                Spacer(Modifier.width(8.dp))
-                Hint("The token both authenticates the agent and is kept between launches, so the line keeps working.") {
-                    T("token ${mcp.token.take(8)}…", p.textMuted, style = Type.monoTiny)
-                }
-            }
-            T(
-                if (mcp.readOnly) "Agents can read everything; mocks and push stay read-only until this app controls the phone's mocks."
-                else "Agents can create mocks and inject pushes on this phone.",
-                p.textMuted, style = Type.small.copy(lineHeight = 14.sp), maxLines = 3,
-            )
-        }
-        Spacer(Modifier.height(4.dp))
     }
 }

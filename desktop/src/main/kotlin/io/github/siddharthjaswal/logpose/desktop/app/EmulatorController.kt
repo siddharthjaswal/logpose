@@ -89,6 +89,7 @@ data class EmulatorsUi(
     val avdHome: String? = null,
     val rows: List<AvdRow> = emptyList(),
     val panel: EmulatorPanel = EmulatorPanel.Overview,
+    /** A launch in flight (or just finished/failed) — shown in the sheet and inline in the device switcher. */
     val launch: LaunchUi? = null,
     /** Flags `emulator -help` lists — what Launch lean may use. */
     val supported: Set<String> = emptySet(),
@@ -147,6 +148,17 @@ class EmulatorController(
 
     fun refresh() { scope.launch { refreshNow() } }
 
+    /**
+     * Keeps the AVD list fresh for as long as the caller lives — the window runs it while the device
+     * switcher or the no-device welcome is on screen, so stopped AVDs show without opening the sheet.
+     */
+    suspend fun watch(periodMillis: Long = 5_000) {
+        while (kotlin.coroutines.coroutineContext.isActive) {
+            refreshNow()
+            delay(periodMillis)
+        }
+    }
+
     fun back() = _ui.update { it.copy(panel = EmulatorPanel.Overview) }
 
     fun dismissMessage() = _ui.update { it.copy(message = null) }
@@ -203,7 +215,7 @@ class EmulatorController(
 
     /**
      * Called with each device poll: learns the AVD behind any new emulator serial and refreshes
-     * [EmulatorsUi.guestBySerial], so the sidebar chip and the session header know without the sheet open.
+     * [EmulatorsUi.guestBySerial], so the device switcher, the toolbar chip and the status bar know without the sheet open.
      */
     fun noteDevices(serials: List<String>) {
         val emus = serials.filter { it.startsWith("emulator-") }
@@ -309,26 +321,64 @@ class EmulatorController(
         val ui = _ui.value
         val row = ui.row(avd) ?: return
         if (row.isRunning) return say("$avd is already running.", error = true)
+        _ui.update { it.copy(panel = defaultLaunch(row, ui.supported), message = null) }
+    }
+
+    /** The launch sheet's starting options for [row] — also exactly what the switcher's *Launch lean* runs. */
+    private fun defaultLaunch(row: AvdRow, supported: Set<String>): EmulatorPanel.LaunchOptions {
         val ram = row.slim.slimmedToMb ?: row.avd.ramMb?.coerceAtMost(AvdSlim.DEFAULT_RAM) ?: AvdSlim.DEFAULT_RAM
-        _ui.update {
-            it.copy(
-                panel = EmulatorPanel.LaunchOptions(
-                    avd, ram,
-                    // A Quick Boot snapshot carries the RAM it was taken with: skip it after a slim.
-                    coldBoot = row.avd.hasQuickBootSnapshot && row.slim.slimmed,
-                    lowRam = "-lowram" in ui.supported,
-                ),
-                message = null,
-            )
-        }
+        return EmulatorPanel.LaunchOptions(
+            row.avd.name, ram,
+            // A Quick Boot snapshot carries the RAM it was taken with: skip it after a slim.
+            coldBoot = row.avd.hasQuickBootSnapshot && row.slim.slimmed,
+            lowRam = "-lowram" in supported,
+        )
+    }
+
+    /** The launch-options sheet for one AVD, opened from outside it (the switcher's *Options…*). */
+    fun openLaunchOptions(avd: String) {
+        open()
+        openLaunch(avd)
+    }
+
+    /** The full progress view of the launch in flight (the switcher's *Details…*). */
+    fun showLaunch() {
+        val l = _ui.value.launch ?: return open()
+        open()
+        _ui.update { it.copy(panel = EmulatorPanel.Launching(l.avd)) }
+    }
+
+    /**
+     * The switcher's primary action: launch [avd] lean with the sheet's defaults, no sheet. Progress
+     * is [EmulatorsUi.launch], which the switcher shows inline.
+     */
+    fun launchLean(avd: String) {
+        val ui = _ui.value
+        val row = ui.row(avd) ?: return
+        if (row.isRunning) return say("$avd is already running.", error = true)
+        start(defaultLaunch(row, ui.supported), stock = false)
+    }
+
+    /** *Launch*: as Android Studio's ▶ would — the AVD's own RAM and its Quick Boot snapshot, no lean flags. */
+    fun launchStock(avd: String) {
+        val ui = _ui.value
+        val row = ui.row(avd) ?: return
+        if (row.isRunning) return say("$avd is already running.", error = true)
+        start(EmulatorPanel.LaunchOptions(avd, row.avd.ramMb ?: AvdSlim.DEFAULT_RAM, coldBoot = false, lowRam = false), stock = true)
     }
 
     fun editLaunch(options: EmulatorPanel.LaunchOptions) = _ui.update { it.copy(panel = options) }
 
     fun launch() {
         val o = _ui.value.panel as? EmulatorPanel.LaunchOptions ?: return
+        start(o, stock = false)
+    }
+
+    private fun start(o: EmulatorPanel.LaunchOptions, stock: Boolean) {
         val ui = _ui.value
-        val row = ui.row(o.avd) ?: return
+        if (ui.launch?.let { it.stage !is LaunchStage.Ready && it.stage !is LaunchStage.Failed } == true) {
+            return say("${ui.launch.avd} is still starting — one launch at a time.", error = true)
+        }
         val emulator = ui.emulatorPath ?: return say("No Android emulator on this Mac.", error = true)
         launchJob?.cancel()
         launchJob = scope.launch {
@@ -337,7 +387,7 @@ class EmulatorController(
                 val taken = RunningEmulators.allEmulatorSerials(adb.run(listOf("devices"), 5).orEmpty()).mapNotNull(RunningEmulators::portOf) +
                     RunningEmulators.parsePs(system.ps().orEmpty()).mapNotNull { it.port }
                 val port = RunningEmulators.freePort(taken) ?: return@withContext null
-                port to LaunchPlan.build(LaunchPlan.Options(o.avd, port, o.ramMb, o.coldBoot, o.lowRam), ui.supported)
+                port to LaunchPlan.build(LaunchPlan.Options(o.avd, port, o.ramMb, o.coldBoot, o.lowRam, stock = stock), ui.supported)
             } ?: return@launch say("${o.avd} is already running, or no emulator port is free.", error = true)
             val (port, plan) = prepared
             val serial = "emulator-$port"
@@ -348,7 +398,8 @@ class EmulatorController(
             }
             _ui.update {
                 it.copy(
-                    panel = EmulatorPanel.Launching(o.avd),
+                    // The sheet follows the launch only when it's the sheet that started it.
+                    panel = if (it.open) EmulatorPanel.Launching(o.avd) else it.panel,
                     launch = LaunchUi(o.avd, serial, plan.commandLine(emulator), LaunchStage.Starting, start, start, mapOf("Starting" to start), o.guest, plan.skipped),
                 )
             }
@@ -371,6 +422,9 @@ class EmulatorController(
             }
             stage(LaunchStage.Ready) { it.copy(lowRamDevice = lowRam, ramFloorMb = floor, tweakMessage = tweakMessage) }
             refreshNow()
+            // Launched from the switcher (no sheet to say Done in): once the emulator is a device, the
+            // progress has nothing left to say.
+            if (!_ui.value.open) _ui.update { u -> if (u.launch?.stage is LaunchStage.Ready) u.copy(launch = null) else u }
         }
     }
 

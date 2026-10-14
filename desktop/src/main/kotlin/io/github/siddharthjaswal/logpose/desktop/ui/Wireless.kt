@@ -80,6 +80,10 @@ class WirelessActions(
     /** *Enter IP & port manually* — the connect-only form. */
     val onConnectByIp: () -> Unit = {},
     val onPairInstead: () -> Unit = {},
+    /** *Disconnect* a Wi-Fi phone (a remembered one stays offline until *Reconnect*). */
+    val onDisconnect: (serial: String) -> Unit = {},
+    /** *Reconnect* an offline remembered phone now. */
+    val onReconnect: (id: String) -> Unit = {},
 )
 
 /** The modal layer over the window: the Add-device sheet or the How-to-connect checklist. */
@@ -489,7 +493,7 @@ private fun CableTab(actions: WirelessActions) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         T("Android 10 or older — or no Wi-Fi pairing at all", p.text, weight = FontWeight.SemiBold)
         NumberedStep(1, "Turn on USB debugging (see How to connect) and plug the phone into this Mac.")
-        NumberedStep(2, "Tap Allow on the phone. It appears in the device list on the left.")
+        NumberedStep(2, "Tap Allow on the phone. It appears in the device menu at the top left.")
         NumberedStep(3, "To go wireless: click Switch to wireless under the phone, then unplug the cable.")
         T(
             "Switch to wireless lasts until the phone restarts. The phone must be on the same Wi-Fi as this Mac.",

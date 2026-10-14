@@ -37,6 +37,10 @@ class ReconnectScheduler(
 
     @Synchronized
     fun nextAttemptAt(id: String): Long? = backoff[id]?.nextAtMillis
+
+    /** *Reconnect* pressed: forget the backoff so the next tick tries [id] at once. */
+    @Synchronized
+    fun reset(id: String) { backoff.remove(id) }
 }
 
 /** One reconnect try for a remembered phone. Blocking adb calls — `Dispatchers.IO`. */

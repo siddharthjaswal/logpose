@@ -84,7 +84,7 @@ data class CodeForm(
     val error: String? = null,
 )
 
-/** A *Switch to wireless* in progress or just finished, shown under that phone in the sidebar. */
+/** A *Switch to wireless* in progress or just finished, shown under that phone in the device switcher. */
 data class LegacyStatus(val serial: String, val running: Boolean, val message: String, val ok: Boolean)
 
 /** Everything wireless the window paints, as plain values (the off-screen renders build these directly). */
@@ -96,6 +96,8 @@ data class WirelessUi(
     val form: CodeForm = CodeForm(),
     val remembered: List<RememberedDevice> = emptyList(),
     val reconnecting: Set<String> = emptySet(),
+    /** Remembered phones the tester disconnected: the auto-reconnect leaves them alone until *Reconnect*. */
+    val paused: Set<String> = emptySet(),
     val legacy: LegacyStatus? = null,
     /** The running (or last) pairing attempt's record — stages, timings, which discovery won. */
     val trace: PairingTrace? = null,
@@ -394,8 +396,24 @@ class WirelessController(
                 remembered.forget(device.id)
                 serials.distinct().forEach { adb.disconnect(it) }
             }
-            _ui.update { it.copy(remembered = remembered.all()) }
+            _ui.update { it.copy(remembered = remembered.all(), paused = it.paused - device.id) }
         }
+    }
+
+    /**
+     * *Disconnect* on a Wi-Fi phone: `adb disconnect`, and — for a remembered phone — no auto-redial
+     * until *Reconnect*, or it would be back within seconds. In memory only: the next launch dials it again.
+     */
+    fun disconnect(serial: String) {
+        val memory = _ui.value.remembered.firstOrNull { it.matches(serial) }
+        if (memory != null) _ui.update { it.copy(paused = it.paused + memory.id) }
+        scope.launch(Dispatchers.IO) { adb.disconnect(serial) }
+    }
+
+    /** *Reconnect* on an offline remembered phone: lifts a disconnect's pause and tries on the next tick. */
+    fun reconnectNow(id: String) {
+        scheduler.reset(id)
+        _ui.update { it.copy(paused = it.paused - id) }
     }
 
     private suspend fun remember(device: RememberedDevice) {
@@ -433,7 +451,8 @@ class WirelessController(
         while (kotlin.coroutines.coroutineContext.isActive) {
             val wantBonjour = remembered.all().any { it.kind == RememberedDevice.Kind.TLS }
             val session = withContext(Dispatchers.IO) { bonjourFor(wantBonjour) }
-            val list = remembered.all()
+            val paused = _ui.value.paused
+            val list = remembered.all().filter { it.id !in paused }
             if (list.isNotEmpty()) {
                 val current = devices()
                 val present = list.filter { r -> current.any { it.ready && r.matches(it.serial) } }.map { it.id }.toSet()

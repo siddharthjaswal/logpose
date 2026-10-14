@@ -1,6 +1,14 @@
 package io.github.siddharthjaswal.logpose.desktop.ui
 
 import androidx.compose.foundation.background
+import io.github.siddharthjaswal.logpose.desktop.app.UpdateUi
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.material.CircularProgressIndicator
+import androidx.compose.ui.draw.shadow
+import io.github.siddharthjaswal.logpose.desktop.app.Inspector
+import io.github.siddharthjaswal.logpose.desktop.app.PaneLayout
+import io.github.siddharthjaswal.logpose.desktop.app.Popover
+import io.github.siddharthjaswal.logpose.desktop.device.SwitcherItem
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -27,17 +35,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.siddharthjaswal.logpose.desktop.adb.AdbLocator
-import io.github.siddharthjaswal.logpose.desktop.app.UpdateUi
 import io.github.siddharthjaswal.logpose.desktop.adb.PlatformTools
 import io.github.siddharthjaswal.logpose.desktop.app.AdbStatus
 import io.github.siddharthjaswal.logpose.desktop.app.Placeholder
 import io.github.siddharthjaswal.logpose.desktop.app.WirelessUi
 import io.github.siddharthjaswal.logpose.desktop.device.DeviceStatuses
-import io.github.siddharthjaswal.logpose.desktop.device.SidebarEntries
-import io.github.siddharthjaswal.logpose.desktop.device.SidebarEntry
-import io.github.siddharthjaswal.logpose.desktop.device.Transport
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import io.github.siddharthjaswal.logpose.desktop.session.SessionState
 import io.github.siddharthjaswal.logpose.desktop.session.TimelineSnapshot
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
@@ -120,10 +122,23 @@ data class ScreenState(
     val advanced: AdvancedUi = AdvancedUi(),
     val mcp: McpUi = McpUi(),
     val serveBusy: Boolean = false,
-    // M5 — the update line in the sidebar footer
+    // M5 — the update state (status bar, Developer popover)
     val updates: UpdateUi = UpdateUi(),
     // Emulators — the lean-emulator sheet, and which emulator serials run a guest-slimmed Android
     val emulators: io.github.siddharthjaswal.logpose.desktop.app.EmulatorsUi = io.github.siddharthjaswal.logpose.desktop.app.EmulatorsUi(),
+    // Window chrome — pane sizes / collapsed states, and the open popover (switcher, Developer, MCP)
+    val layout: PaneLayout = PaneLayout(),
+    val popover: Popover = Popover.NONE,
+    /** Render seeds: the switcher's search text and highlighted row on first composition. */
+    val switcherQuery: String = "",
+    val switcherHighlight: String? = null,
+)
+
+/** The chrome's verbs: popovers and the pane layout. */
+class ChromeActions(
+    val onTogglePopover: (Popover) -> Unit = {},
+    val onClosePopover: () -> Unit = {},
+    val onLayout: (PaneLayout) -> Unit = {},
 )
 
 class ScreenActions(
@@ -154,6 +169,7 @@ class ScreenActions(
     val onUpdatesEnabled: (Boolean) -> Unit = {},
     val onDownloadUpdate: () -> Unit = {},
     val emulators: EmulatorActions = EmulatorActions(),
+    val chrome: ChromeActions = ChromeActions(),
 )
 
 @Composable
@@ -172,30 +188,76 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
             AdbSetup(state.adb, actions)
             return@Box
         }
+        val items = switcherItems(state)
+        Column(Modifier.fillMaxSize()) {
+            Toolbar(state, actions, items)
+            Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
+            state.viewing?.let { ViewingBanner(it, actions) }
+            state.pendingBookmark?.let { BookmarkPrompt(it, state.marks.bookmarks.size + 1, actions) }
+            state.notice?.let { NoticeStrip(it, actions) }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (state.placeholder == Placeholder.NoDevice && state.viewing == null) Welcome(state, actions, items)
+                else MainArea(state, actions)
+            }
+            StatusBar(state, actions, items)
+        }
+        WirelessSheets(state.wireless, actions.wireless)
+        ShareSheet(state.share, actions.share)
+        KeysSheet(state.keys, actions.correlation)
+        FindSheet(state.find, actions.correlation)
+        MockEditorSheet(state.advanced.editor, actions.advanced)
+        ComposePushSheet(state.advanced.compose, actions.advanced)
+        SaveScenarioSheet(state.advanced.saveScenario, state.advanced.location?.label ?: "this Mac", actions.advanced)
+        EmulatorsSheet(state.emulators, actions.emulators)
+    }
+}
+
+/**
+ * The timeline (filter bar, MOCKS pane, list) and the inspector (detail card or waterfall), split by
+ * a draggable boundary. Sizes and collapsed states come from [ScreenState.layout]; a window too
+ * narrow for both floats the inspector over the list instead of crushing either.
+ */
+@Composable
+private fun MainArea(state: ScreenState, actions: ScreenActions) {
+    val p = LocalPalette.current
+    val view = state.view ?: remember(state.snapshot.version, state.filter, state.expanded, state.correlation) {
+        TimelineViews.build(
+            state.snapshot.events, state.filter, state.expanded, version = state.snapshot.version,
+            correlation = state.correlation,
+            inGroup = { e, g -> Correlation.containsValue(Correlation.searchableText(e), g.value) },
+        )
+    }
+    val showTimeline = state.placeholder == Placeholder.None || state.viewing != null
+    val target = DetailModel.resolve(view, state.selectedEventId, state.pinnedOccurrence) { id ->
+        state.snapshot.events.firstOrNull { it.id == id }
+    }
+    val flow = state.waterfall
+    val inspector = when {
+        flow != null -> Inspector.WATERFALL
+        target != null -> Inspector.DETAIL
+        else -> Inspector.NONE
+    }
+    val layout = state.layout
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val available = maxWidth.value.toInt()
+        val r = layout.resolve(available, inspector)
+        val inspectorPane: @Composable (Modifier) -> Unit = { m ->
+            if (flow != null) {
+                WaterfallCard(flow, state.selectedEventId, hostAge = { state.elapsedOf(it) ?: 0L }, m, actions.waterfall)
+            } else if (target != null) {
+                DetailPane(
+                    target, { view.duplicateMarks[it.id] }, m,
+                    elapsedOf = state.elapsedOf, transitions = state.transitions, actions = actions.detail,
+                    initialFind = state.detailFind,
+                    burstOf = { view.burstMarks[it] },
+                )
+            }
+        }
         Row(Modifier.fillMaxSize()) {
-            Sidebar(state, actions, Modifier.width(248.dp).fillMaxHeight())
-            Box(Modifier.width(1.dp).fillMaxHeight().background(p.borderSubtle))
-            Column(Modifier.weight(1f).fillMaxHeight()) {
-                Toolbar(state, actions)
-                Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
-                state.viewing?.let { ViewingBanner(it, actions) }
-                state.pendingBookmark?.let { BookmarkPrompt(it, state.marks.bookmarks.size + 1, actions) }
-                state.notice?.let { NoticeStrip(it, actions) }
-                val view = state.view ?: remember(state.snapshot.version, state.filter, state.expanded, state.correlation) {
-                    TimelineViews.build(
-                        state.snapshot.events, state.filter, state.expanded, version = state.snapshot.version,
-                        correlation = state.correlation,
-                        inGroup = { e, g -> Correlation.containsValue(Correlation.searchableText(e), g.value) },
-                    )
-                }
-                val showTimeline = state.placeholder == Placeholder.None || state.viewing != null
-                val target = DetailModel.resolve(view, state.selectedEventId, state.pinnedOccurrence) { id ->
-                    state.snapshot.events.firstOrNull { it.id == id }
-                }
-                Row(Modifier.fillMaxSize()) {
-                    // The bar sits over the list only, as in the plugin (the list half of its
-                    // splitter) — so its narrow layout follows the list's width, not the window's.
-                    Column(Modifier.weight(1f).fillMaxHeight()) {
+            if (r.showList) {
+                // The bar sits over the list only, as in the plugin (the list half of its splitter) —
+                // so its narrow layout follows the list's width, not the window's.
+                Column(Modifier.weight(1f).fillMaxHeight()) {
                     if (showTimeline) {
                         FilterBar(
                             state.filter, view, actions.onFilter, popoverInitiallyOpen = state.filterPopover,
@@ -203,11 +265,23 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
                         )
                         Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderSubtle))
                     }
-                    MocksStrip(state.advanced, actions.advanced)
+                    if (state.advanced.advanced) {
+                        MocksStrip(
+                            state.advanced, actions.advanced, maxHeight = layout.mocksHeight.dp, collapsed = layout.mocksCollapsed,
+                            onToggleCollapsed = { actions.chrome.onLayout(layout.toggleMocks()) },
+                        )
+                        if (layout.mocksCollapsed) Box(Modifier.fillMaxWidth().height(1.dp).background(p.borderStrong))
+                        else Splitter(
+                            vertical = false,
+                            onDrag = { dy -> actions.chrome.onLayout(state.layout.withMocksHeight(state.layout.mocksHeight + dy.toInt())) },
+                            onReset = { actions.chrome.onLayout(state.layout.resetMocks()) },
+                            tip = "Drag to resize the mocks pane · double-click to reset",
+                        )
+                    }
                     Box(Modifier.weight(1f).fillMaxWidth()) {
                         val empty = view.empty
                         when {
-                            !showTimeline -> EmptyState(state.placeholder)
+                            !showTimeline -> EmptyState(state.placeholder, notReadyDetail(state))
                             empty != null -> FilteredToNothing(
                                 empty,
                                 onClearAll = { actions.onFilter(FilterEdits.clearAll(state.filter)); actions.onClearCorrelation() },
@@ -223,197 +297,112 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
                             )
                         }
                     }
-                    }
-                    val flow = state.waterfall
-                    if (flow != null) {
-                        Box(Modifier.width(1.dp).fillMaxHeight().background(p.borderSubtle))
-                        WaterfallCard(
-                            flow, state.selectedEventId, hostAge = { state.elapsedOf(it) ?: 0L },
-                            Modifier.width(540.dp).fillMaxHeight(), actions.waterfall,
-                        )
-                    } else if (target != null) {
-                        Box(Modifier.width(1.dp).fillMaxHeight().background(p.borderSubtle))
-                        DetailPane(
-                            target, { view.duplicateMarks[it.id] }, Modifier.width(470.dp).fillMaxHeight(),
-                            elapsedOf = state.elapsedOf, transitions = state.transitions, actions = actions.detail,
-                            initialFind = state.detailFind,
-                            burstOf = { view.burstMarks[it] },
-                        )
-                    }
+                }
+            }
+            if (r.showInspector && !r.overlay) {
+                if (r.showList) {
+                    Splitter(
+                        vertical = true,
+                        onDrag = { dx ->
+                            val cur = state.layout
+                            actions.chrome.onLayout(cur.withInspectorWidth(inspector, cur.inspectorWidth(inspector) - dx.toInt(), available))
+                        },
+                        onReset = { actions.chrome.onLayout(state.layout.resetInspector(inspector)) },
+                        tip = "Drag to resize · double-click to reset",
+                    )
+                    inspectorPane(Modifier.width(r.inspectorWidth.dp).fillMaxHeight())
+                } else {
+                    inspectorPane(Modifier.weight(1f).fillMaxHeight())
                 }
             }
         }
-        WirelessSheets(state.wireless, actions.wireless)
-        ShareSheet(state.share, actions.share)
-        KeysSheet(state.keys, actions.correlation)
-        FindSheet(state.find, actions.correlation)
-        MockEditorSheet(state.advanced.editor, actions.advanced)
-        ComposePushSheet(state.advanced.compose, actions.advanced)
-        SaveScenarioSheet(state.advanced.saveScenario, state.advanced.location?.label ?: "this Mac", actions.advanced)
-        EmulatorsSheet(state.emulators, actions.emulators)
-    }
-}
-
-@Composable
-private fun Sidebar(state: ScreenState, actions: ScreenActions, modifier: Modifier) {
-    val p = LocalPalette.current
-    val w = state.wireless
-    val entries = SidebarEntries.build(state.devices, w.remembered, w.reconnecting)
-    Column(modifier.background(p.bg1).padding(vertical = 12.dp)) {
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            T("DEVICES", p.textMuted, style = Type.small, weight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Button("+ Add device", actions.wireless.onAddDevice)
-        }
-        Spacer(Modifier.height(8.dp))
-        if (entries.isEmpty()) {
-            T("No phone connected", p.textDim, Modifier.padding(horizontal = 16.dp, vertical = 6.dp), style = Type.body)
-        }
-        val running = state.session as? SessionState.Running
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            entries.forEach { e -> DeviceRow(e, state, running, actions) }
-        }
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Link("Emulators", onClick = actions.emulators.onOpen)
-            Link("How to connect a phone", onClick = actions.wireless.onHowToConnect)
-            Link("Check connection", onClick = actions.wireless.onCheckConnection)
-        }
-        DeveloperPanel(state.advanced, state.mcp, state.serveBusy, actions.advanced)
-        val adb = state.adb as? AdbStatus.Ready
-        if (adb != null) {
-            T(
-                if (adb.downloaded) "adb: downloaded platform-tools" else "adb: ${adb.path}",
-                p.textMuted, Modifier.padding(horizontal = 16.dp), style = Type.monoTiny, maxLines = 2,
-            )
-        }
-        UpdateFooter(state.updates, actions)
-    }
-}
-
-/** The app's version, the *Update available* link when GitHub has a newer Mac release, and the opt-out. */
-@Composable
-private fun UpdateFooter(u: UpdateUi, actions: ScreenActions) {
-    val p = LocalPalette.current
-    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        val available = u.available
-        if (available != null) {
-            Hint("LogPose ${available.version} is out — opens the release page on GitHub.") {
-                Link("Update available — Download", onClick = actions.onDownloadUpdate)
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            T("LogPose ${u.version}", p.textMuted, style = Type.monoTiny)
-            Spacer(Modifier.weight(1f))
-            Hint("Once a day, LogPose asks GitHub whether a newer Mac release exists. Nothing about you, your phones or your captures is sent.") {
-                LinkText(if (u.enabled) "Update check: on" else "Update check: off") { actions.onUpdatesEnabled(!u.enabled) }
+        if (r.showInspector && r.overlay) {
+            // Narrow window: the inspector floats over the list from the right, with a shadow edge.
+            Box(
+                Modifier.align(Alignment.CenterEnd).width(r.inspectorWidth.dp).fillMaxHeight()
+                    .shadow(16.dp).background(p.bg0),
+            ) {
+                Row(Modifier.fillMaxSize()) {
+                    Box(Modifier.width(1.dp).fillMaxHeight().background(p.borderStrong))
+                    inspectorPane(Modifier.weight(1f).fillMaxHeight())
+                }
             }
         }
     }
 }
 
-@Composable
-private fun DeviceRow(e: SidebarEntry, state: ScreenState, running: SessionState.Running?, actions: ScreenActions) {
-    val p = LocalPalette.current
-    val selected = e.serial != null && e.serial == state.selectedSerial
-    val capturing = e.serial != null && running?.serial == e.serial
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp)
-            .background(if (selected) p.accentTint else p.bg1, RoundedCornerShape(6.dp))
-            .clickable(enabled = e.serial != null && e.status.ready && running == null) { e.serial?.let(actions.onSelectDevice) }
-            .padding(horizontal = 8.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        // The one green in the palette: only for "capturing right now".
-        val tint = when {
-            capturing -> p.ok
-            e.status.actionNeeded -> p.warn
-            e.serial == null -> p.textMuted.copy(alpha = 0.7f)
-            e.status.ready -> p.textMuted
-            else -> p.textDim
-        }
-        Box(Modifier.width(14.dp).padding(top = 2.dp), contentAlignment = Alignment.TopCenter) {
-            if (e.transport == Transport.WIFI) WifiGlyph(tint) else Box(Modifier.padding(top = 3.dp).size(8.dp).background(tint, CircleShape))
-        }
-        Spacer(Modifier.width(8.dp))
-        Column(Modifier.weight(1f)) {
-            T(e.name, if (e.serial == null) p.textDim else p.text, weight = FontWeight.SemiBold)
-            T(e.detail, p.textMuted, style = Type.monoTiny)
-            // A guest-slimmed emulator says so wherever it's chosen: its Android isn't stock.
-            state.emulators.guestBySerial[e.serial]?.let { summary ->
-                Spacer(Modifier.height(3.dp))
-                Hint(summary) { Pill("ANDROID SLIMMED", p.warn, stroke = p.warn) }
-            }
-            Spacer(Modifier.height(2.dp))
-            val label = if (capturing) "Capturing" else e.status.label
-            T(label, if (e.status.actionNeeded) p.warn else p.textDim, style = Type.small, maxLines = 3)
-            val legacy = state.wireless.legacy?.takeIf { it.serial == e.serial }
-            if (legacy != null) {
-                Spacer(Modifier.height(4.dp))
-                T(legacy.message, if (legacy.running || legacy.ok) p.textDim else p.warn, style = Type.small.copy(lineHeight = 15.sp), maxLines = 5)
-                if (!legacy.running) Link("Dismiss", Modifier.padding(top = 2.dp), actions.wireless.onDismissLegacy)
-            } else if (e.canSwitchToWireless && running == null) {
-                Link("Switch to wireless", Modifier.padding(top = 4.dp)) { actions.wireless.onSwitchToWireless(e.serial!!, e.name) }
-            }
-            if (e.remembered != null && !capturing) {
-                Link("Forget device", Modifier.padding(top = 4.dp)) { actions.wireless.onForget(e.remembered.id) }
-            }
-        }
+/** For "your phone needs one more step": the instruction itself, not a pointer to where it's written. */
+private fun notReadyDetail(state: ScreenState): String? =
+    state.devices.firstOrNull { !it.ready }?.let { d ->
+        DeviceStatuses.displayName(d) + ": " + DeviceStatuses.of(d.state, io.github.siddharthjaswal.logpose.desktop.wireless.isWirelessSerial(d.serial)).label
     }
-}
 
-/** A quiet text action, for the sidebar's per-row verbs. */
+/** A quiet text action, for banners and notices. */
 @Composable
 private fun Link(text: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    val p = LocalPalette.current
-    T(text, p.accent, modifier.clickable(onClick = onClick), style = Type.small, weight = FontWeight.Medium)
+    LinkText(text, modifier, onClick)
 }
 
+/**
+ * The 44px toolbar: the device switcher; the session (Start/Stop, then bookmark and screenshot);
+ * the capture (open, clear, share); the pane toggles and the Developer gear. Icons carry tooltips;
+ * the two verbs whose words matter — the session's and Share — keep their labels.
+ */
 @Composable
-private fun Toolbar(state: ScreenState, actions: ScreenActions) {
+private fun Toolbar(state: ScreenState, actions: ScreenActions, items: List<SwitcherItem>) {
     val p = LocalPalette.current
     val device = state.devices.firstOrNull { it.serial == state.selectedSerial }
+    val running = state.session is SessionState.Running
     Row(
-        Modifier.fillMaxWidth().height(48.dp).background(p.bg1).padding(horizontal = 14.dp),
+        Modifier.fillMaxWidth().height(44.dp).background(p.bg1).padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        when (val s = state.session) {
-            is SessionState.Running -> Button("Stop session", actions.onStop)
-            else -> Button(
-                "Start session", actions.onStart, primary = true,
-                enabled = device != null && device.ready && state.viewing == null,
+        DeviceChip(state, actions, items)
+        ToolSeparator()
+        if (running) {
+            ToolButton("Stop", Ico.STOP, actions.onStop, tip = "Stop the session  ⌘R", icoTint = p.danger)
+        } else {
+            val canStart = device != null && device.ready && state.viewing == null
+            ToolButton(
+                "Start session", Ico.PLAY, actions.onStart, primary = true, enabled = canStart,
+                tip = when {
+                    state.viewing != null -> "Back to live capture first"
+                    device == null -> "Choose a device first  ⌘K"
+                    !device.ready -> DeviceStatuses.of(device.state).label
+                    else -> "Start capturing ${DeviceStatuses.displayName(device)}  ⌘R"
+                },
             )
         }
-        Spacer(Modifier.width(8.dp))
-        Button("Bookmark ⌘B", actions.onBookmark, enabled = state.canBookmark && state.pendingBookmark == null)
-        Spacer(Modifier.width(8.dp))
-        Button(if (state.screenshotBusy) "Screenshot…" else "Screenshot", actions.onScreenshot, enabled = state.canBookmark && !state.screenshotBusy)
-        Spacer(Modifier.width(14.dp))
-        val count = state.snapshot.events.size
-        val label = if (state.viewing != null) "Capture file  ·  $count events" else when (val s = state.session) {
-            is SessionState.Running -> "Capturing ${device?.let(DeviceStatuses::displayName) ?: s.serial}  ·  $count events"
-            is SessionState.Ended -> "Session ended  ·  $count events"
-            SessionState.Idle -> when {
-                count > 0 -> "Stopped  ·  $count events"
-                device != null -> "Ready: ${DeviceStatuses.displayName(device)}"
-                state.devices.isNotEmpty() -> "${DeviceStatuses.displayName(state.devices.first())} isn't ready yet"
-                else -> "No phone connected"
+        Spacer(Modifier.width(6.dp))
+        ToolGroup {
+            IconButton(Ico.BOOKMARK, "Bookmark this moment  ⌘B", actions.onBookmark, enabled = state.canBookmark && state.pendingBookmark == null)
+            Box(contentAlignment = Alignment.Center) {
+                IconButton(Ico.CAMERA, if (state.screenshotBusy) "Taking a screenshot…" else "Take a device screenshot  ⇧⌘S", actions.onScreenshot, enabled = state.canBookmark && !state.screenshotBusy)
+                if (state.screenshotBusy) CircularProgressIndicator(Modifier.size(22.dp), color = p.accent, strokeWidth = 1.5.dp)
             }
         }
-        T(label, p.textDim, Modifier.weight(1f, fill = false))
-        // A session on an emulator whose Android LogPose slimmed: its Android isn't stock, so say so here too.
-        val guest = (state.session as? SessionState.Running)?.let { state.emulators.guestBySerial[it.serial] }
-        if (guest != null && state.viewing == null) {
-            Spacer(Modifier.width(8.dp))
-            Hint(guest) { Pill("ANDROID SLIMMED", p.warn, stroke = p.warn) }
-        }
         Spacer(Modifier.weight(1f))
-        Button("Open…", actions.onOpenFile)
-        Spacer(Modifier.width(8.dp))
-        Button("Share", actions.onShare, primary = state.canShare && state.session !is SessionState.Running, enabled = state.canShare)
-        Spacer(Modifier.width(8.dp))
-        Button("Clear", actions.onClear, enabled = state.snapshot.events.isNotEmpty() && state.viewing == null)
+        ToolGroup {
+            IconButton(Ico.FOLDER, "Open a capture file…  ⌘O", actions.onOpenFile)
+            IconButton(Ico.TRASH, "Clear the timeline", actions.onClear, enabled = state.snapshot.events.isNotEmpty() && state.viewing == null)
+        }
+        Spacer(Modifier.width(6.dp))
+        ToolButton(
+            "Share", Ico.SHARE, actions.onShare, primary = state.canShare && !running, enabled = state.canShare,
+            tip = "Export a .logpose file and a Slack summary  ⇧⌘E",
+        )
+        val l = state.layout
+        // No panes to arrange on the welcome screen.
+        if (!(state.placeholder == Placeholder.NoDevice && state.viewing == null)) ToolSeparator()
+        if (!(state.placeholder == Placeholder.NoDevice && state.viewing == null)) ToolGroup {
+            IconButton(Ico.PANE_LIST, if (l.timelineCollapsed) "Show the timeline  ⌘2" else "Hide the timeline — detail across the window  ⌘2", { actions.chrome.onLayout(l.toggleDetailOnly()) }, active = !l.timelineCollapsed)
+            IconButton(Ico.PANE_DETAIL, if (l.detailCollapsed) "Show the detail pane  ⌘1" else "Hide the detail pane — timeline only  ⌘1", { actions.chrome.onLayout(l.toggleTimelineOnly()) }, active = !l.detailCollapsed)
+            if (state.advanced.advanced) {
+                IconButton(Ico.PANE_MOCKS, if (l.mocksCollapsed) "Show the mocks pane  ⌘3" else "Collapse the mocks pane  ⌘3", { actions.chrome.onLayout(l.toggleMocks()) }, active = !l.mocksCollapsed)
+            }
+        }
+        Spacer(Modifier.width(4.dp))
+        DeveloperButton(state, actions)
     }
 }
 
@@ -497,21 +486,21 @@ private fun NoticeStrip(n: Notice, actions: ScreenActions) {
 }
 
 @Composable
-fun EmptyState(placeholder: Placeholder) {
+fun EmptyState(placeholder: Placeholder, notReadyDetail: String? = null) {
     val p = LocalPalette.current
     val (title, body, hint) = when (placeholder) {
         Placeholder.NoAdb -> Triple("adb isn't available", "LogPose needs Android's adb tool to talk to a phone.", null)
         Placeholder.NoDevice -> Triple(
             "Connect a phone",
-            "Connect an Android phone with a USB cable — it appears on the left as soon as the computer sees it. " +
-                "No cable? Use + Add device to pair over Wi-Fi with a QR code.",
+            "Connect an Android phone with a USB cable — it shows up in the device menu (top left) as soon as the computer sees it. " +
+                "No cable? Use Add device to pair over Wi-Fi with a QR code.",
             "First time? On the phone: Settings → About phone → tap Build number seven times. " +
                 "Then Settings → System → Developer options → turn on USB debugging. " +
                 "Different on Samsung or Xiaomi — see How to connect a phone.",
         )
         Placeholder.DeviceNotReady -> Triple(
             "Your phone needs one more step",
-            "It's connected, but not ready yet — follow the instruction under its name on the left.",
+            notReadyDetail ?: "It's connected, but not ready yet — the device menu (top left) says what to do.",
             "Didn't see a prompt? Unplug the cable and plug it back in with the phone unlocked.",
         )
         is Placeholder.NotStarted -> Triple(

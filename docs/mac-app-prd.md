@@ -112,8 +112,10 @@ lets testers update adb without an app release. If legal clears bundling, it bec
 
 ### 5.1 Connect — the device panel
 
-A left sidebar lists devices with live state (from `adb devices -l`, polled while the panel is
-visible, never on the UI thread — core's `Adb.devices()` + `parseDevices()` already exist):
+A device switcher at the left of the toolbar lists devices with live state (from `adb devices -l`,
+polled while the window is visible, never on the UI thread — core's `Adb.devices()` +
+`parseDevices()` already exist). *(Shipped first as a left sidebar; moved into the toolbar in the
+post-1.1.0 window redesign — see Status.)*
 
 - **Cable:** plug in, it appears. If it shows `unauthorized`, the app says *"Tap **Allow** on the
   phone's USB-debugging prompt"* with a picture — not the adb state word.
@@ -227,7 +229,7 @@ session.logpose   (a zip)
 
 The QA loop — connect, see, share — lands first and is shippable on its own after M3.
 
-- **M1 — Shell + cable capture.** `:desktop` module, window, device sidebar (cable), session
+- **M1 — Shell + cable capture.** `:desktop` module, window, device list (cable), session
   start/stop, timeline rows from `RowContent`, a basic detail pane and JSON tree, adb resolution with
   first-run download. *Gate:* a fresh Mac user account with no SDK sees live gandalf rows.
 - **M2 — Wireless.** QR pairing over mDNS, pairing-code fallback, legacy `tcpip`, remembered devices
@@ -303,7 +305,7 @@ Security*. Acceptable for an internal pilot; not for handing to QA teams.
 
 ## Status
 
-*Updated 2026-10-13.*
+*Updated 2026-10-14.*
 
 | Milestone | State | Commit |
 |---|---|---|
@@ -341,8 +343,8 @@ Security*. Acceptable for an internal pilot; not for handing to QA teams.
   `v*` release workflow, and JitPack only builds tags someone requests.
 - **Update check** (no Sparkle/Conveyor): at launch, at most daily, an anonymous GET of the GitHub
   Releases API, filtered to published non-prerelease `desktop-v*` tags; a newer one shows
-  *Update available — Download* in the sidebar footer (opens the release page). Off switch in the
-  footer; never runs for a `dev` build; off the UI thread with 5 s / 10 s timeouts.
+  *Update available* in the status bar (opens the release page; a sidebar footer until the post-1.1.0
+  redesign). Off switch in the Developer popover; never runs for a `dev` build; off the UI thread with 5 s / 10 s timeouts.
 - **Homebrew.** Cask template `packaging/homebrew/logpose.rb`; each release attaches a filled-in
   copy for a tap (`siddharthjaswal/homebrew-logpose`). homebrew/cask proper needs a signed,
   notarized app.
@@ -359,6 +361,25 @@ snapshots / hardware-qemu.ini, `vm.heapSize`, CPU cores, camera/audio, forced co
 install-shim, location/sync/animation/setup settings, and disabling hand-off apps. A guest-slimmed
 capture carries `manifest.device.note`. Live-verified with `./gradlew :desktop:emulatorsLive`;
 renders via `renderScreens -PshotsOnly=emulators`. Human check: run it from the packaged app.
+
+### Window redesign (after 1.1.0, uncommitted)
+
+*2026-10-14.* The full-height device sidebar is gone; the timeline and detail take the width.
+
+- **Device switcher** in the toolbar (⌘K / ⌘D): search, Connected (phones, running emulators named
+  after their AVD), Emulators (stopped AVDs with *Launch lean* / *Launch* / options, live boot
+  progress inline), Remembered Wi-Fi phones (*Reconnect*), and the connection verbs. Row actions:
+  Disconnect (Wi-Fi; pauses a remembered phone's auto-reconnect until *Reconnect*), Shut down
+  (emulator), Forget, Switch to wireless. Pure list logic in `device/DeviceSwitcher.kt` (tested).
+- **Status bar**: capture state, adb path, `MCP :port ●` (its popover is *Serve MCP*'s one home:
+  switch, command, Copy, token), *Update available*, version.
+- **Developer popover** (toolbar gear): *Advanced* + project folder, daily update check, adb path.
+- **Panes**: draggable list/inspector and mocks/list boundaries (double-click resets), ⌘1 / ⌘2 / ⌘3
+  collapse the detail / timeline / mocks pane, persisted under `logpose.desktop.layout`
+  (`app/PaneLayout.kt`, tested); below ~800 px the inspector overlays the list.
+- **Welcome** when nothing is connected: Wi-Fi (QR), USB, *Start an emulator* (first three AVDs).
+- **macOS menu bar** (File / Session / Device / View / Developer) carries every shortcut.
+- Renders: `renderScreens -PshotsOnly=redesign`.
 
 ### Conveyor — evaluated, not adopted (for now)
 

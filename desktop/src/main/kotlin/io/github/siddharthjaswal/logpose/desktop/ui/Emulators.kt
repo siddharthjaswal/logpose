@@ -55,6 +55,14 @@ class EmulatorActions(
     val onDismissLaunch: () -> Unit = {},
     val onShutDown: (avd: String) -> Unit = {},
     val onUndoGuest: (avd: String) -> Unit = {},
+    /** The switcher / welcome: launch with the sheet's defaults, no sheet. */
+    val onLaunchLean: (avd: String) -> Unit = {},
+    /** *Launch* as Android Studio's ▶ would. */
+    val onLaunchStock: (avd: String) -> Unit = {},
+    /** The sheet's launch options for one AVD, opened from the switcher. */
+    val onOpenLaunchOptions: (avd: String) -> Unit = {},
+    /** The sheet's full progress view of the launch in flight. */
+    val onShowLaunch: () -> Unit = {},
 )
 
 private const val STUDIO_LINE = "Android Studio's ▶ boots from this same config.ini, so its launches get slimmer too (down to the emulator's RAM floor)."
@@ -423,7 +431,7 @@ private fun LaunchProgress(l: LaunchUi, actions: EmulatorActions) {
     }
     if (l.stage is LaunchStage.Ready) {
         Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Bullet("Select ${l.serial} on the left and press Start session — capture works as with any device.")
+            Bullet("Choose ${l.serial} in the device menu (top left, ⌘K) and press Start session — capture works as with any device.")
             l.lowRamDevice?.let { low ->
                 Bullet(if (low) "Android reports a low-RAM device here (ro.config.low_ram=true): apps that check isLowRamDevice() behave as on Android Go phones." else "Android does not report a low-RAM device (ro.config.low_ram unset), so apps see a normal phone.")
             }

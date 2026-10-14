@@ -7,7 +7,7 @@ import io.github.siddharthjaswal.logpose.logcat.Adb
 
 enum class Transport { CABLE, WIFI, EMULATOR }
 
-/** One row of the device sidebar: an adb transport, or a remembered Wi-Fi phone that isn't here. */
+/** One device-list row (the toolbar switcher's): an adb transport, or a remembered Wi-Fi phone that isn't here. */
 data class SidebarEntry(
     /** Stable row key: the adb serial, or `remembered:<id>` for an absent phone. */
     val key: String,
@@ -35,6 +35,8 @@ object SidebarEntries {
         devices: List<Adb.DeviceInfo>,
         remembered: List<RememberedDevice>,
         reconnecting: Set<String> = emptySet(),
+        /** Remembered phones the tester disconnected: not redialled until *Reconnect*. */
+        paused: Set<String> = emptySet(),
     ): List<SidebarEntry> {
         val attached = devices.map { d ->
             val wireless = isWirelessSerial(d.serial)
@@ -59,6 +61,7 @@ object SidebarEntries {
             val trying = r.id in reconnecting
             val label = when {
                 trying -> "Reconnecting…"
+                r.id in paused -> "Disconnected — Reconnect to use it again"
                 r.kind == RememberedDevice.Kind.LEGACY ->
                     "Not connected. If the phone restarted, plug in the cable and switch to wireless again."
                 else -> "Not on this Wi-Fi — reconnects when it's back"

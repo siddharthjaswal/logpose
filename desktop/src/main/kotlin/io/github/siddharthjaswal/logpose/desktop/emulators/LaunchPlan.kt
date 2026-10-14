@@ -22,6 +22,8 @@ object LaunchPlan {
         val coldBoot: Boolean,
         /** `-lowram`: below the emulator's RAM floor, at the price of a low-RAM-device Android. */
         val lowRam: Boolean,
+        /** *Launch* (not lean): only `-avd` and `-port`, so it boots as Android Studio's ▶ does — its own RAM, its Quick Boot snapshot. */
+        val stock: Boolean = false,
     )
 
     data class Plan(val args: List<String>, val skipped: List<String>) {
@@ -51,6 +53,7 @@ object LaunchPlan {
     fun build(o: Options, supported: Set<String>): Plan {
         val args = mutableListOf("-avd", o.avd, "-port", o.port.toString())
         val skipped = mutableListOf<String>()
+        if (o.stock) return Plan(args, skipped)
         fun add(flag: String, vararg values: String) {
             if (flag in supported) { args += flag; args += values } else skipped += flag
         }
