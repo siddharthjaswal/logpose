@@ -251,8 +251,11 @@ class OverviewPanel : CardPanel(null) {
         dup: DuplicateDetector.Mark? = null,
         envelope: io.github.siddharthjaswal.logpose.model.Envelope? = null,
         occurrence: Occurrence? = null,
+        /** Set when the call can never finish because its app run ended — see [LogEvent.abandoned]. */
+        abandoned: String? = null,
     ) {
         applyDuplicate(tx, dup)
+        if (tx != null && abandoned != null && dup == null) applyAbandoned(abandoned)
         applyError(tx)
         applyOccurrence(if (tx == null) null else occurrence)
         if (tx == null) {
@@ -264,12 +267,15 @@ class OverviewPanel : CardPanel(null) {
             return
         }
 
-        pending = tx.isPending()
+        pending = tx.isPending() && abandoned == null
         val code = tx.response?.code
         // The intervention is stated once, by its own pill, whether the call is finished or still
         // in flight — a mocked response that hasn't landed yet is still a mocked response.
         showMock(tx.mocked)
-        if (pending) {
+        if (abandoned != null && tx.isPending()) {
+            // Neutral, not a status colour: nothing failed on the device, it just can't finish.
+            statusPill.set(DetailContent.statusLabel(tx, abandoned), Theme.textDim, Theme.statusNeutralBg)
+        } else if (pending) {
             statusPill.set("${spinnerChar(0)}  pending", Theme.accent, Theme.tint(Theme.accent, 30))
         } else {
             val sColor = Theme.statusColor(code, tx.error)
@@ -288,7 +294,7 @@ class OverviewPanel : CardPanel(null) {
         // app. Prefer a server trace/request id (useful for backend log lookup) over the internal
         // LogPose correlation id; the LogPose trace, when the app set one, is a link, because it's
         // the flow this call belongs to and not just another identifier.
-        val items = DetailContent.httpChips(tx, envelope).map { chip ->
+        val items = DetailContent.httpChips(tx, envelope, abandoned?.takeIf { tx.isPending() }).map { chip ->
             val flow = chip.traceLink
             when {
                 flow != null -> StatChip(chip.caption, chip.value, chip.tip)
@@ -350,6 +356,15 @@ class OverviewPanel : CardPanel(null) {
         }
         errorText.text = err
         errorRow.isVisible = true
+    }
+
+    /** Re-uses the strip for an abandoned call, in muted words (it is neither advice nor failure). */
+    private fun applyAbandoned(reason: String) {
+        if (!::dupRow.isInitialized) return
+        dupBanner.foreground = Theme.textDim
+        dupBanner.text = DetailContent.abandonedBanner(reason)
+        setBannerFill(Theme.tint(Theme.textDim, 22))
+        dupRow.isVisible = true
     }
 
     /** Shows/hides the duplicate warning strip and styles it by severity. */

@@ -65,6 +65,21 @@ class Capture(
         libVersion = { mocks.deviceLibVersion() },
     )
 
+    /**
+     * Asks an app that was already running when the daemon attached to re-announce itself, so its
+     * rows leave session 0 (library 1.7.4+). It never touches the mock rule channel, so it is safe
+     * in read-only mode too — the device's only change is one log line.
+     */
+    private val helloRequester = io.github.siddharthjaswal.logpose.mock.HelloRequester(
+        deviceSerial = { attachedSerial },
+        stillNeeded = { pid -> store.needsHello(pid) },
+    )
+
+    init {
+        // Restart vs second process: a newer run abandons an older one only if its process is gone.
+        store.processNames = io.github.siddharthjaswal.logpose.logcat.AdbProcessNames({ attachedSerial })
+    }
+
     private val active = AtomicBoolean(false)
     @Volatile private var reader: LogcatReader? = null
     @Volatile private var attachedSerial: String? = null
@@ -148,7 +163,7 @@ class Capture(
             // so the store sees it too — that is what keeps two launches from reading as one
             // timeline. Same order as the panel.
             if (msg is ControlMessage.DeviceHello) {
-                store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion)
+                store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion, msg.pid)
             }
             mocks.onControl(msg)
         }
@@ -222,7 +237,11 @@ class Capture(
                     // The store is about to overwrite this worker's previous state in place, so
                     // the sequence is recorded here or nowhere.
                     if (event is LogEvent.Worker) workerLifecycle.note(event, System.currentTimeMillis())
-                    store.add(event)
+                    // The pid ties the row to its app run; an unclaimed one means the launch hello
+                    // predates this attach, so the app is asked to say it again.
+                    val pid = parser.lastPid
+                    store.add(event, pid)
+                    if (pid != null && store.needsHello(pid)) helloRequester.onUnclaimedPid(pid)
                 }
             },
             onError = { msg -> log.warn("capture error: $msg") },
@@ -230,6 +249,9 @@ class Capture(
                 // `active` is cleared by stop() before reader.stop(), so if it is still set the
                 // stream ended on its own — a device drop, an app reinstall, an adb restart.
                 if (active.get()) {
+                    // Open spans can't be seen finishing any more; hearing from the same run after
+                    // the reattach clears the mark.
+                    store.noteDeviceGone()
                     log.stateChange("logcat stream ended — reattaching in ${backoffMillis / 1000}s")
                     sawAnyLine = false
                     retryLater()

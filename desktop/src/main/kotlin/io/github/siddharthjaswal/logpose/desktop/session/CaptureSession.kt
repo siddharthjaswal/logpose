@@ -58,6 +58,11 @@ class CaptureSession(
      * UI thread costs a thread start, not a disk write.
      */
     private val recorderFor: ((serial: String, startedAtMillis: Long) -> SessionRecorder)? = null,
+    /**
+     * Whether to ask a running app to re-announce itself. Only lines that carry a pid (logcat's
+     * `-v brief` prefix) can trigger it, so a fake [LineSource] feeding raw payloads never does.
+     */
+    private val requestHellos: Boolean = true,
 ) {
     val correlation = CorrelationIndex()
 
@@ -88,6 +93,26 @@ class CaptureSession(
     /** Cleared when a session's [CaptureHooks.ended] has fired, so it fires once per session. */
     private var endedOnce = java.util.concurrent.atomic.AtomicBoolean(true)
 
+    /** The device of the running session — what [helloRequester] addresses. */
+    @Volatile private var serial: String? = null
+
+    /**
+     * Asks an app that was already running when the session started to re-announce itself, so its
+     * rows leave session 0 (library 1.7.4+). It never touches the mock channel, so it is safe from
+     * this read-only host.
+     */
+    private val helloRequester: io.github.siddharthjaswal.logpose.mock.HelloRequester? =
+        if (!requestHellos) null else io.github.siddharthjaswal.logpose.mock.HelloRequester(
+            deviceSerial = { serial },
+            stillNeeded = { pid -> store.needsHello(pid) },
+        )
+
+    init {
+        // Restart vs second process: a newer run abandons an older one only if its process is gone.
+        // Only pid-carrying hellos ever consult it, so fake line sources never reach adb.
+        if (requestHellos) store.processNames = io.github.siddharthjaswal.logpose.logcat.AdbProcessNames({ serial })
+    }
+
     @Volatile private var source: LineSource? = null
     @Volatile private var parser = TransactionParser()
     /** Bumped per start, so a reader we already replaced cannot end the session that replaced it. */
@@ -112,7 +137,7 @@ class CaptureSession(
             // Same as the daemon and the panel: a hello marks an app run, so two launches never
             // read as one timeline. Mock acks are ignored — M1 has no mock writer.
             if (msg is ControlMessage.DeviceHello) {
-                store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion)
+                store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion, msg.pid)
                 // Recorded as a line too, so a replay of the file splits app runs the same way.
                 rec?.append(CaptureLines.of(msg.hello))
                 rec?.updateMeta { it.copy(appPackage = msg.hello.pkg, libVersion = msg.hello.libVersion) }
@@ -123,6 +148,8 @@ class CaptureSession(
         val ended = java.util.concurrent.atomic.AtomicBoolean(false).also { endedOnce = it }
         hooks?.started(serial)
         val gen = ++generation
+        this.serial = serial
+        helloRequester?.reset()
         val s = sourceFor(serial)
         source = s
         s.start(
@@ -134,11 +161,22 @@ class CaptureSession(
                     // Every envelope, every update: the store keeps the latest per id and evicts at
                     // its cap; the file keeps everything, so the shareable record never loses history.
                     rec?.append(CaptureLines.of(event))
-                    store.add(event)
+                    // The pid ties the row to its app run; an unclaimed one means the launch hello
+                    // predates this session, so the app is asked to say it again.
+                    val pid = p.lastPid
+                    store.add(event, pid)
+                    if (pid != null && store.needsHello(pid)) helloRequester?.onUnclaimedPid(pid)
                 }
             },
             onError = { msg -> if (gen == generation) { transition(SessionEvent.Failed(serial, msg)); endRecording(rec); fireEnded(ended, serial) } },
-            onStopped = { if (gen == generation) { transition(SessionEvent.StreamEnded(serial)); endRecording(rec); fireEnded(ended, serial) } },
+            onStopped = {
+                if (gen == generation) {
+                    // Still Running means the stream ended on its own (the user's Stop moves the
+                    // state first): whatever was open can't be seen finishing now.
+                    if (_state.value is SessionState.Running) store.noteDeviceGone()
+                    transition(SessionEvent.StreamEnded(serial)); endRecording(rec); fireEnded(ended, serial)
+                }
+            },
         )
     }
 

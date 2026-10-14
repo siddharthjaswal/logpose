@@ -42,6 +42,14 @@ object BroadcastCommand {
     const val CMD_RULES = "rules"
     const val CMD_PUSH = "push"
 
+    /**
+     * "Announce yourself again": the library (1.7.4+) re-emits its `Hello` for the current run.
+     * Sent with **no payload**, which is what makes it safe against every older library — their
+     * receiver drops a command without a `payload` extra before looking at `cmd`, so an unknown
+     * command can't be mistaken for a rule set there.
+     */
+    const val CMD_HELLO = "hello"
+
     /** Base64-encodes [json] and cuts it into the slices one broadcast each can carry. */
     fun slices(json: String): List<String> {
         val encoded = Base64.getEncoder().encodeToString(json.toByteArray(Charsets.UTF_8))
@@ -73,6 +81,14 @@ object BroadcastCommand {
         add("--ei"); add("total"); add(total.toString())
         add("--es"); add("payload"); add(payload)
     }
+
+    /** The `am broadcast` arguments for a [CMD_HELLO] request to [target] — no payload, no seq. */
+    fun helloArgs(target: String): List<String> = listOf(
+        "shell", "am", "broadcast",
+        "-n", "$target/$RECEIVER",
+        "-f", FLAG_INCLUDE_STOPPED_PACKAGES,
+        "--es", "cmd", CMD_HELLO,
+    )
 }
 
 /**

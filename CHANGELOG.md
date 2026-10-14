@@ -64,6 +64,49 @@ A Compose Desktop app for people who don't use Android Studio — QA testers fir
   phone-side rules. **Copy diagnostics** copies a Markdown report with no pairing secrets.
 - **Enter IP & port manually** — a connect-only form for an already-paired phone; needs no mDNS.
 
+### Fixed — capture quality (plugin, daemon, Mac app — all through `:core`)
+
+Four problems a live capture of a real app exposed over MCP.
+
+- **Requests from a dead app run are *abandoned*, not "in flight" forever.** When a newer run of
+  the same package announces itself (or the logcat stream drops), every span the old run left open
+  is marked `abandoned · app restarted` / `abandoned · device disconnected`. The timeline row goes
+  muted — a `—` instead of the spinner, no count-up, the reason beside the path — and the detail card
+  says why no answer is coming. MCP: `session_summary.in_flight` counts only spans that can still
+  finish; `abandoned`, `abandoned_ids` and `abandoned_by_reason` are new, and `list_events` /
+  `get_event` say `abandoned_reason` instead of `in_flight`. A sign of life from the run (a later
+  line from its pid, a re-sent hello, the response itself) clears the mark.
+  A second process of the same app (`com.acme:service`) announcing itself is *not* a restart: the
+  hosts read each announcing pid's process name from `/proc/<pid>/cmdline` (off the EDT), and a
+  newer run supersedes an older one only when the older process is gone, its pid now runs
+  something else, or the new run is the same process name on a new pid.
+- **Rows keep their app run by process id.** The reader now runs `adb logcat -v brief` and keeps
+  each line's pid. Events from a process whose launch hello predates the capture still start in
+  session 0, but the moment that process announces itself its earlier rows move into its run — and
+  LogPose now *asks* it to: on the first event from an unclaimed pid it reads the package from
+  `/proc/<pid>/cmdline` and sends the payload-less `cmd=hello` broadcast, which library 1.7.4
+  answers with its current hello (older libraries ignore it). Pid reuse can't hand a dead run's
+  rows to a new one, and a hello re-sent by the same run is never a restart.
+- **A run's span is its own.** WorkManager re-emits a request under the same `workId` in every new
+  process (the replay on observer attach, with a fresh `at`). The store kept such a row in the run
+  that first showed it, so that run's `last_at` followed the latest replay — a 12-event run
+  "spanning" 42 minutes and ending 1 ms apart from the next. An id re-emitted by a different run
+  now moves into that run (and to its place in the timeline); same-run updates still land in place.
+- **Repeated analytics and app events are flagged like duplicate HTTP calls.** The same event name
+  + screen + params fired ≥3 times within 1 s, or twice within 300 ms, gets the outlined
+  **DUP ×N** pill (warn stroke), a hover hint and a detail banner; *Duplicates only* includes them.
+  Different params never match, so a list logging one event per item is left alone. MCP:
+  `session_summary.duplicate_groups` entries now carry `kind` (HTTP and analytics groups side by
+  side), `duplicate_events` counts repeats, `list_events`/`get_event` add a `duplicate` object, and
+  `analytics_events` returns `bursts`.
+
+### Added (library — v1.7.4)
+- **`cmd=hello` on the reverse channel.** `MockCommandReceiver` answers a payload-less
+  `--es cmd hello` broadcast by re-emitting this run's `Hello` (same `processId`, the app's own
+  config/tag), so a host that attached after launch can tie the events it already saw to the run.
+  The routing is a pure, unit-tested `CommandRoute`; an unknown command carrying a payload is now
+  ignored rather than decoded as a rule set. No public API change — the no-op is untouched.
+
 ### Added (plugin)
 - **Open Capture File…** — open a `.logpose` someone shared (in Slack, say) as a read-only timeline
   in Android Studio: capture pauses, the file replays through the same parser the live capture

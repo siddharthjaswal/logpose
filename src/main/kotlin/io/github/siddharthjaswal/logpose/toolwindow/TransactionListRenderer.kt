@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.util.ui.JBUI
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.EventBurstDetector
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
@@ -93,6 +94,9 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
     /** Duplicate-burst mark for a transaction, or null if it isn't a repeated call. */
     var duplicateProvider: (Transaction) -> DuplicateDetector.Mark? = { null }
 
+    /** Repeat mark for an analytics / app event id ([EventBurstDetector]), or null. */
+    var burstProvider: (String) -> EventBurstDetector.Mark? = { null }
+
     /**
      * Whether this row can open a flow — a configured correlation key value, or a trace.
      *
@@ -121,6 +125,9 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
     private val mockGap = pillGap()
     private val countTag = TagLabel()
     private val countGap = pillGap()
+    /** `abandoned · app restarted` — plain muted words, not a pill: it is a state, not an annotation. */
+    private val goneLabel = JLabel()
+    private val goneGap = pillGap()
     private val sizeCell = MetaCell(RowGeometry.SIZE)
     private val durationCell = MetaCell(RowGeometry.TIME)
 
@@ -141,6 +148,7 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         }
         path.border = JBUI.Borders.emptyLeft(RowGeometry.TEXT_GAP)
         path.font = JBUI.Fonts.label(12.5f)
+        goneLabel.font = JBUI.Fonts.label(11f)
         listOf(dupTag, mockTag, countTag).forEach {
             it.font = JBUI.Fonts.label(10f).asBold()
             it.border = JBUI.Borders.empty(2, 7)
@@ -158,6 +166,8 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         val tags = JPanel().apply {
             isOpaque = false
             layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(goneGap)
+            add(goneLabel)
             add(countGap)
             add(countTag)
             add(mockGap)
@@ -269,6 +279,8 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
     private val workTitle = JLabel()
     private val workDot = JLabel("  ·  ")
     private val workState = StateLabel()
+    /** `abandoned · app restarted` — the HTTP row's [goneLabel] style, in place of `· state`. */
+    private val workGone = JLabel()
     private val workRetry = TagLabel()
     private val workRetryGap = pillGap()
     private val workTag = JLabel()
@@ -294,6 +306,7 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
             add(workTitle)
             add(workDot)
             add(workState)
+            add(workGone)
             add(workRetryGap)
             add(workRetry)
         }
@@ -312,13 +325,30 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
     // exactly once (the coloured glyph) and the state is a full word, never a truncated pill.
     private val genIcon = JLabel().glyphCell()
     private val genText = RunLabel()
+    private val genDupTag = TagLabel()
+    private val genDupGap = pillGap()
     private val genCount = MetaCell(RowGeometry.FACT)
     private val genTime = MetaCell(RowGeometry.TIME)
 
     private val genRow = RowPanel().apply {
         border = JBUI.Borders.empty(0, RowGeometry.EDGE)
+        genDupTag.font = JBUI.Fonts.label(10f).asBold()
+        genDupTag.border = JBUI.Borders.empty(2, 7)
+        // A repeated event's DUP pill tucks in at the right end of the text, exactly where the HTTP
+        // row puts its own — the "pills tuck in after the text" grammar every row shares.
+        val trailing = JPanel().apply {
+            isOpaque = false
+            layout = BoxLayout(this, BoxLayout.X_AXIS)
+            add(genDupGap)
+            add(genDupTag)
+        }
+        val center = JPanel(BorderLayout()).apply {
+            isOpaque = false
+            add(genText, BorderLayout.CENTER)
+            add(trailing, BorderLayout.EAST)
+        }
         add(gutter(genIcon), BorderLayout.WEST)
-        add(genText, BorderLayout.CENTER)
+        add(center, BorderLayout.CENTER)
         add(metaPair(genCount, genTime), BorderLayout.EAST)
     }
 
@@ -368,10 +398,21 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
             }
         }
 
+        // DUP ×N on a repeated analytics / app event: the HTTP duplicate's grammar — outlined, the
+        // label in `text`, the meaning on the stroke. `warn`, the HTTP MEDIUM hue, because a
+        // double-fired event is a redundant write to someone's metrics: advice, never a status.
+        val burst = burstProvider(value.id)
+        genDupTag.isVisible = burst != null
+        genDupGap.isVisible = burst != null
+        if (burst != null) genDupTag.set(RowContent.burstPill(burst), Theme.text, null, stroke = Theme.warn)
+        else genDupTag.set("", Theme.text, null)
+
         // Where HTTP shows body size: the one telling fact this kind has, in full — 120px, because
-        // `hyperlocal_feature_db` is the answer and `+1` is not.
+        // `hyperlocal_feature_db` is the answer and `+1` is not. An app span whose run ended says
+        // so here instead, muted, since it has no outcome of its own to report.
         genCount.cellWidth(RowGeometry.fact(value.kind, rowWidth))
-        genCount.meta(content.fact, Theme.textMuted)
+        val gone = value.abandoned?.takeIf { value.isOpen }
+        genCount.meta(gone?.let(RowContent::abandonedLabel) ?: content.fact, Theme.textMuted)
 
         if (actionsArmed(index, isSelected) && canGroup(value)) {
             genTime.action(FLOW)
@@ -479,6 +520,14 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         workTitle.text = content.title
         workTitle.foreground = Theme.text
         workState.render(content.state)
+        val gone = content.abandoned
+        workDot.isVisible = gone == null
+        workState.isVisible = gone == null
+        workGone.isVisible = gone != null
+        workGone.text = gone.orEmpty()
+        workGone.font = goneLabel.font
+        workGone.foreground = Theme.textMuted
+        workGone.border = JBUI.Borders.emptyLeft(RowGeometry.PILL_GAP)
 
         val retry = content.retry
         workRetry.isVisible = retry != null
@@ -515,6 +564,9 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         }
         return workRow
     }
+
+    /** An abandoned row's fade: the muted-endpoint fade, so "faded" keeps meaning one thing. */
+    private fun shadeGone(c: Color, hovered: Boolean): Color = Theme.fade(c, if (hovered) 0.8f else 0.55f)
 
     /** The right-hand time cell's text for a resolved [RowContent.TimeCell]. */
     private fun timeText(cell: RowContent.TimeCell): String = when (cell) {
@@ -556,9 +608,15 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         methodLabel.font = if (read) methodFontRegular else methodFontBold
         methodLabel.foreground = shade(Theme.methodTextColor(value.request.method))
 
-        val pending = value.isPending()
+        // A call whose app run ended before it answered: no spinner and no count-up (nothing is
+        // coming), a muted dash for a status, and the whole row faded like a muted endpoint — it is
+        // history, not a live call and not a failure. The reason is spelled out beside the path.
+        val abandoned = event.abandoned?.takeIf { value.isPending() }
+        val pending = value.isPending() && abandoned == null
         val code = value.response?.code
-        if (pending) {
+        if (abandoned != null) {
+            statusTag.set(RowContent.ABANDONED_STATUS, shadeGone(Theme.textMuted, hovered), null)
+        } else if (pending) {
             // No fill at all: the spinner *is* the pill while a call is in flight. A tinted accent
             // plate behind it would be a second accent surface in a row whose accent budget belongs
             // to the MOCK pill and the selection tint, and at 46px it reads as a filled status.
@@ -570,7 +628,12 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
         }
 
         path.text = value.request.path.ifBlank { value.request.url }
-        path.foreground = shade(Theme.text)
+        path.foreground = if (abandoned != null) shadeGone(Theme.text, hovered) else shade(Theme.text)
+        goneLabel.isVisible = abandoned != null
+        goneGap.isVisible = abandoned != null
+        goneLabel.text = abandoned?.let(RowContent::abandonedLabel).orEmpty()
+        goneLabel.foreground = Theme.textMuted
+        if (abandoned != null) methodLabel.foreground = shadeGone(Theme.methodTextColor(value.request.method), hovered)
 
         // The ×N pill: **outlined and neutral**, because a repeated success is structure, not
         // advice and not a status. The stroke is `borderStrong`, which is decoration — the meaning
@@ -629,6 +692,10 @@ class TransactionListRenderer : ListCellRenderer<RowCollapse.Row> {
                 // this run really took, prefixed `~` so it never reads as a single measurement.
                 sizeCell.meta(poll.size, shade(Theme.textMuted))
                 durationCell.meta(poll.median, shade(Theme.textMuted))
+            }
+            abandoned != null -> {
+                sizeCell.meta("", Theme.textMuted)
+                durationCell.meta("", Theme.textMuted)
             }
             pending -> {
                 sizeCell.meta("", shade(Theme.textMuted))

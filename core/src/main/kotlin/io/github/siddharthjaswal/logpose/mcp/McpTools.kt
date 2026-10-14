@@ -4,6 +4,7 @@ import io.github.siddharthjaswal.logpose.analysis.Correlation
 import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
 import io.github.siddharthjaswal.logpose.analysis.CorrelationKeys
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.EventBurstDetector
 import io.github.siddharthjaswal.logpose.analysis.FindQuery
 import io.github.siddharthjaswal.logpose.analysis.Groupings
 import io.github.siddharthjaswal.logpose.analysis.KeyValue
@@ -434,8 +435,11 @@ object McpTools {
             tool(
                 "session_summary",
                 "Overview of the current capture: the app runs it spans, how many events of each " +
-                    "kind, which endpoints, and the ids of every failure and duplicate burst so " +
-                    "you can jump straight to them with get_event.",
+                    "kind, which endpoints, and the ids of every failure and duplicate burst — " +
+                    "repeated HTTP calls and repeated analytics/app events alike (each group says " +
+                    "its kind) — so you can jump straight to them with get_event. in_flight counts " +
+                    "only requests that can still finish; one whose app run is over (the app " +
+                    "restarted, the device disconnected) is counted under abandoned instead.",
             ) {}
         )
         add(
@@ -693,7 +697,7 @@ object McpTools {
         unavailable: Unavailable = Unavailable.Ide,
     ): JsonElement = when (name) {
         "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf, captureRunning)
-        "get_event" -> getEvent(args, events, includeBodies)
+        "get_event" -> getEvent(args, events, includeBodies, sessionOf)
         "get_trace" -> getTrace(args, events)
         "find_failures" -> findFailures(args, events)
         "session_summary" -> summary(events, sessions, sessionOf, hostAgeMillis, captureRunning)
@@ -838,7 +842,8 @@ object McpTools {
             } else if (matched.size > page.size) {
                 put("note", "Showing the ${page.size} most recent of ${matched.size} matches.")
             }
-            put("events", buildJsonArray { page.forEach { add(brief(it)) } })
+            val dupes = Repeats.of(events, sessionOf)
+            put("events", buildJsonArray { page.forEach { add(brief(it, dupes)) } })
         }
     }
 
@@ -850,7 +855,12 @@ object McpTools {
         }
     }
 
-    private fun getEvent(args: JsonObject, events: List<LogEvent>, includeBodies: Boolean): JsonElement {
+    private fun getEvent(
+        args: JsonObject,
+        events: List<LogEvent>,
+        includeBodies: Boolean,
+        sessionOf: (String) -> Int,
+    ): JsonElement {
         val id = args.str("id") ?: return buildJsonObject { put("error", "Missing 'id'") }
         val event = events.firstOrNull { it.id == id }
             ?: return buildJsonObject { put("error", "No event with id '$id'") }
@@ -860,10 +870,11 @@ object McpTools {
             put("kind", event.kind)
             put("at", event.timestampMillis)
             event.durationMillis?.let { put("duration_ms", it) }
-            if (event.isOpen) put("in_flight", true)
+            putLiveness(event)
             event.traceId?.let { put("trace_id", it) }
             event.envelope.parentId?.let { put("parent_id", it) }
             put("summary", summarize(event))
+            Repeats.of(events, sessionOf).markOf(event)?.let { put("duplicate", it) }
             if (includeBodies) {
                 put("payload", event.envelope.payload)
             } else {
@@ -1068,6 +1079,8 @@ object McpTools {
                         put("events", own.size)
                         if (s.pkg.isNotBlank()) put("package", s.pkg)
                         if (s.libVersion.isNotBlank()) put("lib_version", s.libVersion)
+                        s.pid?.let { put("pid", it) }
+                        s.processName?.let { put("process", it) }
                         if (stamps.isNotEmpty()) {
                             put("first_at", stamps.min())
                             put("last_at", stamps.max())
@@ -1083,7 +1096,9 @@ object McpTools {
                         put("session", 0)
                         put("events", orphans)
                         put("note", "Captured before the app announced itself — the launch " +
-                            "handshake predates this capture, so these can't be tied to a run.")
+                            "handshake predates this capture, so these can't be tied to a run yet. " +
+                            "LogPose asks a running app to re-announce (device library 1.7.4+); " +
+                            "when it does, its earlier events move into its run by process id.")
                     })
                 }
             })
@@ -1112,14 +1127,28 @@ object McpTools {
                 })
             }
 
-            val open = events.filter { it.isOpen }
+            // In flight means "can still finish". A span whose run is over — the app restarted, the
+            // device dropped — is abandoned, and counted apart so neither number lies.
+            val open = events.filter { it.isInFlight }
             put("in_flight", open.size)
             if (open.isNotEmpty()) {
                 put("in_flight_ids", buildJsonArray { open.take(25).forEach { add(it.id) } })
             }
+            val abandoned = events.filter { it.isOpen && it.abandoned != null }
+            put("abandoned", abandoned.size)
+            if (abandoned.isNotEmpty()) {
+                put("abandoned_ids", buildJsonArray { abandoned.take(25).forEach { add(it.id) } })
+                put("abandoned_by_reason", buildJsonObject {
+                    abandoned.groupingBy { it.abandoned.orEmpty() }.eachCount().forEach { (r, n) -> put(r, n) }
+                })
+            }
 
             put("duplicate_calls", dupes.size)
-            if (dupes.isNotEmpty()) {
+            // Repeated analytics / app events, beside the HTTP duplicates: same name, screen and
+            // params in a burst (EventBurstDetector). Counted as repeats, like duplicate_calls.
+            val bursts = EventBurstDetector.analyze(events, sessionOf)
+            put("duplicate_events", bursts.marks.size)
+            if (dupes.isNotEmpty() || bursts.groups.isNotEmpty()) {
                 put("duplicate_groups", buildJsonArray {
                     dupes.entries.groupBy { it.value.originalId }.entries.take(25)
                         .forEach { entry ->
@@ -1127,6 +1156,7 @@ object McpTools {
                             val marks = entry.value
                             val original = events.firstOrNull { it.id == originalId }
                             add(buildJsonObject {
+                                put("kind", Envelope.KIND_HTTP)
                                 put("endpoint", original?.let { summarize(it) } ?: "unknown")
                                 put("severity", marks.maxOf { m -> m.value.severity }.name.lowercase())
                                 // The original plus each repeat, so the whole burst is one hop away.
@@ -1137,6 +1167,18 @@ object McpTools {
                                 })
                             })
                         }
+                    bursts.groups.sortedByDescending { it.count }.take(25).forEach { g ->
+                        add(buildJsonObject {
+                            put("kind", g.kind)
+                            put("event", g.name)
+                            g.screen?.let { put("screen", it) }
+                            put("pattern", g.pattern.name.lowercase())
+                            put("count", g.count)
+                            put("span_ms", g.spanMillis)
+                            put("first_at", g.firstAt)
+                            put("event_ids", buildJsonArray { g.eventIds.forEach { add(it) } })
+                        })
+                    }
                 })
             }
             put("endpoints", buildJsonArray {
@@ -1445,6 +1487,23 @@ object McpTools {
             put("screen_flow", buildJsonArray {
                 transitions.entries.sortedByDescending { it.value }.take(50).forEach { (edge, count) ->
                     add(buildJsonObject { put("from", edge.first); put("to", edge.second); put("count", count) })
+                }
+            })
+            // Double-fires: the same event, screen and params repeated in a burst. Parameters are
+            // part of the match, so a list logging one event per item is never reported here.
+            val matchedIds = matched.mapTo(HashSet()) { it.id }
+            val bursts = EventBurstDetector.analyze(events, sessionOf).groups
+                .filter { it.kind == Envelope.KIND_ANALYTICS && it.eventIds.any { id -> id in matchedIds } }
+            put("bursts", buildJsonArray {
+                bursts.sortedByDescending { it.count }.take(25).forEach { g ->
+                    add(buildJsonObject {
+                        put("name", g.name)
+                        g.screen?.let { put("screen", it) }
+                        put("pattern", g.pattern.name.lowercase())
+                        put("count", g.count)
+                        put("span_ms", g.spanMillis)
+                        put("event_ids", buildJsonArray { g.eventIds.forEach { add(it) } })
+                    })
                 }
             })
         }
@@ -2341,16 +2400,64 @@ object McpTools {
     // ---- shared shaping -------------------------------------------------------------------
 
     /** One compact line per event — enough to decide which one to fetch in full. */
-    private fun brief(event: LogEvent): JsonObject = buildJsonObject {
+    private fun brief(event: LogEvent, dupes: Repeats? = null): JsonObject = buildJsonObject {
         put("id", event.id)
         put("kind", event.kind)
         put("at", event.timestampMillis)
         event.durationMillis?.let { put("duration_ms", it) }
-        if (event.isOpen) put("in_flight", true)
+        putLiveness(event)
         event.traceId?.let { put("trace_id", it) }
         put("summary", summarize(event))
         if (event.isFailure()) put("failed", true)
         (event as? LogEvent.Http)?.tx?.let { if (it.mocked) put("mocked", true) }
+        dupes?.markOf(event)?.let { put("duplicate", it) }
+    }
+
+    /**
+     * `in_flight` only for a span that can still close; a span whose app run is over says
+     * `abandoned` and why instead. A request from a process that died has no response coming, and
+     * reporting it as in flight sends an agent waiting for one.
+     */
+    private fun kotlinx.serialization.json.JsonObjectBuilder.putLiveness(event: LogEvent) {
+        val reason = event.abandoned
+        when {
+            event.isInFlight -> put("in_flight", true)
+            event.isOpen && reason != null -> { put("abandoned", true); put("abandoned_reason", reason) }
+        }
+    }
+
+    /**
+     * Both repeat detectors over one capture: [DuplicateDetector] for HTTP, [EventBurstDetector] for
+     * analytics and app events. Computed per call (they are pure and cheap) so every tool that
+     * reports a repeat reports the same one.
+     */
+    private class Repeats(
+        val http: Map<String, DuplicateDetector.Mark>,
+        val bursts: EventBurstDetector.Result,
+    ) {
+        fun markOf(event: LogEvent): JsonObject? {
+            http[event.id]?.let { m ->
+                return buildJsonObject {
+                    put("ordinal", m.ordinal)
+                    put("severity", m.severity.name.lowercase())
+                    put("original_id", m.originalId)
+                }
+            }
+            val b = bursts.marks[event.id] ?: return null
+            return buildJsonObject {
+                put("ordinal", b.ordinal)
+                put("of", b.count)
+                put("pattern", b.pattern.name.lowercase())
+                put("original_id", b.originalId)
+            }
+        }
+
+        companion object {
+            fun of(events: List<LogEvent>, sessionOf: (String) -> Int) = Repeats(
+                DuplicateDetector.analyze(events.filterIsInstance<LogEvent.Http>().map { it.tx }),
+                EventBurstDetector.analyze(events, sessionOf),
+            )
+        }
     }
 
     private fun summarize(event: LogEvent): String = when (event) {

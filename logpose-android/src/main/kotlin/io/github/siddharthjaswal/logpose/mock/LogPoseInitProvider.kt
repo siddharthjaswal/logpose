@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal object LogPoseRuntime {
     /** Kept in sync with the published library version (used by the IDE's handshake). */
-    const val VERSION = "1.7.3"
+    const val VERSION = "1.7.4"
 
     @Volatile var packageName: String? = null
 
@@ -44,6 +44,11 @@ internal object LogPoseRuntime {
 
     private val helloFromIntercept = AtomicBoolean(false)
 
+    /**
+     * Emits this run's hello. Called at process start, on the first intercept, and (1.7.4+) when a
+     * host asks over the reverse channel (`cmd=hello`) — always with the same [processId], so a
+     * re-announcement can never read as a restart.
+     */
     fun emitHello(config: LogPoseConfig) {
         this.config = config
         val pkg = packageName ?: return

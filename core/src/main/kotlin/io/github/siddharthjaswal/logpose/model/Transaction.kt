@@ -319,7 +319,8 @@ data class FcmNotification(
 // ---------------------------------------------------------------------------------------------
 // Mock & replay + push injection (reverse channel). Commands travel IDE → device via an adb
 // broadcast to the library's MockCommandReceiver, told apart by the `cmd` extra
-// (`rules` | `push`); Hello/MockAck/PushAck travel device → IDE on the normal LogPose logcat tag
+// (`rules` | `push` | `hello` — the last payload-less, "re-emit your Hello", library 1.7.4+, see
+// `mock/HelloRequester`); Hello/MockAck/PushAck travel device → IDE on the normal LogPose logcat tag
 // (discriminated by "kind", like FcmMessage). Mirrors the library's wire/Wire.kt.
 // ---------------------------------------------------------------------------------------------
 
@@ -416,7 +417,8 @@ data class MockRuleSet(
 )
 
 /**
- * Emitted by the library on process start and on the first intercept, so the IDE learns the
+ * Emitted by the library on process start, on the first intercept and — library 1.7.4+ — in answer
+ * to a host's payload-less `cmd=hello` broadcast, so the IDE learns the
  * app's package (needed to target the mock broadcast) and current mock revision (0 after a
  * process death ⇒ the IDE knows to re-push).
  */

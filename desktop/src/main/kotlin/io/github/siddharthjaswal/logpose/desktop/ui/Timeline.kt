@@ -170,7 +170,9 @@ fun TimelineRow(
     val group = row as? RowCollapse.Row.Group
     val hint = when {
         group != null -> hintText(RowContent.groupHint(group) { hintClock.get().format(Date(it)) })
+        cells is RowCells.Http && cells.content.abandoned != null -> cells.event.abandoned?.let(DetailContent::abandonedBanner)
         cells is RowCells.Http && cells.duplicate != null -> hintText(DetailContent.duplicateHint(cells.event.tx, cells.duplicate))
+        cells is RowCells.Generic && cells.burst != null -> hintText(DetailContent.burstHint(cells.content.title, cells.burst))
         else -> null
     }
     ContextMenuArea(items = {
@@ -254,7 +256,14 @@ private fun RowScope.HttpCells(
     val p = LocalPalette.current
     val h = c.content
     // A muted endpoint is drawn faded (34% — 70% hovered), the same fade a folded transaction gets.
-    fun shade(color: Color) = if (!c.muted) color else p.fade(color, if (hovered) 0.7f else 0.34f)
+    // An abandoned call (its app run ended before it answered) fades too, less deeply: it is
+    // history, not a live call and not a failure.
+    val gone = h.abandoned != null
+    fun shade(color: Color) = when {
+        gone -> p.fade(color, if (hovered) 0.8f else 0.55f)
+        c.muted -> p.fade(color, if (hovered) 0.7f else 0.34f)
+        else -> color
+    }
     val read = h.methodWeight == RowContent.Weight.REGULAR
     T(
         h.method, shade(if (read) p.methodRead else p.methodWrite), Modifier.width(RowGeometry.METHOD.dp),
@@ -262,7 +271,10 @@ private fun RowScope.HttpCells(
     )
     Spacer(Modifier.width(RowGeometry.GAP.dp))
     Box(Modifier.width(RowGeometry.STATUS.dp), contentAlignment = Alignment.CenterStart) {
-        if (h.pending) {
+        if (gone) {
+            // No spinner, no plate: nothing is coming. A muted dash where the status would be.
+            T(h.status, shade(p.textMuted), style = Type.pill)
+        } else if (h.pending) {
             // No plate while in flight: the accent glyph is the pill.
             T(spinner(tick.value), p.accent, style = Type.pill)
         } else {
@@ -273,6 +285,11 @@ private fun RowScope.HttpCells(
     Spacer(Modifier.width(RowGeometry.TEXT_GAP.dp))
     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
         T(h.path, shade(p.text), Modifier.weight(1f, fill = false))
+        h.abandoned?.let {
+            // Plain muted words, not a pill: a state, not an annotation.
+            Spacer(Modifier.width(RowGeometry.PILL_GAP.dp))
+            T(it, p.textMuted, style = Type.small)
+        }
         // Pill order is the plugin's: ×N (structure, outlined neutral) sits closest to the path,
         // then MOCK (intervention, solid accent), then DUP (advice, outlined in severity).
         c.poll?.let {
@@ -293,6 +310,11 @@ private fun RowScope.HttpCells(
             Meta(c.poll.size, RowGeometry.SIZE, shade(p.textMuted))
             Spacer(Modifier.width(RowGeometry.META_GAP.dp))
             Meta(c.poll.median, RowGeometry.TIME, shade(p.textMuted))
+        }
+        gone -> {
+            Meta("", RowGeometry.SIZE, p.textMuted)
+            Spacer(Modifier.width(RowGeometry.META_GAP.dp))
+            Meta("", RowGeometry.TIME, p.textMuted)
         }
         h.pending -> {
             Meta("", RowGeometry.SIZE, p.textMuted)
@@ -391,8 +413,15 @@ private fun RowScope.WorkerCells(c: RowCells.Worker, elapsedOf: (String) -> Long
     Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
         // The worker's name is what the row is about; its tag ellipsizes first.
         T(w.title, p.text, Modifier.weight(3f, fill = false))
-        T("  ·  ", p.textMuted)
-        StateToken(w.state, tick)
+        val gone = w.abandoned
+        if (gone != null) {
+            // The HTTP row's abandoned words, in its style: plain muted text, not a state token.
+            Spacer(Modifier.width(RowGeometry.PILL_GAP.dp))
+            T(gone, p.textMuted, style = Type.small)
+        } else {
+            T("  ·  ", p.textMuted)
+            StateToken(w.state, tick)
+        }
         w.retry?.let {
             Spacer(Modifier.width(RowGeometry.PILL_GAP.dp))
             Pill(it, p.text, stroke = p.warn, style = Type.pill.copy(fontWeight = FontWeight.Bold))
@@ -443,8 +472,13 @@ private fun RowScope.GenericCells(c: RowCells.Generic, flowCell: (@Composable ()
             T("  ·  ", p.textMuted)
             T(it, p.textDim, Modifier.weight(1f, fill = false))
         }
+        // A repeated event: the HTTP DUP pill's grammar — outlined, label in text, warn stroke.
+        c.burst?.let {
+            Spacer(Modifier.width(RowGeometry.PILL_GAP.dp))
+            Pill(RowContent.burstPill(it), p.text, stroke = p.warn, style = Type.pill.copy(fontWeight = FontWeight.Bold))
+        }
     }
-    Meta(g.fact, if (c.analytics) RowGeometry.FACT_ANALYTICS else RowGeometry.FACT, p.textMuted)
+    Meta(c.abandoned ?: g.fact, if (c.analytics) RowGeometry.FACT_ANALYTICS else RowGeometry.FACT, p.textMuted)
     Spacer(Modifier.width(RowGeometry.META_GAP.dp))
     flowCell?.invoke() ?: Meta(c.time, RowGeometry.TIME, p.textMuted)
 }

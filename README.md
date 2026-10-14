@@ -271,7 +271,7 @@ version independently:
 | Half | What it does | Where it comes from | Version |
 |---|---|---|---|
 | **IDE plugin** | reads logcat, renders the timeline | JetBrains Marketplace | 1.9.1 (Marketplace currently carries 1.9.0) |
-| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.7.2` |
+| **`logpose-android`** | emits structured events from your app | JitPack (Gradle dependency) | `v1.7.4` |
 
 Install the plugin but not the library and the timeline stays empty — there's nothing being
 emitted for it to read. **Keep the plugin at or ahead of the library:** library `v1.7.2` needs
@@ -319,10 +319,10 @@ dependencyResolutionManagement {
 // app/build.gradle.kts
 dependencies {
     // Debug builds: the real interceptor.
-    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.2")
+    debugImplementation("com.github.siddharthjaswal.logpose:logpose-android:v1.7.4")
     // Release builds: a zero-overhead no-op with the SAME api — keeps LogPose out of
     // production entirely (no logcat output, no kotlinx-serialization, zero transitive deps).
-    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.2")
+    releaseImplementation("com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.4")
 }
 ```
 
@@ -347,7 +347,7 @@ val client = OkHttpClient.Builder()
 With the `debug`/`release` split above, the release build links against the no-op stub, so
 LogPose is gone from production by construction. `enabled = BuildConfig.DEBUG` is then just
 belt-and-suspenders. (Prefer a single artifact in all variants? Use plain
-`implementation("…:logpose-android:v1.7.2")` everywhere and rely on the `enabled` flag — but then
+`implementation("…:logpose-android:v1.7.4")` everywhere and rely on the `enabled` flag — but then
 the real artifact, including its auto-init provider and DUMP-gated receivers, ships in release too.)
 See
 [`logpose-android/README.md`](logpose-android/README.md) for config (body-size limits,
@@ -997,9 +997,9 @@ for the device-side setup.
 
 ### Distribution
 
-- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.7.2`
+- [x] **Interceptor published** on JitPack — `com.github.siddharthjaswal.logpose:logpose-android:v1.7.4`
       (no `mavenLocal` needed); `jitpack.yml` builds the `logpose-android` subproject.
-- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.2`
+- [x] **No-op release artifact** — `com.github.siddharthjaswal.logpose:logpose-no-op:v1.7.4`
       lets you strip LogPose from release builds via `releaseImplementation` (same API, zero deps).
 - [x] **Plugin published** on the [JetBrains Marketplace](https://plugins.jetbrains.com/plugin/32148-logpose)
       — search "LogPose" in Plugins; signing + publishing wired via GitHub Actions (`RELEASING.md`).

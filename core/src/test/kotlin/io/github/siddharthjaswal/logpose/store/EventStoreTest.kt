@@ -98,16 +98,31 @@ class EventStoreTest {
         assertEquals(0, store.sessions().size)
     }
 
-    @Test fun `an event updated in place keeps the session it arrived in`() {
-        // A response landing on its request's row must not migrate the row into a later run,
-        // or a call that straddles a restart gets counted against the wrong session.
+    @Test fun `a same-run update keeps its row's session and position`() {
+        // A response landing on its request's row is the same run talking: the row stays put.
         val store = store()
         store.noteHello("pid-1", "com.acme", "1.5.0")
         store.add(event("a"))
-        store.noteHello("pid-2", "com.acme", "1.5.0")
+        store.add(event("b"))
         store.add(event("a", at = 2_000))
 
         assertEquals(1, store.sessionOf("a"))
+        assertEquals(listOf("a", "b"), store.snapshot().map { it.id })
+    }
+
+    @Test fun `an event re-emitted by a later run moves to that run`() {
+        // WorkManager keeps a request's id across process death and each new process replays it.
+        // That re-emission is the new run's observation; leaving it in run 1 is what stretched run
+        // 1's span to the latest replay (12 events "spanning" 42 minutes on a live capture).
+        val store = store()
+        store.noteHello("pid-1", "com.acme", "1.5.0")
+        store.add(event("a"))
+        store.add(event("b"))
+        store.noteHello("pid-2", "com.acme", "1.5.0")
+        store.add(event("a", at = 2_000))
+
+        assertEquals(2, store.sessionOf("a"))
+        assertEquals(listOf("b", "a"), store.snapshot().map { it.id })
     }
 
     @Test fun `an old library without a process id still splits on relaunch`() {

@@ -234,6 +234,7 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
                             target, { view.duplicateMarks[it.id] }, Modifier.width(470.dp).fillMaxHeight(),
                             elapsedOf = state.elapsedOf, transitions = state.transitions, actions = actions.detail,
                             initialFind = state.detailFind,
+                            burstOf = { view.burstMarks[it] },
                         )
                     }
                 }

@@ -9,9 +9,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Streams the device's logcat (filtered to the LogPose tag) and hands each raw
  * message line to [onLine] on a background thread.
  *
- * We run `adb logcat -v raw -s <TAG>:V`:
+ * We run `adb logcat -v brief -s <TAG>:V`:
  *  - `-s <TAG>:V` silences everything except our tag — no app-log noise.
- *  - `-v raw` strips the timestamp/pid/level prefix, so each line IS the payload.
+ *  - `-v brief` keeps a short `I/LogPose (pid): ` prefix. It used to be `-v raw` (payload only),
+ *    but the pid is what ties a line to the app run that wrote it — see [LogcatLine]. Lines are
+ *    handed to [onLine] **with** the prefix; [TransactionParser.accept] strips it, and so does
+ *    anything else that reads them through [LogcatLine.parse].
  *
  * The buffer is cleared before streaming so a Stop→Start doesn't replay the backlog.
  *
@@ -61,7 +64,7 @@ class LogcatReader(
             // can block while the device is transitioning.
             if (clearOnStart) clearBuffer(adb)
 
-            val cmd = baseCmd(adb) + listOf("logcat", "-v", "raw", "-s", "$tag:V")
+            val cmd = baseCmd(adb) + listOf("logcat", "-v", "brief", "-s", "$tag:V")
             // Merge stderr so adb's error output is drained by our single reader.
             proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
             process = proc

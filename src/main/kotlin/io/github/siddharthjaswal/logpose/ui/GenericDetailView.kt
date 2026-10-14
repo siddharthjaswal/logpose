@@ -85,6 +85,14 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
     private val subtitleRow = row(subtitle, fill = true)
     private val badgesGap = vGap(8)
     private val badgesRow = row(badges, fill = false)
+    /** The repeat / abandoned strip: wrapped words, coloured by what it says (warn, or muted). */
+    private val notice = JBTextArea(2, 10).apply {
+        isEditable = false; lineWrap = true; wrapStyleWord = true; isOpaque = false
+        border = JBUI.Borders.empty()
+        font = JBUI.Fonts.label(12f)
+    }
+    private val noticeGap = vGap(8)
+    private val noticeRow = row(notice, fill = true)
     private val sectionsGap = vGap(12)
     private val sectionsRow = row(
         JBScrollPane(sections).apply {
@@ -108,6 +116,8 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
             typeIcon, Box.createHorizontalStrut(JBUI.scale(6)),
             kindPill, Box.createHorizontalStrut(JBUI.scale(8)), titleLabel,
         ), fill = false))
+        overview.add(noticeGap)
+        overview.add(noticeRow)
         overview.add(subtitleGap)
         overview.add(subtitleRow)
         overview.add(badgesGap)
@@ -128,7 +138,12 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         add(outer, BorderLayout.CENTER)
     }
 
-    fun show(event: LogEvent?) {
+    /**
+     * @param burst set when [event] repeats an identical analytics / app event in a burst; the card
+     *   then says so above the subtitle, in the duplicate banner's words.
+     */
+    fun show(event: LogEvent?, burst: io.github.siddharthjaswal.logpose.analysis.EventBurstDetector.Mark? = null) {
+        setRowVisible(noticeRow, noticeGap, false)
         if (event == null) {
             typeIcon.icon = null
             kindPill.set("—", Theme.textDim, Theme.bg2)
@@ -156,6 +171,22 @@ class GenericDetailView(project: Project) : JPanel(BorderLayout()) {
         // it just has nothing but its kind to show up top.
         titleLabel.text = presentation?.title ?: event.kind
         subtitle.text = presentation?.subtitle.orEmpty()
+
+        // Words from :core, shared with the Mac app. A repeat is advice (warn, like the HTTP DUP
+        // banner); an abandoned span is neither failure nor live, so it is muted.
+        val gone = event.abandoned?.takeIf { event.isOpen }
+        when {
+            burst != null -> {
+                notice.text = DetailContent.burstBanner(presentation?.title ?: event.kind, burst)
+                notice.foreground = Theme.warn
+                setRowVisible(noticeRow, noticeGap, true)
+            }
+            gone != null -> {
+                notice.text = DetailContent.abandonedBanner(gone)
+                notice.foreground = Theme.textDim
+                setRowVisible(noticeRow, noticeGap, true)
+            }
+        }
 
         badges.removeAll()
         // The header chip already states the type, so drop any badge that just repeats it

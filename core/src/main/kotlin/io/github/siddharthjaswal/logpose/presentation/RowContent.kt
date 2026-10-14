@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose.presentation
 
+import io.github.siddharthjaswal.logpose.analysis.EventBurstDetector
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
 import io.github.siddharthjaswal.logpose.model.Badge
@@ -80,10 +81,17 @@ object RowContent {
         val tag: String?,
         val fact: String,
         val time: TimeCell,
+        /**
+         * `abandoned · app restarted` when the request's run ended with it still open. Hosts paint
+         * it **in place of** `· state`, in the HTTP row's style — plain muted proportional words —
+         * so an abandoned worker and an abandoned call read the same.
+         */
+        val abandoned: String? = null,
     )
 
     fun worker(event: LogEvent.Worker): WorkerRow {
         val work = event.work
+        val abandoned = event.abandoned?.takeIf { event.isOpen }
         return WorkerRow(
             title = work.worker,
             state = workerState(work.state),
@@ -92,9 +100,20 @@ object RowContent {
             retry = if (work.runAttempt > 1) "RETRY ×${work.runAttempt}" else null,
             tag = workerTag(work),
             fact = workerFact(work),
-            time = workerTime(event),
+            // An abandoned row never counts up: its run is over, so there is nothing left to time.
+            time = if (abandoned != null) TimeCell.Timestamp(event.timestampMillis) else workerTime(event),
+            abandoned = abandoned?.let(::abandonedLabel),
         )
     }
+
+    // ---- abandoned ------------------------------------------------------------------------------
+
+    /**
+     * `abandoned · app restarted` — what an open span says once its app run is over. Muted, regular
+     * weight, no hue: it is neither a failure (nothing on the device reported one) nor live, and a
+     * coloured mark would compete with the rows that are. The reason is always part of the words.
+     */
+    fun abandonedLabel(reason: String): String = "abandoned · $reason"
 
     fun workerState(state: String): StateToken = when (state.lowercase()) {
         WorkerEvent.STATE_SUCCEEDED ->
@@ -361,14 +380,24 @@ object RowContent {
         val mocked: Boolean,
         val size: String,
         val duration: String,
+        /**
+         * `abandoned · app restarted` when the call never got an answer and its app run is over;
+         * null otherwise. An abandoned row is not [pending]: no spinner, no count-up, a muted `—`
+         * where the status goes, and the row faded like a muted endpoint.
+         */
+        val abandoned: String? = null,
     )
 
-    fun http(tx: Transaction): HttpRow {
-        val pending = isPending(tx)
+    /** The status cell of a call whose run ended before it answered. */
+    const val ABANDONED_STATUS = "—"
+
+    fun http(tx: Transaction, abandoned: String? = null): HttpRow {
+        val gone = abandoned?.takeIf { isPending(tx) }
+        val pending = isPending(tx) && gone == null
         return HttpRow(
             method = tx.request.method,
             methodWeight = if (isReadMethod(tx.request.method)) Weight.REGULAR else Weight.BOLD,
-            status = statusText(tx),
+            status = if (gone != null) ABANDONED_STATUS else statusText(tx),
             statusCode = tx.response?.code,
             error = tx.error,
             pending = pending,
@@ -378,8 +407,22 @@ object RowContent {
             // HTTP keeps whole milliseconds (`2310ms`), unlike [shortDuration]: a request's time is
             // read against its neighbours' in one column, and the plugin has always printed it so.
             duration = if (pending) "" else tx.durationMillis?.let { "${it}ms" }.orEmpty(),
+            abandoned = gone?.let(::abandonedLabel),
         )
     }
+
+    /** [http] for a timeline event, which carries its own abandonment. */
+    fun http(event: LogEvent.Http): HttpRow = http(event.tx, event.abandoned)
+
+    // ---- repeated events --------------------------------------------------------------------------
+
+    /**
+     * The pill on a repeated analytics / app event: `DUP ×3`, the HTTP duplicate's exact words and
+     * grammar (outlined, severity on the stroke), because it is the same sentence about a different
+     * kind. Hosts stroke it `warn`: a double-fired analytics event inflates a metric, which is the
+     * HTTP MEDIUM case — advice, never a status.
+     */
+    fun burstPill(mark: EventBurstDetector.Mark): String = "DUP ×${mark.ordinal}"
 
     /** The response body's size, or blank when the device did not report one. */
     fun responseSize(tx: Transaction): String =

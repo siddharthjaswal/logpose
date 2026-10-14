@@ -28,6 +28,8 @@ import io.github.siddharthjaswal.logpose.analysis.Correlation
 import io.github.siddharthjaswal.logpose.analysis.CorrelationIndex
 import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.EventBurstDetector
+import io.github.siddharthjaswal.logpose.mock.HelloRequester
 import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.analysis.Groupings
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
@@ -176,6 +178,17 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     // Latest duplicate-burst marks, keyed by transaction id; recomputed each refresh and read
     // by the renderer, the row tooltip, and the detail banner.
     private var duplicateMarks: Map<String, DuplicateDetector.Mark> = emptyMap()
+    // The same for repeated analytics / app events (EventBurstDetector), keyed by event id.
+    private var burstMarks: Map<String, EventBurstDetector.Mark> = emptyMap()
+
+    /**
+     * Asks an app that was already running when capture attached to announce itself again, so its
+     * earlier rows leave session 0 (library 1.7.4+; harmless to older ones). Off the EDT by design.
+     */
+    private val helloRequester = HelloRequester(
+        deviceSerial = { mocksController.deviceSerial },
+        stillNeeded = { pid -> store.needsHello(pid) },
+    )
 
     /**
      * The state sequence each worker request was observed to pass through.
@@ -236,6 +249,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             if (!bounds.contains(event.point)) return null
             val row = model.getElementAt(idx)
             (row as? RowCollapse.Row.Group)?.let { return groupTooltip(it) }
+            row.lead.abandoned?.takeIf { row.lead.isOpen }?.let { return "<html>${DetailContent.abandonedBanner(it)}</html>" }
+            burstMarks[row.lead.id]?.let { mark ->
+                val name = KindPresenter.present(row.lead)?.title ?: row.lead.kind
+                return hintHtml(DetailContent.burstHint(name, mark))
+            }
             val tx = (row.lead as? LogEvent.Http)?.tx ?: return null
             return duplicateMarks[tx.id]?.let { duplicateTooltip(tx, it) }
         }
@@ -522,12 +540,14 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
         // Reverse channel: device hello / mock acks arrive on the reader thread → route to the
         // controller, then repaint the mocks bar on the EDT.
+        // Restart vs second process: a newer run abandons an older one only if its process is gone.
+        store.processNames = io.github.siddharthjaswal.logpose.logcat.AdbProcessNames({ mocksController.deviceSerial })
         parser.onControl = { msg ->
             // A hello is both a mock-sync signal and the only reliable marker of an app restart,
             // so the store sees it too — that's what keeps two launches from being reported as
             // one timeline.
             if (msg is ControlMessage.DeviceHello) {
-                store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion)
+                store.noteHello(msg.hello.processId, msg.hello.pkg, msg.hello.libVersion, msg.pid)
             }
             mocksController.onControl(msg)
         }
@@ -724,6 +744,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     private fun startCapture() {
         parser.reset()
+        helloRequester.reset()
         captureActive = true
         val generation = ++captureGeneration
         reattachAttempts = 0
@@ -769,7 +790,11 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                     // The store is about to overwrite this worker's previous state in place, so the
                     // sequence is recorded here or nowhere.
                     if (event is LogEvent.Worker) workerLifecycle.note(event, System.currentTimeMillis())
-                    store.add(event)
+                    // The pid ties the row to its app run; a pid no run has claimed means the
+                    // launch hello predates this capture, so the app is asked to say it again.
+                    val pid = parser.lastPid
+                    store.add(event, pid)
+                    if (pid != null && store.needsHello(pid)) helloRequester.onUnclaimedPid(pid)
                 }
             },
             onError = { msg ->
@@ -781,6 +806,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             onStopped = {
                 // captureActive is cleared by stopCapture() before reader.stop(), so if it's still
                 // set here the stream ended on its own — a transient device/adb drop worth retrying.
+                // Whatever was still open can't be seen finishing now; a reattach that hears from
+                // the same run again clears the mark.
+                if (captureActive) store.noteDeviceGone()
                 if (captureActive && reattachAttempts < MAX_REATTACH) {
                     reattachAttempts++
                     refreshAlarm.addRequest({ if (captureActive) attachReader() }, REATTACH_DELAY_MS)
@@ -906,6 +934,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         val httpTxs = all.filterIsInstance<LogEvent.Http>().map { it.tx }
         duplicateMarks = DuplicateDetector.analyze(httpTxs)
         renderer.duplicateProvider = { duplicateMarks[it.id] }
+        // Repeated analytics / app events, over the same full capture and for the same reason.
+        burstMarks = EventBurstDetector.analyze(all, store::sessionOf).marks
+        renderer.burstProvider = { burstMarks[it] }
 
         // Like "duplicates only", the correlation chip can't live in FilterState: a value hides in
         // bodies the row never shows, so it's matched against the cached haystack instead.
@@ -1010,7 +1041,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private fun passes(event: LogEvent, state: FilterState, grouping: Grouping?): Boolean =
         FilterPresentation.passes(
             event, state,
-            isDuplicate = { duplicateMarks.containsKey(it) },
+            isDuplicate = { duplicateMarks.containsKey(it) || burstMarks.containsKey(it) },
             correlation = grouping?.let { g -> { e: LogEvent -> Correlation.containsValue(correlation.textOf(e), g.value) } },
         )
 
@@ -1325,7 +1356,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         waterfallGrouping = null
         waterfallAlternatives = emptyList()
         detail.showOccurrences(
-            occurrences.map { TransactionDetailView.Occurrence(it.tx, it.envelope) },
+            occurrences.map { TransactionDetailView.Occurrence(it.tx, it.envelope, it.abandoned) },
             index,
         ) { tx -> duplicateMarks[tx.id] }
         detailCards.show(detailPane, "http")
@@ -1368,7 +1399,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         waterfallAlternatives = emptyList()
         when (event) {
             is LogEvent.Http -> {
-                detail.show(event.tx, duplicateMarks[event.id], event.envelope)
+                detail.show(event.tx, duplicateMarks[event.id], event.envelope, event.abandoned)
                 detailCards.show(detailPane, "http")
             }
             is LogEvent.Fcm -> {
@@ -1383,7 +1414,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             }
             // db / worker / config / app-defined all render through the presenter-driven view.
             else -> {
-                genericDetail.show(event)
+                genericDetail.show(event, burstMarks[event.id])
                 detailCards.show(detailPane, "generic")
             }
         }
@@ -1400,14 +1431,15 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         // joins only once it has completed 2xx — so only a row's lead needs testing.
         val anyLive = (0 until model.size).any { i ->
             when (val event = model.getElementAt(i).lead) {
-                is LogEvent.Http -> event.tx.isPending()
-                is LogEvent.Worker -> event.work.state.equals(WorkerEvent.STATE_RUNNING, ignoreCase = true)
+                is LogEvent.Http -> event.tx.isPending() && event.abandoned == null
+                is LogEvent.Worker -> event.abandoned == null &&
+                    event.work.state.equals(WorkerEvent.STATE_RUNNING, ignoreCase = true)
                 else -> false
             }
         }
         if (anyLive) list.repaint()
         val sel = list.selectedValue?.lead
-        if (sel is LogEvent.Http && sel.tx.isPending()) detail.tick(store.elapsedMillis(sel.id), renderer.spinnerFrame)
+        if (sel is LogEvent.Http && sel.tx.isPending() && sel.abandoned == null) detail.tick(store.elapsedMillis(sel.id), renderer.spinnerFrame)
         // An open span in the waterfall grows towards "now", so the card animates on the same
         // timer as the in-flight rows rather than owning a second one.
         if (waterfallGrouping != null) waterfall.tick(renderer.spinnerFrame)

@@ -22,7 +22,12 @@ import kotlinx.serialization.json.jsonPrimitive
  * become rows; the panel routes them to the mocks controller.
  */
 sealed interface ControlMessage {
-    data class DeviceHello(val hello: Hello) : ControlMessage
+    /**
+     * @param pid the process that wrote the hello, from logcat's `-v brief` prefix — null when the
+     *   line carried none (a capture file, a test, an older host). It is what lets the store tie
+     *   the events that process emitted *before* this hello to the run it announces.
+     */
+    data class DeviceHello(val hello: Hello, val pid: Int? = null) : ControlMessage
     data class MockApplied(val ack: MockAck) : ControlMessage
     /** The device reporting how an injected push was (or wasn't) delivered. Library 1.7.0+. */
     data class PushDelivered(val ack: PushAck) : ControlMessage
@@ -60,12 +65,27 @@ class TransactionParser {
     var sawLegacyPayload: Boolean = false
         private set
 
+    /**
+     * The pid of the logcat line that completed the most recent [accept] — the process that emitted
+     * the event [accept] just returned (or the control message it just dispatched). Null when that
+     * line had no `-v brief` prefix. Read it right after [accept], on the same thread: hosts pass it
+     * to [io.github.siddharthjaswal.logpose.store.EventStore.add] beside the event.
+     *
+     * A chunked payload takes the pid of its **last** chunk; every chunk of one payload comes from
+     * one process, so which one is immaterial.
+     */
+    var lastPid: Int? = null
+        private set
+
     // id -> received chunks, keyed by seq
     private val pending = HashMap<String, MutableMap<Int, Chunk>>()
 
     /** Returns a [LogEvent] once a full timeline payload is available, otherwise null. */
     fun accept(line: String): LogEvent? {
-        val trimmed = line.trim()
+        // `-v brief` lines carry `I/LogPose (pid): ` before the payload; raw lines pass through.
+        val split = LogcatLine.parse(line)
+        lastPid = split.pid
+        val trimmed = split.message.trim()
         if (trimmed.isEmpty() || trimmed.first() != '{') return null
 
         // Cheap discriminator: chunk envelopes carry a "seq" field.
@@ -90,7 +110,7 @@ class TransactionParser {
         when (obj.string("kind")) {
             "hello" -> {
                 runCatching { json.decodeFromString<Hello>(payload) }.getOrNull()
-                    ?.let { onControl(ControlMessage.DeviceHello(it)) }
+                    ?.let { onControl(ControlMessage.DeviceHello(it, lastPid)) }
                 return null
             }
             "mock_ack" -> {

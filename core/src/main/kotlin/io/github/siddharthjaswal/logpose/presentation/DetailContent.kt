@@ -30,14 +30,46 @@ object DetailContent {
      * wins; a standard reason phrase fills in when the server sent none (HTTP/2 never does).
      * A pending call's label is the host's (it carries a live spinner).
      */
-    fun statusLabel(tx: Transaction): String {
+    fun statusLabel(tx: Transaction, abandoned: String? = null): String {
         val code = tx.response?.code
         return when {
             tx.error != null -> "ERR"
             code != null -> "$code ${tx.response?.message?.ifBlank { reason(code) } ?: reason(code)}".trim()
+            abandoned != null -> RowContent.abandonedLabel(abandoned)
             else -> "pending"
         }
     }
+
+    /**
+     * The strip above an abandoned span's hero: why no answer is coming. Neutral, like the row —
+     * an abandoned call is not a failure the device reported, just one that can no longer finish.
+     */
+    fun abandonedBanner(reason: String): String = when (reason) {
+        LogEvent.REASON_APP_RESTARTED ->
+            "⊘  ABANDONED  ·  The app restarted before this finished — a newer run of the same app " +
+                "announced itself, so the process that started it is gone and no answer is coming."
+        LogEvent.REASON_DEVICE_DISCONNECTED ->
+            "⊘  ABANDONED  ·  The device disconnected before this finished, so LogPose can't see " +
+                "how it ended. It clears if the same app run reconnects and reports it."
+        else -> "⊘  ABANDONED  ·  ${reason.replaceFirstChar { it.uppercase() }} — this can no longer finish."
+    }
+
+    /** The strip above a repeated analytics / app event: `⚠  DUPLICATE ×3  ·  Double-fired event — …`. */
+    fun burstBanner(name: String, mark: io.github.siddharthjaswal.logpose.analysis.EventBurstDetector.Mark): String =
+        "⚠  DUPLICATE ×${mark.ordinal}  ·  ${burstHeadline(mark)} — ${burstDetail(name, mark)}"
+
+    fun burstHeadline(mark: io.github.siddharthjaswal.logpose.analysis.EventBurstDetector.Mark): String = when (mark.pattern) {
+        io.github.siddharthjaswal.logpose.analysis.EventBurstDetector.Pattern.DOUBLE_FIRE -> "Double-fired event"
+        io.github.siddharthjaswal.logpose.analysis.EventBurstDetector.Pattern.BURST -> "Event burst"
+    }
+
+    private fun burstDetail(name: String, mark: io.github.siddharthjaswal.logpose.analysis.EventBurstDetector.Mark): String =
+        "${ordinalWord(mark.ordinal)} of ${mark.count} identical “$name” events (same screen and params) " +
+            "fired in quick succession; each one counts in your analytics."
+
+    /** A repeated event row's hover hint. */
+    fun burstHint(name: String, mark: io.github.siddharthjaswal.logpose.analysis.EventBurstDetector.Mark): RowContent.Hint =
+        RowContent.Hint(burstHeadline(mark), "", listOf(burstDetail(name, mark)))
 
     fun reason(code: Int): String = when (code) {
         200 -> "OK"; 201 -> "Created"; 202 -> "Accepted"; 204 -> "No Content"
@@ -141,7 +173,8 @@ object DetailContent {
     }
 
     /** The Response pane's status caption: `200 OK`, `Failed`, `…` while in flight. */
-    fun responseStatus(tx: Transaction): String = when {
+    fun responseStatus(tx: Transaction, abandoned: String? = null): String = when {
+        RowContent.isPending(tx) && abandoned != null -> RowContent.ABANDONED_STATUS
         RowContent.isPending(tx) -> "…"
         tx.error != null -> "Failed"
         else -> tx.response?.let { "${it.code} ${it.message}".trim() } ?: "—"
@@ -227,8 +260,15 @@ object DetailContent {
      * size, started, host, the **server's** trace/request id when a header carries one — what a
      * backend log lookup needs — else LogPose's own id, then the LogPose trace when the app set one.
      */
-    fun httpChips(tx: Transaction, envelope: io.github.siddharthjaswal.logpose.model.Envelope?): List<Chip> = buildList {
-        if (RowContent.isPending(tx)) {
+    fun httpChips(
+        tx: Transaction,
+        envelope: io.github.siddharthjaswal.logpose.model.Envelope?,
+        abandoned: String? = null,
+    ): List<Chip> = buildList {
+        // An abandoned call has no duration to report — not 0, not a live count: none.
+        if (RowContent.isPending(tx) && abandoned != null) {
+            Unit
+        } else if (RowContent.isPending(tx)) {
             add(Chip(CAPTION_DURATION, "0 ms"))
         } else {
             tx.durationMillis?.let { add(Chip(CAPTION_DURATION, "$it ms")) }
@@ -276,7 +316,8 @@ object DetailContent {
     fun genericChips(event: LogEvent): List<Chip> = buildList {
         if (event.timestampMillis > 0) add(Chip("at", at(event.timestampMillis)))
         event.durationMillis?.let { add(Chip("took", RowContent.shortDuration(it))) }
-        if (event.isOpen) add(Chip("state", "running"))
+        event.abandoned?.takeIf { event.isOpen }?.let { add(Chip("state", RowContent.abandonedLabel(it))) }
+            ?: run { if (event.isOpen) add(Chip("state", "running")) }
         event.traceId?.takeIf { it.isNotBlank() }?.let { add(Chip("trace", it, traceLink = it)) }
         event.envelope.parentId?.let { add(Chip("parent", it, tip = it)) }
         add(Chip("id", event.id, tip = event.id))

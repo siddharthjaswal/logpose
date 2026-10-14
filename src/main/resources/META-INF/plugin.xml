@@ -121,6 +121,20 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Abandoned, not "in flight" forever.</b> A request whose app run is over — a newer
+                run of the app announced itself, or the device dropped — now reads
+                <i>abandoned · app restarted</i>: muted, no spinner, and counted apart from
+                <code>in_flight</code> over MCP (<code>abandoned</code>, <code>abandoned_ids</code>).</li>
+            <li><b>Rows stay with their app run.</b> Capture keeps each logcat line's process id, so
+                events from before a missed launch hello move into their run as soon as the app
+                announces itself — and LogPose asks a running app to re-announce (needs
+                <code>logpose-android</code> 1.7.4; harmless to older versions). A worker re-emitted
+                by a later run no longer stretches the earlier run's span.</li>
+            <li><b>Repeated analytics events are flagged.</b> The same event, screen and params fired
+                in a burst (≥3 within 1 s, or twice within 300 ms) gets an outlined <b>DUP ×N</b>
+                pill, like a duplicate HTTP call; <i>Duplicates only</i> includes them, and
+                <code>session_summary</code>'s <code>duplicate_groups</code> now say which kind each
+                group is.</li>
             <li><b>Secrets stop leaking through query strings</b> (library 1.7.3): sensitive query
                 values (<code>api_key</code>, <code>token</code>, <code>secret</code>, …) are
                 masked in the capture the way headers already were — the name stays, the value

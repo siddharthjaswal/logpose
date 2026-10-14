@@ -132,7 +132,8 @@ object WaterfallLayout {
             }
             val end = endOf(event, nowMillis)
             val shape = when {
-                event.envelope.endedAt == null -> Shape.OPEN
+                // An abandoned span will never close, so it is not drawn growing out to "now".
+                event.envelope.endedAt == null && event.abandoned == null -> Shape.OPEN
                 end > at -> Shape.SPAN
                 // endedAt == at is a point by contract; endedAt < at is a device clock that ran
                 // backwards, and a negative-width bar is worse than a dot.
@@ -173,7 +174,7 @@ object WaterfallLayout {
             if (at <= 0L) continue
             val ended = event.envelope.endedAt
             now = maxOf(now, ended ?: at)
-            if (ended == null) now = maxOf(now, at + hostAge(event.id).coerceAtLeast(0L))
+            if (ended == null && event.abandoned == null) now = maxOf(now, at + hostAge(event.id).coerceAtLeast(0L))
         }
         return now
     }
@@ -181,6 +182,7 @@ object WaterfallLayout {
     /** Right edge of an event: its close, or "now" while it's still open. */
     private fun endOf(event: LogEvent, nowMillis: Long): Long {
         val at = event.timestampMillis
+        if (event.envelope.endedAt == null && event.abandoned != null) return at
         val ended = event.envelope.endedAt ?: return maxOf(nowMillis, at)
         return maxOf(ended, at)
     }

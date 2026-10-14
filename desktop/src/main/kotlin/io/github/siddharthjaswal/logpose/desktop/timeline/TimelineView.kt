@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose.desktop.timeline
 
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.EventBurstDetector
 import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.desktop.waterfall.Flows
 import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
@@ -38,6 +39,8 @@ data class TimelineView(
     val flowable: Set<String> = emptySet(),
     /** The correlation chip this view was filtered by, if any. */
     val correlation: Grouping? = null,
+    /** Repeated analytics / app events over the whole capture, keyed by event id. */
+    val burstMarks: Map<String, EventBurstDetector.Mark> = emptyMap(),
 ) {
     val shown: Int get() = filtered.size
 
@@ -70,9 +73,11 @@ object TimelineViews {
     ): TimelineView {
         // Over the FULL capture: filtering must not break a burst chain or change a call's ordinal.
         val marks = DuplicateDetector.analyze(events.filterIsInstance<LogEvent.Http>().map { it.tx })
+        // And the same for analytics / app events — over the full capture for the same reason.
+        val bursts = EventBurstDetector.analyze(events, sessionOf).marks
         val chip = correlation?.let { g -> { e: LogEvent -> inGroup(e, g) } }
         val passesWith = { e: LogEvent, s: FilterState, withChip: Boolean ->
-            FilterPresentation.passes(e, s, { it in marks }, if (withChip) chip else null)
+            FilterPresentation.passes(e, s, { it in marks || it in bursts }, if (withChip) chip else null)
         }
         val passes = { e: LogEvent, s: FilterState -> passesWith(e, s, true) }
         val filtered = events.filter { passes(it, state) }
@@ -89,7 +94,7 @@ object TimelineViews {
         val rows = RowCollapse.collapse(filtered, expanded, marks, sessionOf)
         return TimelineView(
             version = version,
-            rows = rows.map { Rows.of(it, marks) },
+            rows = rows.map { Rows.of(it, marks, bursts) },
             filtered = filtered,
             total = events.size,
             duplicateMarks = marks,
@@ -98,6 +103,7 @@ object TimelineViews {
             memberIndex = RowCollapse.memberIndex(rows),
             flowable = rows.filter { Flows.paintsFlow(it, MutedEndpoints::isMuted, hasKey) }.mapTo(HashSet()) { it.anchorId },
             correlation = correlation,
+            burstMarks = bursts,
         )
     }
 

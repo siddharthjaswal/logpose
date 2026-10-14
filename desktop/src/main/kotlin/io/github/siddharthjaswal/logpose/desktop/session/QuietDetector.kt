@@ -25,5 +25,7 @@ object QuietDetector {
     }
 
     /** Whether a raw line on the LogPose tag is LogPose's own output (logcat adds `--------- beginning of main` banners). */
-    fun isLogPoseLine(line: String): Boolean = line.trimStart().startsWith("{")
+    fun isLogPoseLine(line: String): Boolean =
+        // The reader keeps logcat's `-v brief` prefix (for the pid); the payload is what counts.
+        io.github.siddharthjaswal.logpose.logcat.LogcatLine.parse(line).message.trimStart().startsWith("{")
 }

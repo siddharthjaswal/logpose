@@ -26,7 +26,12 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     data class Occurrence(
         val tx: Transaction,
         val envelope: io.github.siddharthjaswal.logpose.model.Envelope?,
+        /** Why this call can never finish (its app run ended), or null. */
+        val abandoned: String? = null,
     )
+
+    /** Set while the shown call is abandoned: no spinner, no "waiting" — nothing is coming. */
+    private var currentAbandoned: String? = null
 
     private val overview = OverviewPanel()
     private val request = JsonTreePanel("Request", project)
@@ -92,11 +97,13 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
         tx: Transaction?,
         dup: io.github.siddharthjaswal.logpose.analysis.DuplicateDetector.Mark? = null,
         envelope: io.github.siddharthjaswal.logpose.model.Envelope? = null,
+        abandoned: String? = null,
     ) {
         occurrences = emptyList()
         occurrenceIndex = 0
         current = tx
-        overview.show(tx, dup, envelope)
+        currentAbandoned = abandoned?.takeIf { tx?.isPending() == true }
+        overview.show(tx, dup, envelope, abandoned = currentAbandoned)
         if (tx == null) {
             request.setElement(null); request.setStatus(null)
             response.setElement(null); response.setStatus(null)
@@ -140,6 +147,7 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     private fun renderOccurrence() {
         val item = occurrences[occurrenceIndex]
         current = item.tx
+        currentAbandoned = item.abandoned?.takeIf { item.tx.isPending() }
         // The duplicate banner is per-occurrence and *should* appear when you step onto a marked
         // call: the row's aggregate pill is what invited the user to come and look.
         overview.show(
@@ -147,6 +155,7 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
             duplicateOf(item.tx),
             item.envelope,
             OverviewPanel.Occurrence(occurrenceIndex + 1, occurrences.size),
+            currentAbandoned,
         )
         renderRequest(item.tx)
         renderResponse(item.tx)
@@ -158,7 +167,12 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
     }
 
     private fun renderResponse(tx: Transaction) {
+        val gone = currentAbandoned
         when {
+            gone != null -> {
+                response.setStatus(io.github.siddharthjaswal.logpose.presentation.RowContent.ABANDONED_STATUS)
+                response.showMessage(DetailContent.abandonedBanner(gone))
+            }
             tx.isPending() -> {
                 response.setStatus("…")
                 response.showMessage("Waiting for response…")
@@ -178,7 +192,7 @@ class TransactionDetailView(project: com.intellij.openapi.project.Project) : JPa
 
     /** Live update for an in-flight request — ticking duration + spinning loader. */
     fun tick(elapsedMs: Long, frame: Int) {
-        if (current?.isPending() != true) return
+        if (current?.isPending() != true || currentAbandoned != null) return
         overview.tick(elapsedMs, frame)
         response.setLoadingText("${spinnerChar(frame)}  Waiting for response…   ${elapsedMs}ms")
     }

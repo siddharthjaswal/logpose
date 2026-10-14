@@ -32,6 +32,8 @@ import kotlinx.serialization.json.Json
  * | --- | --- | --- |
  * | `rules` (default) | [MockRuleSet] | replace the active rules, ack with [MockAck] |
  * | `push` | [PushInject] | deliver a synthetic push, ack with `push_ack` (see [PushInjector]) |
+ * | `hello` (1.7.4+) | none | re-emit this run's `Hello`, so a host that attached after launch can
+ *   tie the events it already saw to this run (see [CommandRoute]) |
  *
  * Each command reassembles its slices in its own pending map ([ChunkAssembly]), so a push landing
  * mid-rule-set can't corrupt either. `rev` is meaningless for `push` and ignored.
@@ -44,14 +46,25 @@ import kotlinx.serialization.json.Json
 internal class MockCommandReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
-        val cmd = intent.getStringExtra(EXTRA_CMD)?.takeIf { it.isNotBlank() } ?: CMD_RULES
+        val cmd = intent.getStringExtra(EXTRA_CMD)?.takeIf { it.isNotBlank() } ?: CommandRoute.CMD_RULES
         val revision = intent.getIntExtra(EXTRA_REVISION, -1)
         val seq = intent.getIntExtra(EXTRA_SEQ, 0)
         val total = intent.getIntExtra(EXTRA_TOTAL, 1)
         val payload = intent.getStringExtra(EXTRA_PAYLOAD)
-        // A rule set is ordered by revision; a push has none, so -1 is legal there.
-        if (payload == null || total <= 0 || seq !in 0 until total) return
-        if (cmd == CMD_RULES && revision < 0) return
+        when (CommandRoute.of(cmd, payload != null, revision, seq, total)) {
+            CommandRoute.Route.HELLO -> {
+                // Re-announce this run — same processId as its launch hello, so the host treats it
+                // as the run it already is, never a restart. Through the app's own config (custom tag).
+                runCatching {
+                    LogPoseRuntime.packageName = context.packageName
+                    LogPoseRuntime.emitHello(LogPoseRuntime.config)
+                }
+                return
+            }
+            CommandRoute.Route.IGNORE -> return
+            CommandRoute.Route.RULES, CommandRoute.Route.PUSH -> Unit
+        }
+        if (payload == null) return
 
         val assembled = ChunkAssembly.add(cmd, revision, seq, total, payload) ?: return
 
@@ -59,7 +72,7 @@ internal class MockCommandReceiver : BroadcastReceiver() {
             val decoded = String(Base64.decode(assembled, Base64.NO_WRAP), Charsets.UTF_8)
             LogPoseRuntime.packageName = context.packageName // provider-less edge (tests, tools)
             when (cmd) {
-                CMD_PUSH -> inject(context, parser.decodeFromString<PushInject>(decoded))
+                CommandRoute.CMD_PUSH -> inject(context, parser.decodeFromString<PushInject>(decoded))
                 else -> applyRules(context, parser.decodeFromString<MockRuleSet>(decoded))
             }
         } catch (t: Throwable) {
@@ -100,9 +113,6 @@ internal class MockCommandReceiver : BroadcastReceiver() {
         const val EXTRA_SEQ = "seq"
         const val EXTRA_TOTAL = "total"
         const val EXTRA_PAYLOAD = "payload"
-
-        const val CMD_RULES = "rules"
-        const val CMD_PUSH = "push"
 
         val parser = Json { ignoreUnknownKeys = true; isLenient = true }
     }

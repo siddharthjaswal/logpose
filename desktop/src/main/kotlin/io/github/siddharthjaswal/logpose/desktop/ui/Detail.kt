@@ -34,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.EventBurstDetector
 import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
 import io.github.siddharthjaswal.logpose.desktop.detail.DetailTarget
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
@@ -84,6 +85,8 @@ fun DetailPane(
     transitions: (LogEvent.Worker) -> List<WorkerLifecycle.Transition> = { emptyList() },
     actions: DetailActions = DetailActions(),
     initialFind: String? = null,
+    /** The repeat mark of an analytics / app event ([EventBurstDetector]), for its banner. */
+    burstOf: (String) -> EventBurstDetector.Mark? = { null },
 ) {
     val p = LocalPalette.current
     // Request headers are usually useful (auth, api keys) → on; response headers mostly noise →
@@ -94,7 +97,9 @@ fun DetailPane(
         when (val event = target.event) {
             is LogEvent.Http -> {
                 val tx = event.tx
-                val pending = RowContent.isPending(tx)
+                // An abandoned call (its app run ended) is not pending: no clock, no "waiting".
+                val gone = event.abandoned?.takeIf { RowContent.isPending(tx) }
+                val pending = RowContent.isPending(tx) && gone == null
                 // One clock for the card, and only while the call it shows is in flight.
                 var tick by remember(event.id) { mutableLongStateOf(0L) }
                 if (pending) LaunchedEffect(event.id) { while (true) { delay(250); tick = System.currentTimeMillis() } }
@@ -107,10 +112,10 @@ fun DetailPane(
                 )
                 Spacer(Modifier.height(8.dp))
                 JsonPanel(
-                    "Response", if (pending) null else DetailContent.responseJson(tx, respHeaders), "resp:${event.id}",
+                    "Response", if (pending || gone != null) null else DetailContent.responseJson(tx, respHeaders), "resp:${event.id}",
                     Modifier.weight(1f).fillMaxWidth(),
-                    status = DetailContent.responseStatus(tx), headers = HeadersToggle(respHeaders) { respHeaders = it },
-                    message = "${spinner(tick)}  Waiting for response…   ${elapsed ?: 0}ms",
+                    status = DetailContent.responseStatus(tx, gone), headers = HeadersToggle(respHeaders) { respHeaders = it },
+                    message = gone?.let(DetailContent::abandonedBanner) ?: "${spinner(tick)}  Waiting for response…   ${elapsed ?: 0}ms",
                     initialFind = initialFind, onCopy = actions.onCopy,
                 )
             }
@@ -123,7 +128,7 @@ fun DetailPane(
                 )
             }
             else -> {
-                GenericHero(event, transitions, actions, Modifier.heightIn(max = 440.dp))
+                GenericHero(event, transitions, actions, Modifier.heightIn(max = 440.dp), burstOf(event.id))
                 Spacer(Modifier.height(8.dp))
                 JsonPanel(
                     "Payload", event.envelope.payload, "gen:${event.id}", Modifier.weight(1f).fillMaxWidth().heightIn(min = 120.dp),
@@ -165,7 +170,8 @@ private fun HttpHero(
 ) {
     val p = LocalPalette.current
     val tx = event.tx
-    val pending = RowContent.isPending(tx)
+    val gone = event.abandoned?.takeIf { RowContent.isPending(tx) }
+    val pending = RowContent.isPending(tx) && gone == null
     val txJson = { pretty.encodeToString(Transaction.serializer(), tx) }
     Card {
         Row(
@@ -192,6 +198,12 @@ private fun HttpHero(
                     T(banner.text, fg, style = Type.small.copy(fontSize = 11.5.sp, lineHeight = 15.sp), weight = FontWeight.Bold, maxLines = 3)
                 }
                 Spacer(Modifier.height(8.dp))
+            } else if (gone != null) {
+                // Muted, not a severity: an abandoned call is neither advice nor a failure.
+                Box(Modifier.fillMaxWidth().background(p.tint(p.textDim, 22), RoundedCornerShape(4.dp)).padding(horizontal = 10.dp, vertical = 5.dp)) {
+                    T(DetailContent.abandonedBanner(gone), p.textDim, style = Type.small.copy(fontSize = 11.5.sp, lineHeight = 15.sp), maxLines = 3)
+                }
+                Spacer(Modifier.height(8.dp))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // MOCK is its own solid-intervention pill in front of the status: LogPose's act and
@@ -200,7 +212,9 @@ private fun HttpHero(
                     Pill("MOCK", p.onAccent, fill = p.intervention, style = Type.pill.copy(fontWeight = FontWeight.Bold))
                     Spacer(Modifier.width(8.dp))
                 }
-                if (pending) {
+                if (gone != null) {
+                    Pill(DetailContent.statusLabel(tx, gone), p.textDim, fill = p.bg2, style = Type.body.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold))
+                } else if (pending) {
                     Pill("${spinner(tick)}  pending", p.accent, fill = p.tint(p.accent, 30), style = Type.body.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold))
                 } else {
                     Pill(
@@ -223,7 +237,7 @@ private fun HttpHero(
             }
             Spacer(Modifier.height(8.dp))
             Chips(
-                DetailContent.httpChips(tx, event.envelope),
+                DetailContent.httpChips(tx, event.envelope, gone),
                 live = if (pending) DetailContent.CAPTION_DURATION to DetailContent.liveDuration(elapsed ?: 0) else null,
                 onOpenTrace = actions.onOpenTrace,
             )
@@ -301,6 +315,7 @@ private fun GenericHero(
     transitions: (LogEvent.Worker) -> List<WorkerLifecycle.Transition>,
     actions: DetailActions,
     modifier: Modifier,
+    burst: EventBurstDetector.Mark? = null,
 ) {
     val p = LocalPalette.current
     val presentation = remember(event) { KindPresenter.present(event) }
@@ -316,6 +331,13 @@ private fun GenericHero(
                 T(presentation?.title ?: event.kind, p.text, Modifier.weight(1f, fill = false), style = Type.body.copy(fontSize = 13.sp), weight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
                 GlyphButton("✕", "Close") { actions.onClose() }
+            }
+            // The HTTP duplicate strip's grammar and words (DetailContent), in the MEDIUM hue.
+            burst?.let {
+                Spacer(Modifier.height(8.dp))
+                Box(Modifier.fillMaxWidth().background(p.warnTint, RoundedCornerShape(4.dp)).padding(horizontal = 10.dp, vertical = 5.dp)) {
+                    T(DetailContent.burstBanner(presentation?.title ?: event.kind, it), p.warn, style = Type.small.copy(fontSize = 11.5.sp, lineHeight = 15.sp), weight = FontWeight.Bold, maxLines = 3)
+                }
             }
             presentation?.subtitle?.takeIf { it.isNotBlank() }?.let {
                 Spacer(Modifier.height(8.dp))

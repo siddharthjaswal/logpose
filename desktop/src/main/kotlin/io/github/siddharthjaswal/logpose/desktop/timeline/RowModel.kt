@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose.desktop.timeline
 
 import io.github.siddharthjaswal.logpose.analysis.DuplicateDetector
+import io.github.siddharthjaswal.logpose.analysis.EventBurstDetector
 import io.github.siddharthjaswal.logpose.analysis.RowCollapse
 import io.github.siddharthjaswal.logpose.model.Envelope
 import io.github.siddharthjaswal.logpose.model.LogEvent
@@ -43,7 +44,15 @@ sealed interface RowCells {
 
     data class Worker(override val row: RowCollapse.Row, val content: RowContent.WorkerRow, val time: String) : RowCells
 
-    data class Generic(override val row: RowCollapse.Row, val content: RowContent.GenericRow, val time: String) : RowCells {
+    data class Generic(
+        override val row: RowCollapse.Row,
+        val content: RowContent.GenericRow,
+        val time: String,
+        /** Outlined `DUP ×N` on a repeated analytics / app event ([EventBurstDetector]). */
+        val burst: EventBurstDetector.Mark? = null,
+        /** `abandoned · app restarted` for an app span whose run ended; null otherwise. */
+        val abandoned: String? = null,
+    ) : RowCells {
         val analytics: Boolean get() = row.lead.kind == Envelope.KIND_ANALYTICS
     }
 
@@ -60,12 +69,16 @@ sealed interface RowCells {
 
 object Rows {
 
-    fun of(row: RowCollapse.Row, marks: Map<String, DuplicateDetector.Mark>): RowCells {
+    fun of(
+        row: RowCollapse.Row,
+        marks: Map<String, DuplicateDetector.Mark>,
+        bursts: Map<String, EventBurstDetector.Mark> = emptyMap(),
+    ): RowCells {
         val group = row as? RowCollapse.Row.Group
         if (group?.groupKind == RowCollapse.GroupKind.DB_TXN) return RowCells.Txn(row, RowContent.txnFold(group.facts))
         return when (val event = row.lead) {
             is LogEvent.Http -> RowCells.Http(
-                row, event, RowContent.http(event.tx),
+                row, event, RowContent.http(event),
                 duplicate = if (group == null) marks[event.id] else null,
                 muted = MutedEndpoints.isMuted(event.tx),
                 poll = group?.let(RowContent::pollFold),
@@ -73,7 +86,13 @@ object Rows {
             is LogEvent.Fcm -> RowContent.fcm(event).let { RowCells.Fcm(row, it, clock(it.atMillis)) }
             is LogEvent.Db -> RowCells.Db(row, RowContent.db(event.query), event.durationMillis?.let(RowContent::shortDuration) ?: clock(event.timestampMillis))
             is LogEvent.Worker -> RowContent.worker(event).let { RowCells.Worker(row, it, timeText(it.time)) }
-            else -> RowContent.generic(event).let { RowCells.Generic(row, it, timeText(it.time)) }
+            else -> RowContent.generic(event).let {
+                RowCells.Generic(
+                    row, it, timeText(it.time),
+                    burst = bursts[event.id],
+                    abandoned = event.abandoned?.takeIf { event.isOpen }?.let(RowContent::abandonedLabel),
+                )
+            }
         }
     }
 
