@@ -1,0 +1,56 @@
+======================================================================
+qemu-system-aarch64 [34042]: 64-bit    Footprint: 1936 MB (16384 bytes per page)
+======================================================================
+
+  Dirty      Clean  Reclaimable    Regions    Category
+    ---        ---          ---        ---    ---
+1302 MB        0 B          0 B        665    Untagged
+ 270 MB        0 B          0 B        276    IOAccelerator (graphics)
+ 128 MB        0 B          0 B         47    Malloc Small
+ 121 MB        0 B          0 B          8    Malloc Large
+  42 MB        0 B          0 B         11    IOSurface
+  32 MB        0 B          0 B        157    Owned physical footprint (unmapped) (graphics)
+  17 MB        0 B          0 B       1126    __DATA
+9072 KB        0 B          0 B       1117    __DATA_CONST
+3296 KB        0 B          0 B        280    Stack
+3109 KB        0 B          0 B          1    page table
+2064 KB        0 B          0 B          1    CG Image
+1602 KB        0 B          0 B        951    __DATA_DIRTY
+1600 KB        0 B          0 B         14    Malloc Metadata
+ 550 KB        0 B          0 B       2873    unused dyld shared cache area
+ 507 KB        0 B          0 B        707    __AUTH
+ 432 KB        0 B          0 B         30    IOKit
+ 384 KB        0 B          0 B         24    CoreAnimation
+ 288 KB        0 B          0 B          1    Dispatch Continuations
+ 272 KB        0 B          0 B          1    Malloc Tiny
+ 224 KB        0 B          0 B          3    OpenGL GLSL
+ 208 KB        0 B          0 B          1    CoreUI Image Data
+ 128 KB        0 B          0 B          8    VM_MEMORY_28
+ 128 KB        0 B          0 B          1    Accelerate Framework
+ 128 KB        0 B          0 B          4    __TPRO_CONST
+ 112 KB        0 B          0 B          3    IOAccelerator
+  48 KB        0 B          0 B          1    Dyld Private Memory
+  48 KB        0 B          0 B          3    CoreGraphics
+  47 KB        0 B          0 B          1    __OBJC_RW
+  32 KB        0 B          0 B          1    Activity Tracing
+  32 KB        0 B          0 B          2    OS Alloc Once
+  32 KB        0 B          0 B          2    ColorSync
+  16 KB        0 B          0 B          1    Deferred Reclaim
+  16 KB        0 B          0 B          1    Mach Message
+  16 KB        0 B          0 B          1    Foundation
+    0 B      13 MB          0 B       1205    __TEXT
+    0 B    2432 KB          0 B         32    mapped file
+    0 B     320 KB          0 B         49    __LINKEDIT
+    0 B        0 B          0 B          1    __GLSLBUILTINS
+    0 B        0 B          0 B          1    __OBJC_RO
+    0 B        0 B          0 B          1    __FONT_DATA
+    0 B        0 B          0 B          1    __CTF
+    0 B        0 B          0 B       1066    __AUTH_CONST
+    0 B        0 B          0 B         89    Owned physical footprint (unmapped)
+    ---        ---          ---        ---    ---
+1936 MB      16 MB          0 B      10770    TOTAL
+
+Auxiliary data:
+    phys_footprint: 3467 MB
+    phys_footprint_peak: 3572 MB
+

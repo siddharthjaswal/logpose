@@ -33,6 +33,7 @@ import io.github.siddharthjaswal.logpose.desktop.ui.TimelineActions
 import io.github.siddharthjaswal.logpose.desktop.ui.AdvancedActions
 import io.github.siddharthjaswal.logpose.desktop.ui.CorrelationActions
 import io.github.siddharthjaswal.logpose.desktop.ui.WaterfallActions
+import io.github.siddharthjaswal.logpose.desktop.ui.EmulatorActions
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isMetaPressed
@@ -132,6 +133,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
     val mcp by model.mcp.ui.collectAsState()
     val serveBusy by model.serveBusy.collectAsState()
     val updates by model.updates.ui.collectAsState()
+    val emulators by model.emulators.ui.collectAsState()
     // A one-second clock, only while a session runs: it is what lets "no LogPose events" appear
     // 20 s in without any event arriving to trigger a recomposition.
     val now by produceState(System.currentTimeMillis(), session) {
@@ -160,6 +162,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
             transitions = { w -> model.session.workerLifecycle.transitions(model.session.workerLifecycle.keyOf(w)) },
             correlation = correlation, waterfall = waterfall, keys = keys, find = find,
             advanced = advanced, mcp = mcp, serveBusy = serveBusy, updates = updates,
+            emulators = emulators,
         ),
         ScreenActions(
             onDownloadAdb = model::downloadPlatformTools,
@@ -256,6 +259,23 @@ private fun App(model: AppModel, adb: AdbStatus) {
             ),
             onUpdatesEnabled = model.updates::setEnabled,
             onDownloadUpdate = model.updates::openDownload,
+            emulators = EmulatorActions(
+                onOpen = model.emulators::open,
+                onClose = model.emulators::close,
+                onBack = model.emulators::back,
+                onRefresh = model.emulators::refresh,
+                onDismissMessage = model.emulators::dismissMessage,
+                onSlim = model.emulators::openSlim,
+                onSlimRam = model.emulators::setSlimRam,
+                onConfirmSlim = model.emulators::confirmSlim,
+                onRevert = model.emulators::revert,
+                onLaunch = model.emulators::openLaunch,
+                onLaunchOptions = model.emulators::editLaunch,
+                onConfirmLaunch = model.emulators::launch,
+                onDismissLaunch = model.emulators::dismissLaunch,
+                onShutDown = model.emulators::shutDown,
+                onUndoGuest = model.emulators::undoGuest,
+            ),
             share = ShareActions(
                 onClose = model.share::close,
                 onOptions = model.share::setOptions,

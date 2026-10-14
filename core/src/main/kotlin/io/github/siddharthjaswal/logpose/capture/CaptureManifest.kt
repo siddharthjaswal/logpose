@@ -39,6 +39,13 @@ data class CaptureManifest(
         val model: String? = null,
         val androidVersion: String? = null,
         val serial: String? = null,
+        /**
+         * Anything that makes this device not stock, in words — today the Mac app's *Also slim
+         * Android itself* on an emulator ("Android slimmed by LogPose: 41 background packages
+         * disabled, …"), which changes how the app behaves under memory pressure. Additive: older
+         * readers ignore it.
+         */
+        val note: String? = null,
     )
 
     @Serializable

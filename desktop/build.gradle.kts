@@ -295,3 +295,23 @@ val wirelessLive by tasks.registering(JavaExec::class) {
     args(providers.gradleProperty("reconnect").orElse("false").get())
     jvmArgs("-Djava.awt.headless=true")
 }
+
+/**
+ * The Emulators panel against this Mac's real SDK and an AVD (see EmulatorsLive.kt): `launch` slims
+ * and lean-launches through the controller and exits (the emulator must outlive it); `finish`
+ * measures, applies and undoes the guest tweaks, shuts down and reverts.
+ *
+ *   ./gradlew :desktop:emulatorsLive -PemuPhase=launch -PemuAvd=Pixel_9a -PemuState=/tmp/x
+ */
+val emulatorsLive by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Slims, lean-launches, measures and restores a real AVD through the Emulators controller."
+    classpath = sourceSets.test.get().runtimeClasspath
+    mainClass.set("io.github.siddharthjaswal.logpose.desktop.EmulatorsLiveKt")
+    args(
+        providers.gradleProperty("emuPhase").orElse("launch").get(),
+        providers.gradleProperty("emuAvd").orElse("Pixel_9a").get(),
+        providers.gradleProperty("emuState").orElse(layout.buildDirectory.dir("emulators-live").map { it.asFile.path }).get(),
+    )
+    jvmArgs("-Djava.awt.headless=true")
+}

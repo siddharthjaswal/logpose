@@ -39,6 +39,30 @@ A Compose Desktop app for people who don't use Android Studio — QA testers fir
   `desktop-v*` release and shows *Update available — Download* in the sidebar footer, linking to
   the release page. Nothing is downloaded or sent; it can be switched off in the same footer.
 
+### Added — Mac app Emulators panel
+- **Emulators** in the sidebar: every AVD with its image (API, Google APIs / Play / 16 KB, ABI),
+  `hw.ramSize`, `hw.gpu.mode`, `vm.heapSize`, whether it runs (adb `emu avd name` ↔ the qemu
+  process) and that process's host memory (`footprint` phys_footprint — Activity Monitor's number —
+  or `ps` RSS, labelled). Empty states for no SDK emulator and no AVDs.
+- **Slim this AVD / Revert.** Lowers `hw.ramSize` (1024 / 1536 / 2048 MB, never raises it) and sets
+  `hw.gpu.enabled=yes`, `hw.gpu.mode=host`, editing config.ini in place (comments, order and unknown
+  keys kept) after writing `config.ini.logpose-backup-<timestamp>`; Revert restores it byte for
+  byte and removes the backup. Both refuse while the AVD runs. Warns for 16 KB page-size images
+  (the emulator's 4 GB floor) and Play Store images.
+- **Launch lean**: `-memory`, `-gpu host`, `-no-snapshot-save`, `-no-boot-anim`, optional
+  `-no-snapshot-load` and `-lowram` — each only if the installed emulator's `-help` lists it —
+  detached, with boot progress off the UI thread. Measured on emulator 37.2.12 (M4): without
+  `-lowram` the emulator raises a Pixel 9a (API 36.1) to 2560 MB whatever config.ini says; with it,
+  phys_footprint went from 5,403 MB (stock) to ~3,480 MB after 60 s idle.
+- **Also slim Android itself** (opt-in, off by default): disables 48 background packages where
+  installed and caps cached processes at 4, recorded per AVD before anything changes; *Undo Android
+  tweaks* restores exactly that. Never Play services, WebView, Chrome, Play Store, Bluetooth or the
+  dialer / Maps / camera / photos / contacts / SMS apps an app hands off to. A session on such an
+  emulator shows *ANDROID SLIMMED* on the device and in the header, and the capture's manifest
+  carries `device.note` (an additive field; no wire change) which the Slack summary repeats.
+- Ideas from [avdslim](https://github.com/kdbhalala/avdslim) (MIT), reimplemented; no install-shim,
+  no SDK changes, nothing written outside `~/.android/avd/<name>.avd/` and LogPose's settings.
+
 ### Fixed — Mac app wireless pairing
 - **QR pairing no longer depends on adb's mDNS discovery on macOS.** Diagnosed on a healthy home
   network where pairing hung at "pairing" in both LogPose and Android Studio: macOS's mDNSResponder

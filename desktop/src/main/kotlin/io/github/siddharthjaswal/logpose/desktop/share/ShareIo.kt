@@ -30,7 +30,7 @@ object ShareIo {
         val meta = rec.meta
         return ShareSource(
             capture = capture,
-            device = CaptureManifest.DeviceInfo(meta.deviceModel, meta.androidVersion, meta.serial),
+            device = CaptureManifest.DeviceInfo(meta.deviceModel, meta.androidVersion, meta.serial, meta.deviceNote),
             app = meta.appPackage?.let { CaptureManifest.AppInfo(it, meta.libVersion) },
             startedAtMillis = meta.startedAtMillis,
             endedAtMillis = meta.endedAtMillis ?: nowMillis,

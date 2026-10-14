@@ -34,7 +34,11 @@ object SlackSummary {
         appendLine()
 
         val d = manifest.device
-        val device = listOfNotNull(d?.model?.replace('_', ' '), d?.androidVersion?.let { "Android $it" }).joinToString(" · ")
+        val device = listOfNotNull(
+            d?.model?.replace('_', ' '), d?.androidVersion?.let { "Android $it" },
+            // Not a stock device: whoever reads the bug report should know before chasing a background kill.
+            d?.note?.let { "Android slimmed by LogPose (not stock)" },
+        ).joinToString(" · ")
         if (device.isNotBlank()) appendLine("*Device:* ${esc(device)}")
 
         val span = manifest.session

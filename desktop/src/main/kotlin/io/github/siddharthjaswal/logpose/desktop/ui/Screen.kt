@@ -122,6 +122,8 @@ data class ScreenState(
     val serveBusy: Boolean = false,
     // M5 — the update line in the sidebar footer
     val updates: UpdateUi = UpdateUi(),
+    // Emulators — the lean-emulator sheet, and which emulator serials run a guest-slimmed Android
+    val emulators: io.github.siddharthjaswal.logpose.desktop.app.EmulatorsUi = io.github.siddharthjaswal.logpose.desktop.app.EmulatorsUi(),
 )
 
 class ScreenActions(
@@ -151,6 +153,7 @@ class ScreenActions(
     val advanced: AdvancedActions = AdvancedActions(),
     val onUpdatesEnabled: (Boolean) -> Unit = {},
     val onDownloadUpdate: () -> Unit = {},
+    val emulators: EmulatorActions = EmulatorActions(),
 )
 
 @Composable
@@ -247,6 +250,7 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
         MockEditorSheet(state.advanced.editor, actions.advanced)
         ComposePushSheet(state.advanced.compose, actions.advanced)
         SaveScenarioSheet(state.advanced.saveScenario, state.advanced.location?.label ?: "this Mac", actions.advanced)
+        EmulatorsSheet(state.emulators, actions.emulators)
     }
 }
 
@@ -270,6 +274,7 @@ private fun Sidebar(state: ScreenState, actions: ScreenActions, modifier: Modifi
             entries.forEach { e -> DeviceRow(e, state, running, actions) }
         }
         Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Link("Emulators", onClick = actions.emulators.onOpen)
             Link("How to connect a phone", onClick = actions.wireless.onHowToConnect)
             Link("Check connection", onClick = actions.wireless.onCheckConnection)
         }
@@ -335,6 +340,11 @@ private fun DeviceRow(e: SidebarEntry, state: ScreenState, running: SessionState
         Column(Modifier.weight(1f)) {
             T(e.name, if (e.serial == null) p.textDim else p.text, weight = FontWeight.SemiBold)
             T(e.detail, p.textMuted, style = Type.monoTiny)
+            // A guest-slimmed emulator says so wherever it's chosen: its Android isn't stock.
+            state.emulators.guestBySerial[e.serial]?.let { summary ->
+                Spacer(Modifier.height(3.dp))
+                Hint(summary) { Pill("ANDROID SLIMMED", p.warn, stroke = p.warn) }
+            }
             Spacer(Modifier.height(2.dp))
             val label = if (capturing) "Capturing" else e.status.label
             T(label, if (e.status.actionNeeded) p.warn else p.textDim, style = Type.small, maxLines = 3)
@@ -392,6 +402,12 @@ private fun Toolbar(state: ScreenState, actions: ScreenActions) {
             }
         }
         T(label, p.textDim, Modifier.weight(1f, fill = false))
+        // A session on an emulator whose Android LogPose slimmed: its Android isn't stock, so say so here too.
+        val guest = (state.session as? SessionState.Running)?.let { state.emulators.guestBySerial[it.serial] }
+        if (guest != null && state.viewing == null) {
+            Spacer(Modifier.width(8.dp))
+            Hint(guest) { Pill("ANDROID SLIMMED", p.warn, stroke = p.warn) }
+        }
         Spacer(Modifier.weight(1f))
         Button("Open…", actions.onOpenFile)
         Spacer(Modifier.width(8.dp))
@@ -412,7 +428,7 @@ private fun ViewingBanner(v: ViewingFile, actions: ScreenActions) {
         Pill("READ-ONLY", p.accent, stroke = p.accent)
         Spacer(Modifier.width(10.dp))
         val from = v.manifest?.let { m ->
-            listOfNotNull(m.app?.pkg, m.device?.model, m.scope).joinToString(" · ").takeIf { it.isNotBlank() }
+            listOfNotNull(m.app?.pkg, m.device?.model, m.device?.note?.let { "Android slimmed" }, m.scope).joinToString(" · ").takeIf { it.isNotBlank() }
         }
         T("Viewing ${v.name}" + (from?.let { "  ·  $it" } ?: ""), p.text, Modifier.weight(1f, fill = false), weight = FontWeight.Medium)
         Spacer(Modifier.width(12.dp))

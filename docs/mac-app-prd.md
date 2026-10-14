@@ -347,6 +347,19 @@ Security*. Acceptable for an internal pilot; not for handing to QA teams.
   copy for a tap (`siddharthjaswal/homebrew-logpose`). homebrew/cask proper needs a signed,
   notarized app.
 
+### Emulators panel (beyond the PRD, uncommitted)
+
+*2026-10-14.* For testers who use an emulator instead of a phone: list AVDs with live host RAM,
+**Slim this AVD / Revert** (config.ini `hw.ramSize`, `hw.gpu.*`, backup + byte-exact revert),
+**Launch lean** (flags checked against `emulator -help`, detached), and an opt-in, undoable
+*Also slim Android itself*. Levers chosen after reading avdslim (MIT) and measuring on the dev Mac:
+emulator 37.2.12 ignores RAM below its floor (2560 MB, Pixel 9a API 36.1) unless `-lowram` is
+passed; with it, stock 5,403 MB → lean 3,489 MB phys_footprint. Rejected from avdslim: deleting
+snapshots / hardware-qemu.ini, `vm.heapSize`, CPU cores, camera/audio, forced cold boot, the
+install-shim, location/sync/animation/setup settings, and disabling hand-off apps. A guest-slimmed
+capture carries `manifest.device.note`. Live-verified with `./gradlew :desktop:emulatorsLive`;
+renders via `renderScreens -PshotsOnly=emulators`. Human check: run it from the packaged app.
+
 ### Conveyor — evaluated, not adopted (for now)
 
 [Conveyor](https://conveyor.hydraulic.dev) (Hydraulic) packages Compose Desktop apps and would

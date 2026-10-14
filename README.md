@@ -949,6 +949,22 @@ while you test; the screenshot button grabs the phone's screen into the capture.
 Studio use **Open Capture File…** in the LogPose tool window — or `logpose serve --open <file>`
 so a coding agent can read it over MCP.
 
+**Emulators, with less of your Mac's memory.** *Emulators* in the sidebar lists your AVDs
+(`~/.android/avd`) with their image, `hw.ramSize`, GPU mode and — for a running one — the qemu
+process's memory as Activity Monitor counts it (`footprint`, or `ps` RSS, labelled). **Slim this
+AVD** lowers `hw.ramSize` (1024 / 1536 / 2048 MB) and sets `hw.gpu.mode=host`, editing config.ini
+in place with a timestamped backup beside it; **Revert** puts the original back byte for byte; both
+refuse while the emulator runs. Android Studio's ▶ boots from the same file, so its launches get
+slimmer too — down to the emulator's RAM floor (2560 MB for a Pixel 9a on API 36), which only
+**Launch lean** goes below, with `-lowram` (plus `-memory`, `-gpu host`, `-no-snapshot-save`,
+`-no-boot-anim`, each used only if `emulator -help` lists it). On an M4 Mac that took a Pixel 9a
+from 5.4 GB to 3.5 GB. Lean launches are detached (they outlive LogPose) and appear in the device
+list like any device. An opt-in *Also slim Android itself* disables 48 background packages (never
+Play services, WebView or the apps your app hands off to) and caps cached processes; it's recorded
+per AVD, *Undo Android tweaks* reverses exactly that, and captures from such an emulator say so.
+The idea comes from [avdslim](https://github.com/kdbhalala/avdslim) (MIT); LogPose reimplements
+the safe subset and bundles none of it.
+
 **Updates.** Once a day the app asks GitHub's public Releases API whether a newer Mac release
 exists and, if so, shows *Update available — Download* in the sidebar footer, linking to the
 release page. Nothing is downloaded automatically and nothing about you or your devices is sent;

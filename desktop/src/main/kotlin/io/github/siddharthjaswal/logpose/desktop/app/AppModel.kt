@@ -164,6 +164,9 @@ class AppModel(
     /** The once-a-day *Update available* check (M5); inert for a `dev` build. */
     val updates = UpdateController(scope, settings, appVersion())
 
+    /** The Emulators sheet: lean AVD launches, config.ini slimming, opt-in guest tweaks. */
+    val emulators = EmulatorController(scope, settings)
+
     /** Serve MCP (PRD §7). */
     val mcp = DesktopMcp(settings, session, advanced, projectName = {
         advanced.location.projectDir?.name ?: "LogPose for Mac"
@@ -596,6 +599,7 @@ class AppModel(
         while (kotlin.coroutines.coroutineContext.isActive) {
             val list = withContext(Dispatchers.IO) { Adb.devices() }
             _devices.value = list
+            emulators.noteDevices(list.filter { it.ready }.map { it.serial })
             val selected = _selectedSerial.value
             if (selected == null || list.none { it.serial == selected }) {
                 // One ready phone is the common case: select it so Start is one click.
@@ -626,6 +630,8 @@ class AppModel(
         scope.launch(Dispatchers.IO) {
             val release = AdbCommands.Real.shell(serial, "getprop ro.build.version.release")?.trim()?.lineSequence()?.firstOrNull()?.trim()
             if (!release.isNullOrBlank() && !release.contains(' ')) rec.updateMeta { it.copy(androidVersion = release) }
+            // An emulator whose Android LogPose slimmed: the capture says so (manifest device.note).
+            emulators.guestSummaryFor(serial)?.let { note -> rec.updateMeta { it.copy(deviceNote = note) } }
         }
     }
 
@@ -790,6 +796,7 @@ class AppModel(
 
     fun shutdown() {
         wireless.shutdown()
+        emulators.shutdown()
         // A writer's fail-safe clear first, while adb and the controller are still wired.
         advanced.shutdown()
         mcp.stop(remember = false)

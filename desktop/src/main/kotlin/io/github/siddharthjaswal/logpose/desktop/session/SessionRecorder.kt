@@ -28,6 +28,8 @@ data class SessionMeta(
     val endedAtMillis: Long? = null,
     val appPackage: String? = null,
     val libVersion: String? = null,
+    /** Not-stock device facts for the capture's `device.note` (an emulator whose Android LogPose slimmed). */
+    val deviceNote: String? = null,
     val bookmarks: List<Bookmark> = emptyList(),
     val screenshots: List<ScreenshotRef> = emptyList(),
 ) {
