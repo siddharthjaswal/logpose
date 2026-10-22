@@ -19,7 +19,7 @@ group = "io.github.siddharthjaswal"
  * share sheet and the update check read at runtime), and the release workflow refuses a tag that
  * disagrees with it. macOS wants MAJOR > 0 here, hence 1.0.0 for the first release, not 0.x.
  */
-val desktopVersion = "1.2.0"
+val desktopVersion = "1.3.0"
 version = desktopVersion
 
 // Deliberately NOT `org.jetbrains.intellij.platform`: like :daemon, the Mac app is a host for
