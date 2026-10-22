@@ -11,6 +11,7 @@ import io.github.siddharthjaswal.logpose.analysis.KeyValue
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
 import io.github.siddharthjaswal.logpose.analysis.Suggestion
 import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
+import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.mock.DeviceCapability
 import io.github.siddharthjaswal.logpose.mock.DeviceFeature
 import io.github.siddharthjaswal.logpose.mock.PushReplay
@@ -97,10 +98,18 @@ object McpTools {
     private const val MIN_AWAIT_MILLIS = 1_000L
     private const val MAX_AWAIT_MILLIS = 120_000L
 
-    private const val CAPTURE_STOPPED_NOTE =
+    /**
+     * How to get capture back: the agent can do it itself where the host supplies [Devices], and
+     * otherwise only a human pressing ▶ can.
+     */
+    private fun reattachHint(devices: Devices?): String =
+        if (devices != null) "Call attach_device to reattach (it picks the device itself when only one is connected)"
+        else "Press ▶ in the LogPose window to reattach"
+
+    private fun captureStoppedNote(devices: Devices?): String =
         "Capture is NOT running — nothing can arrive because logcat isn't being tailed (it can " +
-            "stop on an app reinstall or adb disconnect). Press ▶ in the LogPose window to " +
-            "reattach, then wait again."
+            "stop on an app reinstall, an emulator reboot or an adb disconnect). " +
+            "${reattachHint(devices)}, then wait again."
 
     /**
      * What a caller is told when a surface can't serve them, and — crucially — **what to do about
@@ -117,6 +126,8 @@ object McpTools {
         val push: String,
         val scenarios: String,
         val correlations: String,
+        /** `list_devices` / `attach_device`: a host that can't (re)attach capture for an agent. */
+        val devices: String,
     ) {
         companion object {
             val Ide = Unavailable(
@@ -126,6 +137,7 @@ object McpTools {
                 scenarios = "Scenarios aren't available — open the LogPose tool window for a project with a " +
                     "directory on disk (scenarios live in .logpose/scenarios).",
                 correlations = "Correlation isn't available — open the LogPose tool window for this project.",
+                devices = "Re-attaching isn't available — open the LogPose tool window for this project and press ▶.",
             )
         }
     }
@@ -304,6 +316,57 @@ object McpTools {
      */
     fun interface WorkerTransitions {
         fun of(event: LogEvent.Worker): List<WorkerLifecycle.Transition>
+    }
+
+    /**
+     * Which device capture tails, and the means to switch or restart it — how an agent recovers a
+     * capture that stopped (emulator rebooted, adb dropped) without a human pressing ▶.
+     *
+     * The selection rules ("one device: take it; several: ask") live in this file so every host
+     * applies the same ones; a host only lists devices and attaches to the serial it is handed.
+     *
+     * Callback-shaped because both [list] and [attach] run adb, and this layer is called from the
+     * MCP transport's IO thread: implementations do that work elsewhere and MUST invoke each
+     * callback exactly once. [current] is called on the IO thread, so it must be cheap — no adb.
+     */
+    interface Devices {
+        /** What capture is doing now. [serial] is the device it tails, or last tailed / is set to. */
+        data class Current(val serial: String?, val attached: Boolean)
+
+        /** What an attach did. [error] non-null means capture was NOT attached. */
+        data class AttachReport(
+            val serial: String,
+            val error: String? = null,
+            /**
+             * True when this host owns the device's mock rule set and re-armed it: rules go out
+             * now when [pushedNow], else when the app next announces itself. False for a host
+             * that is read-only on mocks (single-writer rule) — it pushes nothing.
+             */
+            val mocksArmed: Boolean = false,
+            /** True when the rule set was broadcast as part of the attach (the app had said hello). */
+            val pushedNow: Boolean = false,
+            val activeRules: Int = 0,
+            /** The host's one-phrase device sync state, as list_mocks reports it. */
+            val deviceHint: String? = null,
+            /** True when this host starts a fresh timeline on attach, so earlier events are gone. */
+            val clearedTimeline: Boolean = false,
+            /** Anything host-specific worth one sentence. */
+            val note: String? = null,
+        ) {
+            val attached: Boolean get() = error == null
+        }
+
+        fun current(): Current
+
+        /** Every device adb reports, ready or not (`adb devices -l`). Off the caller's thread. */
+        fun list(onResult: (List<Adb.DeviceInfo>) -> Unit)
+
+        /**
+         * (Re)starts capture on [serial] — logcat tailing, the reverse channel, and (for a mock
+         * writer) the rule push — exactly as the host's own Start / device picker does. Off the
+         * caller's thread.
+         */
+        fun attach(serial: String, onResult: (AttachReport) -> Unit)
     }
 
     /** The tool catalogue, in MCP's `tools/list` shape. */
@@ -506,6 +569,31 @@ object McpTools {
         )
         add(
             tool(
+                "list_devices",
+                "The Android devices adb can see (serial, state, model) and which one capture is " +
+                    "attached to. Read-only. Use it before attach_device when several are connected.",
+            ) {}
+        )
+        add(
+            tool(
+                "attach_device",
+                "(Re)attach capture to a device — THIS CHANGES WHAT LOGPOSE IS CAPTURING: it stops " +
+                    "the current capture and starts a new one (logcat tailing, the app's reverse " +
+                    "channel, and — where this host owns the mock rules — re-pushing them, so " +
+                    "existing mocks apply again). Use it when capture has stopped (emulator " +
+                    "rebooted, adb dropped) or to switch devices. Without serial it re-attaches " +
+                    "the current device if connected, else the only connected one; with several " +
+                    "connected it attaches nothing and lists them. Some hosts (LogPose for Mac) " +
+                    "start a fresh timeline on every attach.",
+            ) {
+                put("serial", stringProp(
+                    "adb serial to attach, e.g. 'emulator-5554' (list_devices shows them). Omit to " +
+                        "re-attach the current device, or the only connected one.",
+                ))
+            }
+        )
+        add(
+            tool(
                 "list_mocks",
                 "The mock rules currently defined, with how many times each has been served and " +
                     "whether the device has them.",
@@ -695,12 +783,14 @@ object McpTools {
         clearCapture: () -> Unit = {},
         workerTransitions: WorkerTransitions = WorkerTransitions { emptyList() },
         unavailable: Unavailable = Unavailable.Ide,
+        /** Only phrases the capture-stopped notes here; the device tools themselves are async. */
+        devices: Devices? = null,
     ): JsonElement = when (name) {
-        "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf, captureRunning)
+        "list_events" -> listEvents(args, events, hostAgeMillis, sessionOf, captureRunning, devices)
         "get_event" -> getEvent(args, events, includeBodies, sessionOf)
         "get_trace" -> getTrace(args, events)
         "find_failures" -> findFailures(args, events)
-        "session_summary" -> summary(events, sessions, sessionOf, hostAgeMillis, captureRunning)
+        "session_summary" -> summary(events, sessions, sessionOf, hostAgeMillis, captureRunning, devices)
         "query_hotspots" -> queryHotspots(args, events)
         "worker_history" -> workerHistory(args, events, workerTransitions)
         "config_changes" -> configChanges(args, events)
@@ -736,7 +826,7 @@ object McpTools {
      */
     private val ASYNC_TOOLS = setOf(
         "await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
-        "get_related", "list_correlation_keys",
+        "get_related", "list_correlation_keys", "list_devices", "attach_device",
     )
 
     fun isAsync(name: String): Boolean = name in ASYNC_TOOLS
@@ -756,6 +846,7 @@ object McpTools {
         waits: Waits? = null,
         scenarios: Scenarios? = null,
         correlations: Correlations? = null,
+        devices: Devices? = null,
         captureRunning: () -> Boolean = { true },
         now: () -> Long = { System.currentTimeMillis() },
         unavailable: Unavailable = Unavailable.Ide,
@@ -770,7 +861,7 @@ object McpTools {
         when (name) {
             "await_event" ->
                 if (waits == null) fail(unavailable.waits)
-                else awaitEvent(args, waits, captureRunning, now, answer)
+                else awaitEvent(args, waits, captureRunning, devices, now, answer)
             "inject_fcm" ->
                 if (push == null) fail(unavailable.push) else injectFcm(args, events, push, now, answer)
             // Listing reads the scenarios directory and saving writes a file into it — both are
@@ -780,7 +871,7 @@ object McpTools {
                 if (scenarios == null) fail(unavailable.scenarios) else listScenarios(scenarios, answer)
             "load_scenario" ->
                 if (scenarios == null || !scenarios.writable()) fail(unavailable.scenarios)
-                else loadScenario(args, scenarios, answer)
+                else loadScenario(args, scenarios, devices, answer)
             "save_scenario" ->
                 if (scenarios == null) fail(unavailable.scenarios) else saveScenario(args, scenarios, answer)
             "get_related" ->
@@ -789,6 +880,12 @@ object McpTools {
             "list_correlation_keys" ->
                 if (correlations == null) fail(unavailable.correlations)
                 else listCorrelationKeys(args, events, correlations, answer)
+            // Attaching capture changes what LogPose reads, not what the device holds, so a host
+            // that is read-only on mocks still offers it — it just never re-pushes rules.
+            "list_devices" ->
+                if (devices == null) fail(unavailable.devices) else listDevices(devices, answer)
+            "attach_device" ->
+                if (devices == null) fail(unavailable.devices) else attachDevice(args, devices, answer)
             else -> fail("Unknown tool '$name'")
         }
     }
@@ -801,6 +898,7 @@ object McpTools {
         hostAgeMillis: (String) -> Long,
         sessionOf: (String) -> Int,
         captureRunning: () -> Boolean,
+        devices: Devices?,
     ): JsonElement {
         val limit = args.int("limit") ?: 50
         val kind = args.str("kind")
@@ -837,8 +935,8 @@ object McpTools {
             if (events.isEmpty() && !captureRunning()) {
                 put("capture_stopped", true)
                 put("note", "Capture is NOT running — the buffer is empty because logcat isn't " +
-                    "being tailed (it can stop on an app reinstall or adb disconnect). Press ▶ in " +
-                    "the LogPose window to reattach.")
+                    "being tailed (it can stop on an app reinstall, an emulator reboot or an adb " +
+                    "disconnect). ${reattachHint(devices)}.")
             } else if (matched.size > page.size) {
                 put("note", "Showing the ${page.size} most recent of ${matched.size} matches.")
             }
@@ -940,6 +1038,7 @@ object McpTools {
         args: JsonObject,
         waits: Waits,
         captureRunning: () -> Boolean,
+        devices: Devices?,
         now: () -> Long,
         answer: (JsonElement) -> Unit,
     ) {
@@ -957,7 +1056,7 @@ object McpTools {
                 put("matched", false)
                 put("waited_ms", 0)
                 put("capture_stopped", true)
-                put("note", CAPTURE_STOPPED_NOTE)
+                put("note", captureStoppedNote(devices))
             })
             return
         }
@@ -1047,6 +1146,7 @@ object McpTools {
         sessionOf: (String) -> Int,
         hostAgeMillis: (String) -> Long,
         captureRunning: () -> Boolean,
+        devices: Devices?,
     ): JsonElement {
         val http = events.filterIsInstance<LogEvent.Http>()
         val dupes = DuplicateDetector.analyze(http.map { it.tx })
@@ -1058,7 +1158,7 @@ object McpTools {
                 put("running", running)
                 val lastAge = events.map { hostAgeMillis(it.id) }.filter { it >= 0 }.minOrNull()
                 if (lastAge != null) put("last_event_age_ms", lastAge)
-                if (!running) put("note", "Capture is stopped — press ▶ in the LogPose window to reattach.")
+                if (!running) put("note", "Capture is stopped. ${reattachHint(devices)}.")
                 else if (events.isEmpty()) put("note", "Capture is running but nothing has arrived yet.")
             })
             put("total_events", events.size)
@@ -1858,6 +1958,148 @@ object McpTools {
         }
     }
 
+    // ---- devices ------------------------------------------------------------------------------
+
+    private const val NO_DEVICE =
+        "adb reports no device — boot the emulator (or connect and authorize the phone) first, " +
+            "then call attach_device again."
+
+    private fun listDevices(devices: Devices, answer: (JsonElement) -> Unit) {
+        val current = devices.current()
+        devices.list { all ->
+            answer(buildJsonObject {
+                put("capture", currentJson(current))
+                put("devices", devicesJson(all, current))
+                when {
+                    all.isEmpty() -> put("note", NO_DEVICE)
+                    !current.attached -> put("note", "Capture is not attached. attach_device attaches it " +
+                        "(pass serial when several are ready).")
+                }
+            })
+        }
+    }
+
+    /**
+     * The selection rules, in one place for every host: an explicit serial must be one adb can
+     * read; without one, the device capture already belongs to wins, then a lone ready device.
+     * Several and none attach nothing — guessing would silently capture the wrong phone.
+     */
+    private fun attachDevice(args: JsonObject, devices: Devices, answer: (JsonElement) -> Unit) {
+        val requested = args.str("serial")?.trim()?.takeIf { it.isNotEmpty() }
+        val before = devices.current()
+        devices.list { all ->
+            val ready = all.filter { it.ready }
+            val refuse: (String) -> Unit = { message ->
+                answer(buildJsonObject {
+                    put("attached", false)
+                    put("error", message)
+                    put("previous", currentJson(before))
+                    put("devices", devicesJson(all, before))
+                })
+            }
+            val previous = before.serial?.takeIf { serial -> ready.any { it.serial == serial } }
+            val target: String? = when {
+                requested != null -> {
+                    val device = all.firstOrNull { it.serial == requested }
+                    when {
+                        device == null -> {
+                            refuse("No device '$requested' — adb reports ${listing(all)}. Nothing was attached.")
+                            null
+                        }
+                        !device.ready -> {
+                            refuse("'$requested' is ${device.state}, so adb can't read from it — " +
+                                "${notReadyAdvice(device.state)} Nothing was attached.")
+                            null
+                        }
+                        else -> requested
+                    }
+                }
+                previous != null -> previous
+                ready.size == 1 -> ready.single().serial
+                ready.isEmpty() -> {
+                    refuse(if (all.isEmpty()) NO_DEVICE else "No device is ready — adb reports ${listing(all)}. " +
+                        all.map { notReadyAdvice(it.state) }.distinct().joinToString(" ").trim())
+                    null
+                }
+                else -> {
+                    refuse("${ready.size} devices are ready (${ready.joinToString { it.serial }}) and none " +
+                        "is the one capture was on, so nothing was attached — pass serial to choose.")
+                    null
+                }
+            }
+            if (target != null) devices.attach(target) { report -> answer(attachResult(report, before, all)) }
+        }
+    }
+
+    private fun attachResult(report: Devices.AttachReport, before: Devices.Current, all: List<Adb.DeviceInfo>): JsonElement =
+        buildJsonObject {
+            put("attached", report.attached)
+            put("serial", report.serial)
+            if (!report.attached) {
+                put("error", report.error)
+                put("previous", currentJson(before))
+                put("devices", devicesJson(all, before))
+                return@buildJsonObject
+            }
+            put("restarted", before.serial == report.serial)
+            put("previous", currentJson(before))
+            put("devices", devicesJson(all, Devices.Current(report.serial, attached = true)))
+            put("mocks", buildJsonObject {
+                put("re_pushed", when {
+                    !report.mocksArmed -> "no"
+                    report.pushedNow -> "now"
+                    else -> "on_next_hello"
+                })
+                put("active_rules", report.activeRules)
+                report.deviceHint?.let { put("device", it) }
+            })
+            if (report.clearedTimeline) put("timeline_cleared", true)
+            put("note", attachNote(report))
+        }
+
+    private fun attachNote(report: Devices.AttachReport): String = buildList {
+        add("Capture is attached to ${report.serial} and tailing logcat.")
+        add(
+            when {
+                !report.mocksArmed -> "This host is read-only on the device's mock rules, so it pushed " +
+                    "none — whichever program owns them re-pushes them."
+                report.activeRules == 0 -> "There are no active mock rules to push."
+                report.pushedNow -> "Re-pushed ${report.activeRules} active mock rule(s); list_mocks shows " +
+                    "when the device acknowledges them."
+                else -> "${report.activeRules} active mock rule(s) go out when the app announces itself " +
+                    "(its hello at launch) — launch or restart the app; list_mocks shows the device's ack."
+            }
+        )
+        if (report.clearedTimeline) add("This host starts a fresh timeline per capture: events from before " +
+            "the attach are no longer in list_events.")
+        report.note?.let { add(it) }
+    }.joinToString(" ")
+
+    private fun currentJson(current: Devices.Current): JsonObject = buildJsonObject {
+        current.serial?.let { put("serial", it) }
+        put("state", if (current.attached) "attached" else "waiting")
+    }
+
+    private fun devicesJson(all: List<Adb.DeviceInfo>, current: Devices.Current): JsonArray = buildJsonArray {
+        all.forEach { device ->
+            add(buildJsonObject {
+                put("serial", device.serial)
+                put("state", device.state)
+                device.model?.let { put("model", it) }
+                if (device.serial == current.serial && current.attached) put("capturing", true)
+            })
+        }
+    }
+
+    private fun listing(all: List<Adb.DeviceInfo>): String =
+        if (all.isEmpty()) "no devices" else all.joinToString { "${it.serial} (${it.state})" }
+
+    private fun notReadyAdvice(state: String): String = when (state) {
+        "unauthorized" -> "Accept the USB-debugging prompt on the device."
+        "offline" -> "It is still booting or adb lost it — wait a moment, or run `adb reconnect`."
+        else -> ""
+    }
+
     // ---- scenarios ----------------------------------------------------------------------------
 
     private fun listScenarios(scenarios: Scenarios, answer: (JsonElement) -> Unit) =
@@ -1883,7 +2125,7 @@ object McpTools {
             })
         }
 
-    private fun loadScenario(args: JsonObject, scenarios: Scenarios, answer: (JsonElement) -> Unit) {
+    private fun loadScenario(args: JsonObject, scenarios: Scenarios, devices: Devices?, answer: (JsonElement) -> Unit) {
         val name = args.str("name") ?: return answer(errorObj("Missing 'name'"))
         if (!ScenarioStore.isValidName(name)) return answer(errorObj(nameRule(name)))
         val replace = args.bool("replace") ?: false
@@ -1904,7 +2146,7 @@ object McpTools {
                     if (!report.live) {
                         put("warning", "NOT SERVING YET — the rules are loaded in the IDE but " +
                             "capture isn't running, so nothing was pushed to a device and the app " +
-                            "is still getting real responses. Press ▶ in the LogPose window.")
+                            "is still getting real responses. ${reattachHint(devices)}.")
                     } else if (report.withheld > 0) {
                         put("warning", withheldText(report.withheld, null))
                     } else {

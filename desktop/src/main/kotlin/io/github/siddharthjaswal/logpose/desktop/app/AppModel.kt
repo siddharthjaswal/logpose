@@ -54,7 +54,10 @@ import io.github.siddharthjaswal.logpose.analysis.FindQuery
 import io.github.siddharthjaswal.logpose.analysis.Grouping
 import io.github.siddharthjaswal.logpose.desktop.correlation.KeysDraft
 import io.github.siddharthjaswal.logpose.desktop.correlation.Vocabulary
+import io.github.siddharthjaswal.logpose.desktop.advanced.MockWriter
 import io.github.siddharthjaswal.logpose.desktop.mcp.DesktopMcp
+import io.github.siddharthjaswal.logpose.mcp.McpTools
+import java.util.concurrent.atomic.AtomicBoolean
 import io.github.siddharthjaswal.logpose.desktop.timeline.MenuContext
 import io.github.siddharthjaswal.logpose.desktop.waterfall.Flows
 import io.github.siddharthjaswal.logpose.desktop.waterfall.WaterfallRequest
@@ -93,6 +96,8 @@ class AppModel(
     sessionOverride: CaptureSession? = null,
     private val settings: KeyValueStore = RememberedDevices.forApp(AdbLocator.appSupportDir()),
     appSupport: File = AdbLocator.appSupportDir(),
+    /** `adb devices -l` for `list_devices` / `attach_device` — blocking, so only ever called on IO. */
+    private val adbDevices: () -> List<Adb.DeviceInfo> = { Adb.devices() },
 ) {
     /**
      * Every session is recorded to `sessions/<timestamp>-<device>.ndjson` (M3) — the store is only
@@ -173,7 +178,7 @@ class AppModel(
     /** Serve MCP (PRD §7). */
     val mcp = DesktopMcp(settings, session, advanced, projectName = {
         advanced.location.projectDir?.name ?: "LogPose for Mac"
-    })
+    }, devices = McpDevices())
 
     init {
         // Mutes are a global view preference (the plugin keeps them application-wide too), kept in
@@ -641,6 +646,68 @@ class AppModel(
     fun stopSession() {
         commitBookmark(null)
         session.stop()
+    }
+
+    /**
+     * `attach_device`: picking [serial] in the device menu and pressing Start, in one step — stop the
+     * running session, select, start. The start goes through the very path a click does, so the
+     * mock writer arms and re-pushes exactly as it would (see [AdvancedController.started]). Call
+     * it on [scope]'s dispatcher, as the UI does. A new session is a new timeline, so the report
+     * says when it cleared one.
+     */
+    fun attachDevice(serial: String): McpTools.Devices.AttachReport {
+        if (_viewing.value != null) {
+            return McpTools.Devices.AttachReport(
+                serial, error = "A capture file is open in LogPose for Mac — press Back to live there first.",
+            )
+        }
+        val hadEvents = session.store.snapshot().isNotEmpty()
+        if (session.state.value is SessionState.Running) stopSession()
+        _selectedSerial.value = serial
+        startSession()
+        if ((session.state.value as? SessionState.Running)?.serial != serial) {
+            return McpTools.Devices.AttachReport(serial, error = "LogPose for Mac didn't start a session on $serial.")
+        }
+        val armed = MockWriter.armsDevice(advanced.mode(serial))
+        return McpTools.Devices.AttachReport(
+            serial = serial,
+            mocksArmed = armed,
+            pushedNow = armed && advanced.mocks.deviceState().helloSeen,
+            activeRules = advanced.mocks.activeCount(),
+            clearedTimeline = hadEvents,
+            note = if (armed) "Earlier events are in the session recording on disk." else
+                "To let this app re-push mocks, turn on Advanced and \"This app controls mocks\" for $serial.",
+        )
+    }
+
+    /**
+     * The device surface Serve MCP hands an agent. adb runs on IO; the switch runs on [scope] like
+     * a click. Each callback fires exactly once — the completion handler answers for a job the
+     * closing window cancelled before it ran.
+     */
+    private inner class McpDevices : McpTools.Devices {
+        override fun current(): McpTools.Devices.Current = when (val state = session.state.value) {
+            is SessionState.Running -> McpTools.Devices.Current(state.serial, attached = true)
+            is SessionState.Ended -> McpTools.Devices.Current(state.serial, attached = false)
+            else -> McpTools.Devices.Current(_selectedSerial.value, attached = false)
+        }
+
+        override fun list(onResult: (List<Adb.DeviceInfo>) -> Unit) {
+            val answer = once(onResult)
+            scope.launch(Dispatchers.IO) { answer(adbDevices()) }.invokeOnCompletion { answer(emptyList()) }
+        }
+
+        override fun attach(serial: String, onResult: (McpTools.Devices.AttachReport) -> Unit) {
+            val answer = once(onResult)
+            scope.launch { answer(attachDevice(serial)) }.invokeOnCompletion { cause ->
+                answer(McpTools.Devices.AttachReport(serial, error = "LogPose for Mac couldn't attach: ${cause?.message ?: "the window is closing"}."))
+            }
+        }
+
+        private fun <T> once(onResult: (T) -> Unit): (T) -> Unit {
+            val done = AtomicBoolean(false)
+            return { value -> if (done.compareAndSet(false, true)) onResult(value) }
+        }
     }
 
     fun clearTimeline() {

@@ -56,6 +56,18 @@ class DesktopMcpTest {
         assertNotNull(mcp.currentSession().push)
     }
 
+    @Test fun `attach_device answers with the app's wording when no device surface is wired`() {
+        assertNull(mcp.currentSession().devices)
+        var out: kotlinx.serialization.json.JsonElement? = null
+        io.github.siddharthjaswal.logpose.mcp.McpTools.callAsync(
+            "attach_device", kotlinx.serialization.json.JsonObject(emptyMap()), emptyList(),
+            devices = mcp.currentSession().devices, unavailable = DesktopMcp.Unavailable,
+        ) { out = it }
+        val error = out!!.jsonObject["error"]!!.jsonPrimitive.content
+        assertTrue(error.contains("LogPose for Mac"), "was: $error")
+        assertFalse(error.contains("tool window"), "the app must not send the IDE's fix: $error")
+    }
+
     private fun post(port: Int, body: String, token: String?): String {
         val c = URI("http://127.0.0.1:$port/api/logpose/mcp").toURL().openConnection() as HttpURLConnection
         c.requestMethod = "POST"; c.doOutput = true
@@ -83,7 +95,7 @@ class DesktopMcpTest {
         val port = mcp.start(preferred = free)!!
         val tools = Json.parseToJsonElement(post(port, """{"jsonrpc":"2.0","id":1,"method":"tools/list"}""", null))
             .jsonObject["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(21, tools.size)
+        assertEquals(23, tools.size)
         val summary = call(port, "session_summary"); assertTrue(summary.contains("total_events"), summary)
         val refused = Json.parseToJsonElement(call(port, "session_summary", token = "wrong")).jsonObject["error"]!!.jsonObject
         assertEquals(-32001, refused["code"]!!.jsonPrimitive.content.toInt())

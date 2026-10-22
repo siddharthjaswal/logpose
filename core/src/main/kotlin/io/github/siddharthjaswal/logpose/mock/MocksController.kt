@@ -296,8 +296,22 @@ class MocksController(
 
     // ---- Push -----------------------------------------------------------------------------
 
-    /** Serializes the current rule set and pushes it to the device (off the EDT). */
-    fun pushNow() = push(isRetry = false)
+    /**
+     * Serializes the current rule set and pushes it to the device (off the EDT).
+     *
+     * [supersede] moves to a fresh revision first, so this push outranks anything this controller
+     * broadcast before it. A restart needs that: the stop's fail-safe empty set travels on its own
+     * thread and can reach the device after this push, and the device ignores only a set *older*
+     * than the one it holds — at an equal revision the late empty set would win.
+     */
+    fun pushNow(supersede: Boolean = false) {
+        if (supersede && live.get() && synchronized(this) { pkg } != null) {
+            val rev = synchronized(this) { nextRevision() }
+            sync.onLocalRevision(rev)
+            persistRevision()
+        }
+        push(isRetry = false)
+    }
 
     /**
      * [isRetry] marks a re-push the sync state machine asked for, so a revision bump on the way

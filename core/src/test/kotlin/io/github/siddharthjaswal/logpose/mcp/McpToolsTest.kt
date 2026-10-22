@@ -779,7 +779,7 @@ class McpToolsTest {
                 "list_events", "get_event", "get_trace", "get_related", "list_correlation_keys",
                 "await_event", "find_failures",
                 "session_summary", "query_hotspots", "worker_history", "config_changes",
-                "analytics_events", "clear_capture",
+                "analytics_events", "clear_capture", "list_devices", "attach_device",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
                 "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
             ),
@@ -790,7 +790,7 @@ class McpToolsTest {
         assertEquals(
             setOf(
                 "await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
-                "get_related", "list_correlation_keys",
+                "get_related", "list_correlation_keys", "list_devices", "attach_device",
             ),
             names.filter { McpTools.isAsync(it) }.toSet(),
         )
@@ -1057,9 +1057,10 @@ class McpToolsTest {
         scenarios: McpTools.Scenarios? = null,
         correlations: McpTools.Correlations? = null,
         capturing: Boolean = true,
+        devices: McpTools.Devices? = null,
     ): Answer = Answer().also { answer ->
         McpTools.callAsync(
-            name, args, events, push, waits, scenarios, correlations,
+            name, args, events, push, waits, scenarios, correlations, devices,
             captureRunning = { capturing }, now = { clock }, onResult = answer::accept,
         )
     }
@@ -1166,6 +1167,8 @@ class McpToolsTest {
         assertTrue(callAsync("save_scenario").get().containsKey("error"))
         assertTrue(callAsync("get_related").get().containsKey("error"))
         assertTrue(callAsync("list_correlation_keys").get().containsKey("error"))
+        assertTrue(callAsync("list_devices").get().containsKey("error"))
+        assertTrue(callAsync("attach_device").get().containsKey("error"))
     }
 
     // ---- inject_fcm ----------------------------------------------------------------------------
@@ -1880,5 +1883,148 @@ class McpToolsTest {
         val id = out["id"]!!.jsonPrimitive.content
         assertEquals(id, push.sent!!.message.messageId)
         assertNotEquals("fcm-1", id, "a replay is a new message, or the app's own dedup swallows it")
+    }
+
+    // ---- list_devices / attach_device ---------------------------------------------------------
+
+    /** A host's device surface, driven by the test: adb's answer is fixed, attaches are recorded. */
+    private class FakeDevices(
+        var adb: List<io.github.siddharthjaswal.logpose.logcat.Adb.DeviceInfo>,
+        var current: McpTools.Devices.Current = McpTools.Devices.Current(null, attached = false),
+        val report: (String) -> McpTools.Devices.AttachReport = { McpTools.Devices.AttachReport(it, mocksArmed = true, activeRules = 2) },
+    ) : McpTools.Devices {
+        val attached = mutableListOf<String>()
+        override fun current() = current
+        override fun list(onResult: (List<io.github.siddharthjaswal.logpose.logcat.Adb.DeviceInfo>) -> Unit) = onResult(adb)
+        override fun attach(serial: String, onResult: (McpTools.Devices.AttachReport) -> Unit) {
+            attached += serial
+            onResult(report(serial))
+        }
+    }
+
+    private fun device(serial: String, state: String = "device", model: String? = null) =
+        io.github.siddharthjaswal.logpose.logcat.Adb.DeviceInfo(serial, state, model)
+
+    private fun attach(devices: FakeDevices, serial: String? = null): JsonObject =
+        callAsync(
+            "attach_device",
+            buildJsonObject { serial?.let { put("serial", it) } },
+            devices = devices,
+        ).also { assertEquals(1, it.answers, "exactly one answer") }.get()
+
+    @Test fun `attach_device attaches the serial it is given`() {
+        val devices = FakeDevices(listOf(device("emulator-5554"), device("R58M", model = "SM_G991B")))
+        val out = attach(devices, "R58M")
+        assertEquals(listOf("R58M"), devices.attached)
+        assertTrue(out["attached"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("R58M", out["serial"]!!.jsonPrimitive.content)
+        assertEquals(2, out["devices"]!!.jsonArray.size)
+        assertEquals("waiting", out["previous"]!!.jsonObject["state"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `attach_device refuses a serial adb doesn't report, or can't read`() {
+        val devices = FakeDevices(listOf(device("emulator-5554"), device("R58M", state = "unauthorized")))
+        val missing = attach(devices, "nope")
+        assertFalse(missing["attached"]!!.jsonPrimitive.content.toBoolean())
+        assertTrue(missing["error"]!!.jsonPrimitive.content.contains("emulator-5554"), "names what IS there")
+        val unauthorized = attach(devices, "R58M")
+        assertTrue(unauthorized["error"]!!.jsonPrimitive.content.contains("USB-debugging"))
+        assertTrue(devices.attached.isEmpty())
+    }
+
+    @Test fun `attach_device with nothing connected says so plainly`() {
+        val devices = FakeDevices(emptyList())
+        val out = attach(devices)
+        assertFalse(out["attached"]!!.jsonPrimitive.content.toBoolean())
+        assertTrue(out["error"]!!.jsonPrimitive.content.contains("boot the emulator"))
+        assertTrue(devices.attached.isEmpty())
+
+        // Present but not ready is not "nothing": the state is reported, and nothing attaches.
+        val offline = attach(FakeDevices(listOf(device("emulator-5554", state = "offline"))))
+        assertTrue(offline["error"]!!.jsonPrimitive.content.contains("offline"))
+    }
+
+    @Test fun `attach_device takes the only connected device`() {
+        val devices = FakeDevices(listOf(device("emulator-5554"), device("R58M", state = "offline")))
+        val out = attach(devices)
+        assertEquals(listOf("emulator-5554"), devices.attached, "the offline one isn't a candidate")
+        assertTrue(out["attached"]!!.jsonPrimitive.content.toBoolean())
+    }
+
+    @Test fun `attach_device won't guess between several devices`() {
+        val devices = FakeDevices(listOf(device("emulator-5554"), device("emulator-5556")))
+        val out = attach(devices)
+        assertTrue(devices.attached.isEmpty())
+        assertFalse(out["attached"]!!.jsonPrimitive.content.toBoolean())
+        assertTrue(out["error"]!!.jsonPrimitive.content.contains("pass serial"))
+        assertEquals(listOf("emulator-5554", "emulator-5556"), out["devices"]!!.jsonArray.map { it.jsonObject["serial"]!!.jsonPrimitive.content })
+    }
+
+    @Test fun `attach_device re-attaches the current device even when others are connected`() {
+        val devices = FakeDevices(
+            listOf(device("emulator-5554"), device("emulator-5556")),
+            current = McpTools.Devices.Current("emulator-5556", attached = false),
+        )
+        val out = attach(devices)
+        assertEquals(listOf("emulator-5556"), devices.attached)
+        assertTrue(out["restarted"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("emulator-5556", out["previous"]!!.jsonObject["serial"]!!.jsonPrimitive.content)
+
+        // The current device gone: it falls back to the lone ready one rather than refusing.
+        val gone = FakeDevices(listOf(device("R58M")), current = McpTools.Devices.Current("emulator-5556", attached = false))
+        attach(gone)
+        assertEquals(listOf("R58M"), gone.attached)
+    }
+
+    @Test fun `attach_device reports the mock re-push honestly`() {
+        fun mocks(report: McpTools.Devices.AttachReport): JsonObject =
+            attach(FakeDevices(listOf(device("emu")), report = { report }))
+
+        val now = mocks(McpTools.Devices.AttachReport("emu", mocksArmed = true, pushedNow = true, activeRules = 3))
+        assertEquals("now", now["mocks"]!!.jsonObject["re_pushed"]!!.jsonPrimitive.content)
+        assertEquals(3, now["mocks"]!!.jsonObject["active_rules"]!!.jsonPrimitive.int())
+
+        val later = mocks(McpTools.Devices.AttachReport("emu", mocksArmed = true, activeRules = 3))
+        assertEquals("on_next_hello", later["mocks"]!!.jsonObject["re_pushed"]!!.jsonPrimitive.content)
+        assertTrue(later["note"]!!.jsonPrimitive.content.contains("hello"))
+
+        val readOnly = mocks(McpTools.Devices.AttachReport("emu", mocksArmed = false, activeRules = 3))
+        assertEquals("no", readOnly["mocks"]!!.jsonObject["re_pushed"]!!.jsonPrimitive.content)
+        assertTrue(readOnly["note"]!!.jsonPrimitive.content.contains("read-only"))
+
+        val cleared = mocks(McpTools.Devices.AttachReport("emu", clearedTimeline = true))
+        assertTrue(cleared["timeline_cleared"]!!.jsonPrimitive.content.toBoolean())
+
+        val failed = mocks(McpTools.Devices.AttachReport("emu", error = "a capture file is open"))
+        assertFalse(failed["attached"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("a capture file is open", failed["error"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `list_devices reports adb's view and the capture, and attaches nothing`() {
+        val devices = FakeDevices(
+            listOf(device("emulator-5554", model = "Pixel_9a"), device("R58M", state = "unauthorized")),
+            current = McpTools.Devices.Current("emulator-5554", attached = true),
+        )
+        val out = callAsync("list_devices", devices = devices).get()
+        assertTrue(devices.attached.isEmpty())
+        assertEquals("attached", out["capture"]!!.jsonObject["state"]!!.jsonPrimitive.content)
+        val first = out["devices"]!!.jsonArray[0].jsonObject
+        assertEquals("Pixel_9a", first["model"]!!.jsonPrimitive.content)
+        assertTrue(first["capturing"]!!.jsonPrimitive.content.toBoolean())
+        assertEquals("unauthorized", out["devices"]!!.jsonArray[1].jsonObject["state"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `a stopped capture points at attach_device only where the host offers it`() {
+        val devices = FakeDevices(listOf(device("emu")))
+        val withDevices = callAsync("await_event", waits = FakeWaits(), capturing = false, devices = devices).get()
+        assertTrue(withDevices["note"]!!.jsonPrimitive.content.contains("attach_device"))
+        val without = callAsync("await_event", waits = FakeWaits(), capturing = false).get()
+        assertTrue(without["note"]!!.jsonPrimitive.content.contains("Press ▶"))
+
+        val summary = McpTools.call(
+            "session_summary", JsonObject(emptyMap()), emptyList(), { 0 }, true,
+            captureRunning = { false }, devices = devices,
+        ).jsonObject
+        assertTrue(summary["capture"]!!.jsonObject["note"]!!.jsonPrimitive.content.contains("attach_device"))
     }
 }

@@ -6,6 +6,30 @@ format may still change.
 
 ## [Unreleased]
 
+### Added — `attach_device`: an agent can reattach capture itself
+
+When the emulator reboots or adb drops, capture stops — and until now only a human pressing ▶ (or
+picking the device) could bring it back, while mocks created meanwhile sat "synced" on the host
+and never reached the app.
+
+- **`attach_device`** (MCP) stops the current capture and starts a new one on a device: logcat
+  tailing, the reverse channel, and — where that host owns the device's mock rules — the rule push,
+  so existing mocks apply again. Without `serial` it re-attaches the current device if it is
+  connected, else the only connected one; with several connected it attaches nothing and lists
+  them. The result says which device it attached, what capture was doing before, and whether the
+  rules went out now or will on the app's next hello. LogPose for Mac starts a new timeline on every
+  attach, as its Start does, and says so.
+- **`list_devices`** (MCP, read-only): what `adb devices -l` reports, and which device capture is on.
+- Every "capture is stopped" note (`session_summary`, `list_events`, `await_event`, `load_scenario`)
+  now points at `attach_device`, and so do the server's connect instructions. 23 tools in all.
+- Wired in all three hosts: the tool window (its device picker + ▶, adb off the EDT), LogPose for
+  Mac (its device menu + Start — the window follows the switch) and `logpose serve` (attaches now
+  instead of waiting out the backoff; a read-only daemon attaches but never pushes rules).
+- **Fixed:** a back-to-back Stop/Start in LogPose for Mac could let the old session's fail-safe
+  clear land after the new session armed — leaving the phone without its rules, or clearing the
+  wrong phone after a device switch. The re-push after a restart now also goes out at a fresh
+  revision, so a late empty set can't override it.
+
 ### Changed — LogPose for Mac: the window, redesigned
 
 - **No device sidebar.** The device in focus is a chip at the left of the toolbar; click it or press

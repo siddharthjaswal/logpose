@@ -56,6 +56,8 @@ object McpSessions {
          * simply reports the single surviving state.
          */
         val workerTransitions: McpTools.WorkerTransitions = McpTools.WorkerTransitions { emptyList() },
+        /** Device listing and capture (re)attach for `attach_device`; null where the host can't. */
+        val devices: McpTools.Devices? = null,
     )
 
     private const val TOKEN_KEY = "logpose.mcp.token"

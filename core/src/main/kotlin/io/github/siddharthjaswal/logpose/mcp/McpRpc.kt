@@ -149,7 +149,9 @@ class McpRpc(
                     "create_mock changes what a request returns, inject_fcm delivers a push that " +
                     "starts a flow, and await_event waits for the result instead of polling — so " +
                     "a check reads mock → inject → await → assert. Those three change what the " +
-                    "running app receives; the timeline always shows which rows they produced.",
+                    "running app receives; the timeline always shows which rows they produced. If " +
+                    "capture has stopped (an emulator reboot, an adb drop), attach_device " +
+                    "reattaches it.",
             )
         }
     }
@@ -172,6 +174,7 @@ class McpRpc(
                 clearCapture = session.clearCapture,
                 workerTransitions = session.workerTransitions,
                 unavailable = unavailable,
+                devices = session.devices,
             )
         }.getOrElse { e -> return failed(name, e) }
         return toolResult(json.encodeToString(JsonElement.serializer(), payload), isError = false)
@@ -208,6 +211,7 @@ class McpRpc(
                 waits = session.waits,
                 scenarios = session.scenarios,
                 correlations = session.correlations,
+                devices = session.devices,
                 captureRunning = session.captureRunning,
                 unavailable = unavailable,
             ) { payload ->

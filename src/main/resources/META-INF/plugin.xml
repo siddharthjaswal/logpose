@@ -121,6 +121,10 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Agents can reattach capture</b> — two new MCP tools (23 total).
+                <code>attach_device</code> restarts capture on a device (or moves it to another) the
+                way ▶ and the device picker do, and re-pushes your mock rules — for when an emulator
+                reboot or an adb drop stopped it. <code>list_devices</code> shows what adb sees.</li>
             <li><b>Abandoned, not "in flight" forever.</b> A request whose app run is over — a newer
                 run of the app announced itself, or the device dropped — now reads
                 <i>abandoned · app restarted</i>: muted, no spinner, and counted apart from

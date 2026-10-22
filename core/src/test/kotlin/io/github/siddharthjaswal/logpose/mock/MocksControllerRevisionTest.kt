@@ -68,6 +68,33 @@ class MocksControllerRevisionTest {
     // ---- Revision -----------------------------------------------------------------------------
 
     @Test
+    fun `a superseding push after a restart outranks the stop's empty set`() {
+        val c = controller(localRevision = 3)
+        c.onCaptureStarted()
+        c.onControl(hello(rev = 3, count = 1)) // in sync: nothing to push
+        sent.clear()
+
+        // attach_device's restart: the fail-safe clear, then the rules again. The two broadcasts
+        // travel on separate threads, so the rules must not share the empty set's revision.
+        c.onCaptureStopped()
+        c.onCaptureStarted()
+        c.pushNow(supersede = true)
+
+        val (empty, rules) = sent.toList()
+        assertEquals(0, empty.rules.size)
+        assertEquals(1, rules.rules.size)
+        assertTrue(rules.revision > empty.revision, "revisions were ${revisions()}")
+
+        // Unarmed, a superseding push is still no push — and burns no revision.
+        val before = store.get(REVISION_KEY)
+        c.onCaptureStopped()
+        sent.clear()
+        c.pushNow(supersede = true)
+        assertEquals(emptyList<MockRuleSet>(), sent)
+        assertEquals(before?.toInt()?.plus(1)?.toString(), store.get(REVISION_KEY), "only the stop's bump")
+    }
+
+    @Test
     fun `a writer behind the device pushes strictly above the device's revision and persists it`() {
         val c = controller(localRevision = 3)
         c.onCaptureStarted()

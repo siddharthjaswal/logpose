@@ -90,4 +90,23 @@ class AdvancedControllerTest {
         assertFalse(c.mocks.deviceState().capturing)
         eventually("persisted off") { settings.get(MockWriter.ADVANCED_KEY) == null }
     }
+
+    @Test fun `a restart's arm waits for the previous session's release`() {
+        val c = controller()
+        c.setAdvanced(true)
+        c.setWriter("emu", true)
+        eventually("persisted") { settings.get(MockWriter.WRITERS_KEY) == "emu" }
+        running = "emu"
+        c.started("emu")
+        eventually("armed") { c.mocks.deviceState().capturing }
+        // Back to back, as attach_device restarts: both hops go to IO's pool. The interleaving that
+        // loses (release after arm) depends on IO scheduling and won't reproduce on demand, so this
+        // guards the end state rather than forcing the race.
+        c.ended("emu")
+        c.started("emu")
+        eventually("re-armed") { c.mocks.deviceState().capturing }
+        Thread.sleep(150)
+        assertTrue(c.mocks.deviceState().capturing, "a late release must not disarm the new session")
+        c.ended("emu")
+    }
 }

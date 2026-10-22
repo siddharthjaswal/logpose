@@ -20,6 +20,7 @@ import io.github.siddharthjaswal.logpose.model.Transaction
 import io.github.siddharthjaswal.logpose.settings.KeyValueStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -94,6 +95,13 @@ class AdvancedController(
     /** Whether the controller is armed (pushes) for the session in progress. */
     @Volatile private var armed = false
 
+    /**
+     * The last [ended]'s IO work. A restart (Stop then Start back to back — `attach_device` does
+     * exactly that) launches both on IO's pool, and without this the old session's release could
+     * land after the new one's arm: disarmed, with the phone's rules cleared.
+     */
+    @Volatile private var lastEnd: Job? = null
+
     val scenarioStore: ScenarioStore get() = ScenarioStore(location.scenariosDir)
 
     init {
@@ -160,7 +168,8 @@ class AdvancedController(
 
     override fun started(serial: String) {
         mocks.deviceSerial = serial
-        if (MockWriter.armsDevice(mode(serial))) scope.launch(Dispatchers.IO) { arm(serial) }
+        val prior = lastEnd
+        if (MockWriter.armsDevice(mode(serial))) scope.launch(Dispatchers.IO) { prior?.join(); arm(serial) }
         refresh()
     }
 
@@ -169,8 +178,8 @@ class AdvancedController(
 
     override fun ended(serial: String) {
         val clear = armed && MockWriter.clearsOnStop(mode(serial))
-        scope.launch(Dispatchers.IO) {
-            if (clear) release() else armed = false
+        lastEnd = scope.launch(Dispatchers.IO) {
+            if (clear) release(serial) else armed = false
             push.reset()
             refresh()
         }
@@ -180,13 +189,18 @@ class AdvancedController(
         mocks.deviceSerial = serial
         armed = true
         mocks.onCaptureStarted()
-        // A device that already said hello this session won't say it again: push now.
-        if (mocks.deviceState().helloSeen) mocks.pushNow()
+        // A device that already said hello this session won't say it again: push now — above the
+        // revision of a just-ended session's empty set, which may still be in flight.
+        if (mocks.deviceState().helloSeen) mocks.pushNow(supersede = true)
         refresh()
     }
 
-    /** The empty-set broadcast — only ever reached as the writer. */
-    private fun release() {
+    /**
+     * The empty-set broadcast — only ever reached as the writer. [serial] pins it to the device
+     * that session was on: a restart's [started] has already pointed the controller at the next one.
+     */
+    private fun release(serial: String? = null) {
+        serial?.let { mocks.deviceSerial = it }
         armed = false
         mocks.onCaptureStopped()
         refresh()

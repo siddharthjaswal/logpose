@@ -34,8 +34,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Threading: one reader thread (owned by [LogcatReader]) does parse → correlate → store, exactly
  * as the panel does it, so a cache hit is waiting for the first read of any row. One scheduler
- * thread runs the reattach timer. Nothing here is called from the HTTP threads except
- * [isRunning] and [store].
+ * thread runs the reattach timer — and `attach_device`'s [attachTo], so an agent's attach and a
+ * pending retry never run [attach] concurrently. Nothing else here is called from the HTTP threads
+ * except [isRunning], [attachedSerial] and [store].
  */
 class Capture(
     private val options: Cli.ServeOptions,
@@ -82,7 +83,16 @@ class Capture(
 
     private val active = AtomicBoolean(false)
     @Volatile private var reader: LogcatReader? = null
-    @Volatile private var attachedSerial: String? = null
+    /** The serial being tailed; null when adb's default device is (or nothing yet). */
+    @Volatile var attachedSerial: String? = null
+        private set
+    /** A device `attach_device` picked — overrides `--device` from then on, retries included. */
+    @Volatile private var chosenSerial: String? = null
+    /**
+     * Bumped by [attachTo]. A reader's onStopped and a queued retry only act for the generation
+     * they were armed in, so the reader an agent replaced can't schedule a second, competing one.
+     */
+    @Volatile private var generation = 0
     @Volatile private var sawAnyLine = false
     private var backoffMillis = MIN_BACKOFF_MS
 
@@ -193,10 +203,11 @@ class Capture(
         // device, and quietly tailing a different one would hand a CI job another device's
         // verdicts. So the mismatch is refused here, before the choice is made, and retried like
         // any other absent device (the named one may still be booting).
-        val wanted = options.device
+        val wanted = chosenSerial ?: options.device
         if (wanted != null && ready.isNotEmpty() && ready.none { it.serial == wanted }) {
+            val asked = if (chosenSerial != null) "attach_device's $wanted" else "--device $wanted"
             log.stateChange(
-                "--device $wanted is not attached (adb reports ${ready.joinToString { it.serial }})" +
+                "$asked is not attached (adb reports ${ready.joinToString { it.serial }})" +
                     " — waiting for it, retrying in ${backoffMillis / 1000}s"
             )
             retryLater()
@@ -223,6 +234,7 @@ class Capture(
 
         val current = LogcatReader(deviceSerial = serial, clearOnStart = options.clear)
         reader = current
+        val gen = generation
         current.start(
             onLine = { line ->
                 if (!sawAnyLine) {
@@ -247,8 +259,9 @@ class Capture(
             onError = { msg -> log.warn("capture error: $msg") },
             onStopped = {
                 // `active` is cleared by stop() before reader.stop(), so if it is still set the
-                // stream ended on its own — a device drop, an app reinstall, an adb restart.
-                if (active.get()) {
+                // stream ended on its own — a device drop, an app reinstall, an adb restart. A
+                // stale generation means attachTo() replaced this reader on purpose.
+                if (active.get() && gen == generation) {
                     // Open spans can't be seen finishing any more; hearing from the same run after
                     // the reattach clears the mark.
                     store.noteDeviceGone()
@@ -264,9 +277,53 @@ class Capture(
         if (!active.get()) return
         val delay = backoffMillis
         backoffMillis = (backoffMillis * 2).coerceAtMost(MAX_BACKOFF_MS)
+        val gen = generation
         runCatching {
-            scheduler.schedule({ if (active.get()) attach() }, delay, TimeUnit.MILLISECONDS)
+            scheduler.schedule({ if (active.get() && gen == generation) attach() }, delay, TimeUnit.MILLISECONDS)
         }
+    }
+
+    /**
+     * `attach_device`: tail [serial] now — restarting the stream if it is the current device —
+     * instead of waiting out the backoff. Runs on the scheduler thread, after any retry already
+     * running there; the generation bump voids the replaced reader's onStopped and any retry still
+     * queued, so exactly one reader is left tailing.
+     *
+     * Mock rules are re-pushed only by the writer (`--mocks`), and only now when the app has
+     * already said hello — otherwise they go out on its next one, as at startup. A read-only daemon
+     * never broadcasts, so attaching is safe from it too.
+     *
+     * [onDone] gets null on success, or why capture didn't attach — exactly once, off the caller's
+     * thread.
+     */
+    fun attachTo(serial: String, onDone: (String?) -> Unit) {
+        if (openedFile != null) {
+            onDone("This daemon is serving a capture file (--open), not a device — restart it without --open to capture.")
+            return
+        }
+        if (!active.get()) {
+            onDone("This daemon's capture isn't running (it is shutting down, or failed to start) — check its stderr.")
+            return
+        }
+        val queued = runCatching {
+            scheduler.execute {
+                val outcome = runCatching {
+                    chosenSerial = serial
+                    generation++
+                    reader?.stop()
+                    reader = null
+                    sawAnyLine = false
+                    backoffMillis = MIN_BACKOFF_MS
+                    log.stateChange("attach_device: (re)attaching to $serial")
+                    attach()
+                    if (options.mocks && mocks.deviceState().helloSeen) mocks.pushNow()
+                    if (attachedSerial == serial && reader?.isRunning() == true) null
+                    else "adb wouldn't stream from $serial — check the daemon's stderr; it keeps retrying."
+                }
+                onDone(outcome.getOrElse { "attach failed: ${it.message ?: it::class.java.simpleName}" })
+            }
+        }
+        if (queued.isFailure) onDone("This daemon is shutting down.")
     }
 
     /**

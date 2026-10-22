@@ -783,11 +783,12 @@ claude mcp add --transport http logpose http://localhost:63342/api/logpose/mcp \
   --header "X-LogPose-Token: <your project token>"
 ```
 
-**Tools (21).**
+**Tools (23).**
 
 | Group | Tools |
 |---|---|
 | **Read the capture** | `list_events`, `get_event`, `get_trace`, `find_failures`, `session_summary`, `clear_capture` |
+| **Keep capture attached** | `list_devices`, `attach_device` |
 | **Follow one id** | `get_related`, `list_correlation_keys` |
 | **Diagnose the other kinds** | `query_hotspots`, `worker_history`, `config_changes`, `analytics_events` |
 | **Change what the app receives** | `list_mocks`, `create_mock`, `set_mock_enabled`, `delete_mock` |
@@ -821,6 +822,9 @@ copied command, since a second IDE gets the next free port). A few things worth 
 - **Every call is authenticated** with a per-project token, which also selects *which* open
   project's capture to serve. Captures contain auth tokens and user data, and that port is
   reachable by any local process.
+- **`attach_device` changes what LogPose captures.** It restarts capture (or moves it to another
+  device) the way ▶ and the device picker do — for when an emulator reboot or an adb drop stopped
+  it and nobody is at the window. It re-pushes the mock rules, so they apply again.
 - **`create_mock` changes what the running app receives.** Your MCP client asks before each
   call, rules show up in the Mocks strip like any other, and everything clears from the device
   when capture stops.
@@ -830,7 +834,7 @@ copied command, since a second IDE gets the next free port). A few things worth 
 ## Run headless (`logpose serve`)
 
 Everything above assumes an IDE is open. It doesn't have to be. `logpose serve` is the same
-capture and the **same 21 MCP tools** in a plain JVM process — no tool window, no timeline, no
+capture and the **same 23 MCP tools** in a plain JVM process — no tool window, no timeline, no
 IntelliJ on the classpath — for an agent driving a device from a terminal, a QA laptop, or CI.
 
 Build it, then run it against the directory you want `.logpose/` anchored in:
@@ -879,7 +883,7 @@ answer normally, while `create_mock`, `set_mock_enabled`, `delete_mock`, `load_s
 ### What it honestly doesn't have
 
 No UI — no timeline, no filter bar, no waterfall rendering, no mock dialog, no diff view, no
-endpoint muting. Everything else is there: all 21 tools, mocks, push injection, correlation and
+endpoint muting. Everything else is there: all 23 tools, mocks, push injection, correlation and
 `await_event`.
 
 Two seams are worth knowing:

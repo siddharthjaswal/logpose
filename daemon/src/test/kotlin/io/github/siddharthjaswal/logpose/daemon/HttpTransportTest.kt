@@ -132,7 +132,7 @@ class HttpTransportTest {
         val response = post("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""", withToken = null)
         assertEquals(200, response.status)
         val tools = response.json["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(21, tools.size, "the daemon must expose the same 21 tools as the plugin")
+        assertEquals(23, tools.size, "the daemon must expose the same 23 tools as the plugin")
     }
 
     @Test

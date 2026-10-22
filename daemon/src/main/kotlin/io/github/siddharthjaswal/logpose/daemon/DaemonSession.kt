@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.daemon
 
 import io.github.siddharthjaswal.logpose.analysis.Correlation
 import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
+import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.mcp.McpRpc
 import io.github.siddharthjaswal.logpose.mcp.McpSessions
 import io.github.siddharthjaswal.logpose.mcp.McpTools
@@ -70,6 +71,9 @@ class DaemonSession(
         workerTransitions = McpTools.WorkerTransitions {
             capture.workerLifecycle.transitions(capture.workerLifecycle.keyOf(it))
         },
+        // Attaching changes what the daemon reads, not what the device holds, so it is offered
+        // read-only too; Capture.attachTo re-pushes rules only under --mocks.
+        devices = DaemonDevices(),
     )
 
     /** One capture, so the token is pure authentication — it no longer selects anything. */
@@ -81,7 +85,42 @@ class DaemonSession(
         override fun hasSessions(): Boolean = true
     }
 
-    // ---- the four write/read surfaces ----------------------------------------------------------
+    // ---- the write/read surfaces ---------------------------------------------------------------
+
+    /**
+     * `list_devices` / `attach_device` over [Capture]. The daemon already reattaches on its own
+     * backoff; this lets an agent do it now, or move capture to another device.
+     */
+    private inner class DaemonDevices(
+        private val adbDevices: () -> List<Adb.DeviceInfo> = { Adb.devices() },
+    ) : McpTools.Devices {
+        override fun current() = McpTools.Devices.Current(
+            serial = capture.attachedSerial ?: options.device,
+            attached = capture.isRunning(),
+        )
+
+        override fun list(onResult: (List<Adb.DeviceInfo>) -> Unit) {
+            pool.execute { onResult(adbDevices()) }
+        }
+
+        override fun attach(serial: String, onResult: (McpTools.Devices.AttachReport) -> Unit) {
+            capture.attachTo(serial) { error ->
+                val device = capture.mocks.deviceState()
+                onResult(
+                    McpTools.Devices.AttachReport(
+                        serial = serial,
+                        error = error,
+                        mocksArmed = options.mocks,
+                        pushedNow = options.mocks && device.helloSeen,
+                        activeRules = capture.mocks.activeCount(),
+                        deviceHint = DaemonMocks().deviceHint(),
+                        note = if (options.mocks) null else "Restart the daemon with --mocks to make it the " +
+                            "device's mock writer.",
+                    )
+                )
+            }
+        }
+    }
 
     private inner class DaemonMocks : McpTools.Mocks {
         override fun writable() = options.mocks
@@ -282,6 +321,8 @@ class DaemonSession(
                 ".logpose/scenarios, which is shared with the IDE.",
             correlations = "Correlation isn't available — this LogPose daemon has no capture " +
                 "wired. Check its stderr.",
+            devices = "Re-attaching isn't available — this LogPose daemon has no capture wired. " +
+                "Check its stderr.",
         )
 
         /** The daemon's 401 texts: same wire shape as the IDE's, different fix — there is no tool

@@ -56,7 +56,7 @@ class McpHttpTransportTest {
         val (status, body) = call("""{"jsonrpc":"2.0","id":1,"method":"tools/list"}""", token)
         assertEquals(200, status)
         val tools = Json.parseToJsonElement(body).jsonObject["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(21, tools.size)
+        assertEquals(23, tools.size)
     }
 
     @Test

@@ -47,6 +47,10 @@ class OpenFileTest {
         assertEquals(1, capture.store.sessions().size)
         assertEquals("file", capture.state())
         assertFalse(capture.isRunning())
+        // attach_device has no device to move to: it says why instead of touching adb.
+        var refusal: String? = null
+        capture.attachTo("emulator-5554") { refusal = it }
+        assertTrue(refusal!!.contains("--open"), "was: $refusal")
         capture.stop(clearDeviceRules = false)
     }
 

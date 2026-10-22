@@ -204,7 +204,7 @@ class DaemonSessionTest {
     @Test
     fun `the daemon's not-available wording never mentions the tool window`() {
         val words = DaemonSession.Unavailable
-        listOf(words.mocks, words.push, words.scenarios, words.waits, words.correlations)
+        listOf(words.mocks, words.push, words.scenarios, words.waits, words.correlations, words.devices)
             .forEach { assertFalse(it.contains("tool window"), "was: $it") }
         listOf(words.mocks, words.push, words.scenarios)
             .forEach { assertTrue(it.contains("--mocks"), "a write refusal must name the flag: $it") }
@@ -225,5 +225,24 @@ class DaemonSessionTest {
         assertFalse(DaemonSession.constantTimeEquals("abc", "abd"))
         assertFalse(DaemonSession.constantTimeEquals("abc", "abcd"))
         assertFalse(DaemonSession.constantTimeEquals("", "a"))
+    }
+
+    @Test
+    fun `attach_device is offered read-only too — attaching moves what the daemon reads, not the device's rules`() {
+        for (mocks in listOf(false, true)) {
+            val devices = sessionFor(mocks = mocks).devices
+            assertNotNull(devices, "--mocks=$mocks")
+            assertFalse(devices!!.current().attached, "nothing is tailed before start()")
+        }
+    }
+
+    @Test
+    fun `attachTo answers once with why, when capture isn't running`() {
+        val capture = Capture(options(mocks = false), KeyValueStore.InMemory(), KeyValueStore.InMemory(), log)
+        val answers = mutableListOf<String?>()
+        capture.attachTo("emulator-5554") { answers += it }
+        assertEquals(1, answers.size)
+        assertTrue(answers.single()!!.contains("isn't running"), "was: ${answers.single()}")
+        assertNull(capture.attachedSerial, "a refused attach changes nothing")
     }
 }

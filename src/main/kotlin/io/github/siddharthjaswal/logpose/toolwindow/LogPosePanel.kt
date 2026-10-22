@@ -359,6 +359,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     // which lives on the EDT.
     @Volatile private var captureActive = false
 
+    /** The serial the running capture resolved to (null = adb's default) — for attach_device. */
+    @Volatile private var capturingSerial: String? = null
+
     /**
      * Non-null while a capture file is open read-only (*Open Capture File…*): its name. Live capture,
      * Clear, push and mock writes are off while it is set; *Back to live capture* clears it.
@@ -420,6 +423,8 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 workerTransitions = McpTools.WorkerTransitions {
                     workerLifecycle.transitions(workerLifecycle.keyOf(it))
                 },
+                // The device picker and ▶, for an agent whose capture stopped (emulator reboot).
+                devices = McpDevices(),
             ),
         )
 
@@ -742,7 +747,12 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      */
     private var captureGeneration = 0
 
-    private fun startCapture() {
+    /**
+     * [onStarted] (EDT) gets the serial the reader attached to once the off-EDT resolution lands
+     * — null for adb's default device, or when a stop overtook this start — so a caller that must
+     * answer for the attach (attach_device) learns where capture actually went.
+     */
+    private fun startCapture(onStarted: ((attached: Boolean, serial: String?) -> Unit)? = null) {
         parser.reset()
         helloRequester.reset()
         captureActive = true
@@ -758,9 +768,13 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             val choice = DeviceChoice.choose(selectedDeviceSerial, ready)
             SwingUtilities.invokeLater {
                 // Stopped (or stopped-and-restarted) before the serial resolved.
-                if (!captureActive || generation != captureGeneration) return@invokeLater
+                if (!captureActive || generation != captureGeneration) {
+                    onStarted?.invoke(false, null)
+                    return@invokeLater
+                }
                 knownDevices = ready
                 refreshDevicePickerLabel()
+                capturingSerial = choice.serial
                 mocksController.deviceSerial = choice.serial
                 reader = LogcatReader(deviceSerial = choice.serial)
                 mocksController.onCaptureStarted()
@@ -768,6 +782,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 attachReader()
                 scheduleRefresh()
                 choice.notice?.let { LogPoseNotifications.info(project, "LogPose: device", it) }
+                onStarted?.invoke(true, choice.serial)
             }
         }
     }
@@ -2110,6 +2125,64 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      * and popping a notification for it would put the agent's mistakes in the developer's face.
      * Real send failures still notify, because those are the developer's to fix.
      */
+    /**
+     * `attach_device` over the tool window: the device picker plus ▶, which is the whole path —
+     * pick, stop (the old device's fail-safe clear), start (reader, reverse channel, armed rules).
+     * The call arrives on a Netty IO thread: adb runs pooled and everything else hops to the EDT.
+     */
+    private inner class McpDevices : McpTools.Devices {
+        override fun current() = McpTools.Devices.Current(
+            serial = capturingSerial ?: selectedDeviceSerial,
+            attached = captureActive,
+        )
+
+        override fun list(onResult: (List<Adb.DeviceInfo>) -> Unit) {
+            com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+                onResult(runCatching { Adb.devices() }.getOrDefault(emptyList()))
+            }
+        }
+
+        override fun attach(serial: String, onResult: (McpTools.Devices.AttachReport) -> Unit) {
+            SwingUtilities.invokeLater {
+                runCatching { attachOnEdt(serial, onResult) }.onFailure {
+                    onResult(McpTools.Devices.AttachReport(serial, error = "LogPose couldn't attach: ${it.message ?: it}"))
+                }
+            }
+        }
+
+        private fun attachOnEdt(serial: String, onResult: (McpTools.Devices.AttachReport) -> Unit) {
+            if (viewingFile != null) {
+                onResult(McpTools.Devices.AttachReport(
+                    serial, error = "A capture file is open in the LogPose tool window — press Back to live capture there first.",
+                ))
+                return
+            }
+            if (serial != selectedDeviceSerial) {
+                selectedDeviceSerial = serial
+                DeviceSelection.setSerial(project, serial)
+                refreshDevicePickerLabel()
+            }
+            if (captureActive) stopCapture()
+            startCapture { attached, resolved ->
+                if (!attached || resolved != serial) {
+                    onResult(McpTools.Devices.AttachReport(serial, error = "Capture didn't start on $serial — it was stopped, or adb resolved another device."))
+                    return@startCapture
+                }
+                // The plugin pushes on the app's hello; one that already said it won't again, so the
+                // rules go now — above the stop's empty set, which may still be in flight.
+                val helloSeen = mocksController.deviceState().helloSeen
+                if (helloSeen) mocksController.pushNow(supersede = true)
+                onResult(McpTools.Devices.AttachReport(
+                    serial = serial,
+                    mocksArmed = true,
+                    pushedNow = helloSeen,
+                    activeRules = mocksController.activeCount(),
+                    deviceHint = McpMocks().deviceHint(),
+                ))
+            }
+        }
+    }
+
     private inner class McpPush : McpTools.Push {
         override fun deviceHint(): String {
             val device = mocksController.deviceState()

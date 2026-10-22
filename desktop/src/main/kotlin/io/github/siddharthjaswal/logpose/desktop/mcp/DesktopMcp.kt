@@ -60,6 +60,8 @@ class DesktopMcp(
     private val advanced: AdvancedController,
     private val projectName: () -> String,
     private val warn: (String) -> Unit = { System.err.println("[logpose-mcp] $it") },
+    /** `list_devices` / `attach_device`, over the window's device menu and Start (AppModel). */
+    private val devices: McpTools.Devices? = null,
 ) {
     private val _ui = MutableStateFlow(McpUi())
     val ui: StateFlow<McpUi> = _ui.asStateFlow()
@@ -134,6 +136,8 @@ class DesktopMcp(
         correlations = Correlations(),
         waits = McpTools.Waits { timeout, predicate -> session.store.addWaiter(timeout, predicate) },
         workerTransitions = McpTools.WorkerTransitions { session.workerLifecycle.transitions(session.workerLifecycle.keyOf(it)) },
+        // Offered read-only too: attaching changes what the app records; only the writer re-pushes.
+        devices = devices,
     )
 
     /** One capture, so the token is pure authentication. */
@@ -289,6 +293,8 @@ class DesktopMcp(
             scenarios = "Scenarios can't be loaded — LogPose for Mac is read-only on this phone's mocks. Turn on " +
                 "\"This app controls mocks\" in the app's Advanced section. list_scenarios and save_scenario work either way.",
             correlations = "Correlation isn't available — LogPose for Mac has no capture wired.",
+            devices = "Re-attaching isn't available — LogPose for Mac has no capture wired. Pick the device and " +
+                "press Start in the app.",
         )
 
         val AuthHint = McpRpc.AuthHint(

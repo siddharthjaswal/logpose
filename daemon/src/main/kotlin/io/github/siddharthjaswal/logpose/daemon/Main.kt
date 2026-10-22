@@ -11,7 +11,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
-/** `logpose serve` — LogPose's capture and all 21 MCP tools, with no IDE in the process. */
+/** `logpose serve` — LogPose's capture and all 23 MCP tools, with no IDE in the process. */
 fun main(args: Array<String>) {
     when (val command = Cli.parse(args.toList())) {
         is Cli.Command.Exit -> {

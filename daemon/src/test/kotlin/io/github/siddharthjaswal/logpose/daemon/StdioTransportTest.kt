@@ -120,7 +120,7 @@ class StdioTransportTest {
         h.send("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"session_summary","arguments":{}}}""")
 
         val lines = h.lines(2)
-        assertEquals(21, parse(lines[0])["result"]!!.jsonObject["tools"]!!.jsonArray.size)
+        assertEquals(23, parse(lines[0])["result"]!!.jsonObject["tools"]!!.jsonArray.size)
         // The call would be a 401 over HTTP without a header; here it just works.
         val call = parse(lines[1])
         assertNotNull(call["result"], "tools/call must not be gated on stdio: $call")
