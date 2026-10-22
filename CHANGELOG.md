@@ -6,6 +6,8 @@ format may still change.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-22
+
 ### Added — `attach_device`: an agent can reattach capture itself
 
 When the emulator reboots or adb drops, capture stops — and until now only a human pressing ▶ (or
