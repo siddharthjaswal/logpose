@@ -285,6 +285,7 @@ class EventStore(
         claimUnattributed(session)
         abandonSupersededBy(session)
         listeners.forEach { it() }
+        dispatchSessionWaiters(session)
     }
 
     /** Moves session-0 events from [session]'s pid into it — unless an earlier run owns that pid. */
@@ -459,6 +460,51 @@ class EventStore(
 
     /** Waiters parked right now — for the concurrency cap's error message and for tests. */
     fun waiterCount(): Int = waiters.size
+
+    private class SessionWaiter(
+        val predicate: (Session) -> Boolean,
+        val future: CompletableFuture<Session?>,
+    ) {
+        @Volatile var timeout: ScheduledFuture<*>? = null
+    }
+
+    private val sessionWaiters = CopyOnWriteArrayList<SessionWaiter>()
+
+    /**
+     * The run-level twin of [addWaiter]: completes with the first app run satisfying [predicate] —
+     * one already recorded, or the next one a hello announces — or with null after [timeoutMillis].
+     *
+     * A run is a hello, not an event, so [addWaiter] can't see it; this is how a host that just
+     * relaunched the app learns the new run's index without polling. Not capped like event waiters:
+     * only a host's own App action parks one, never an agent's free-form wait.
+     */
+    fun awaitSession(timeoutMillis: Long, predicate: (Session) -> Boolean): CompletableFuture<Session?> {
+        val waiter = SessionWaiter(predicate, CompletableFuture())
+        sessionWaiters.add(waiter)
+        // Registered before looking, so a hello landing in between is seen by one side or the other.
+        val existing = sessions().firstOrNull { runCatching { predicate(it) }.getOrDefault(false) }
+        if (existing != null) {
+            if (sessionWaiters.remove(waiter)) waiter.future.complete(existing)
+            return waiter.future
+        }
+        waiter.timeout = scheduler.schedule(
+            { if (sessionWaiters.remove(waiter)) completer.execute { waiter.future.complete(null) } },
+            timeoutMillis.coerceAtLeast(0),
+            TimeUnit.MILLISECONDS,
+        )
+        if (waiter.future.isDone) waiter.timeout?.cancel(false)
+        return waiter.future
+    }
+
+    private fun dispatchSessionWaiters(session: Session) {
+        if (sessionWaiters.isEmpty()) return
+        for (waiter in sessionWaiters) {
+            if (!runCatching { waiter.predicate(session) }.getOrDefault(false)) continue
+            if (!sessionWaiters.remove(waiter)) continue
+            waiter.timeout?.cancel(false)
+            completer.execute { waiter.future.complete(session) }
+        }
+    }
 
     private fun dispatchWaiters(event: LogEvent) {
         if (waiters.isEmpty()) return

@@ -11,6 +11,10 @@ import io.github.siddharthjaswal.logpose.analysis.KeyValue
 import io.github.siddharthjaswal.logpose.analysis.SqlSummary
 import io.github.siddharthjaswal.logpose.analysis.Suggestion
 import io.github.siddharthjaswal.logpose.analysis.WorkerLifecycle
+import io.github.siddharthjaswal.logpose.appcontrol.AppAction
+import io.github.siddharthjaswal.logpose.appcontrol.AppControl
+import io.github.siddharthjaswal.logpose.appcontrol.AppControlService
+import io.github.siddharthjaswal.logpose.appcontrol.AppTarget
 import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.mock.DeviceCapability
 import io.github.siddharthjaswal.logpose.mock.DeviceFeature
@@ -120,6 +124,9 @@ object McpTools {
      * changes. [Ide] is what the plugin sends and must not drift — every host that isn't the IDE
      * passes its own, so no host has to speak another's vocabulary.
      */
+    private const val IDE_APPS =
+        "Restarting or clearing the app isn't available — open the LogPose tool window for this project."
+
     data class Unavailable(
         val mocks: String,
         val waits: String,
@@ -128,6 +135,11 @@ object McpTools {
         val correlations: String,
         /** `list_devices` / `attach_device`: a host that can't (re)attach capture for an agent. */
         val devices: String,
+        /**
+         * `restart_app` / `clear_app_data`: a host with no device to act on, or one that is read-only
+         * on the device (the daemon without `--mocks`, the Mac app when it doesn't control mocks).
+         */
+        val apps: String = IDE_APPS,
     ) {
         companion object {
             val Ide = Unavailable(
@@ -138,6 +150,7 @@ object McpTools {
                     "directory on disk (scenarios live in .logpose/scenarios).",
                 correlations = "Correlation isn't available — open the LogPose tool window for this project.",
                 devices = "Re-attaching isn't available — open the LogPose tool window for this project and press ▶.",
+                apps = IDE_APPS,
             )
         }
     }
@@ -369,6 +382,37 @@ object McpTools {
         fun attach(serial: String, onResult: (AttachReport) -> Unit)
     }
 
+    /**
+     * Restart / clear the app being captured — `restart_app` and `clear_app_data`. Implemented once,
+     * by [AppControlService], which every host constructs over its own store and device.
+     *
+     * These change the device (the app is killed, its files deleted), so they are gated like mock
+     * writes: [writable] false on a host that must not touch the device, and the refusal then names
+     * that host's fix ([Unavailable.apps]).
+     */
+    interface Apps {
+        fun writable(): Boolean = true
+
+        /** The device actions run on; null when there's none. Cheap — no adb. */
+        fun serial(): String?
+
+        /** Which package an action would hit, given what the caller passed. Cheap — no adb. */
+        fun target(explicit: String?): AppTarget.Choice
+
+        /**
+         * Runs [action] off the caller's thread and answers once, after the app relaunched and
+         * announced its new run (or [awaitRunMillis] passed). MUST invoke [onResult] exactly once.
+         */
+        fun perform(
+            action: AppAction,
+            pkg: String,
+            options: AppControl.Options,
+            awaitRunMillis: Long,
+            progress: (String) -> Unit,
+            onResult: (AppControlService.Outcome) -> Unit,
+        )
+    }
+
     /** The tool catalogue, in MCP's `tools/list` shape. */
     fun catalogue(): JsonArray = buildJsonArray {
         add(
@@ -589,6 +633,53 @@ object McpTools {
                 put("serial", stringProp(
                     "adb serial to attach, e.g. 'emulator-5554' (list_devices shows them). Omit to " +
                         "re-attach the current device, or the only connected one.",
+                ))
+            }
+        )
+        add(
+            tool(
+                "restart_app",
+                "Force-stop the captured app and launch it again (am force-stop, then its launcher " +
+                    "activity) — THIS KILLS THE RUNNING APP. It comes back as a new app run: the old " +
+                    "run's open requests are marked abandoned, a 'Restarted by LogPose' row marks the " +
+                    "moment on the timeline, and the device's mock rules are re-pushed to the new run " +
+                    "by whichever host owns them. Returns the new run's session number once the app " +
+                    "re-announces itself. The target is the app capture has seen announce itself; " +
+                    "pass package when several have.",
+            ) {
+                put("package", stringProp(
+                    "Application id, exactly as installed, e.g. 'com.acme.app.debug'. Omit to use the " +
+                        "app this capture is recording.",
+                ))
+                put("await_ms", intProp(
+                    "How long to wait for the relaunched app to announce its new run (default " +
+                        "${DEFAULT_APP_AWAIT_MILLIS}, max ${MAX_APP_AWAIT_MILLIS}; 0 returns right after launch).",
+                ))
+            }
+        )
+        add(
+            tool(
+                "clear_app_data",
+                "Clear the captured app's data and relaunch it. scope='cache' deletes only its caches " +
+                    "(cache/, code_cache/, and the shared-storage cache) and keeps logins, databases and " +
+                    "files — it needs a debuggable build (run-as) and refuses, changing nothing, " +
+                    "otherwise. scope='all' is `pm clear`: IT LOGS THE APP OUT AND DELETES ITS " +
+                    "DATABASES, FILES AND SETTINGS, and resets its runtime permissions — say so before " +
+                    "using it. Either way the app is force-stopped first and comes back as a new run, " +
+                    "with a 'Cache cleared' / 'App data cleared' row on the timeline.",
+            ) {
+                put("scope", stringProp("'cache' or 'all'.", required = true))
+                put("package", stringProp(
+                    "Application id, exactly as installed. Omit to use the app this capture is recording.",
+                ))
+                put("regrant_permissions", boolProp(
+                    "scope='all' only: read the runtime permissions granted now and pm grant them back " +
+                        "after the clear, so the app doesn't start on permission prompts. Default false. " +
+                        "Special access (overlay, exact alarms, all-files) is not covered.",
+                ))
+                put("await_ms", intProp(
+                    "How long to wait for the relaunched app to announce its new run (default " +
+                        "${DEFAULT_APP_AWAIT_MILLIS}, max ${MAX_APP_AWAIT_MILLIS}).",
                 ))
             }
         )
@@ -827,6 +918,7 @@ object McpTools {
     private val ASYNC_TOOLS = setOf(
         "await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
         "get_related", "list_correlation_keys", "list_devices", "attach_device",
+        "restart_app", "clear_app_data",
     )
 
     fun isAsync(name: String): Boolean = name in ASYNC_TOOLS
@@ -850,6 +942,7 @@ object McpTools {
         captureRunning: () -> Boolean = { true },
         now: () -> Long = { System.currentTimeMillis() },
         unavailable: Unavailable = Unavailable.Ide,
+        apps: Apps? = null,
         onResult: (JsonElement) -> Unit,
     ) {
         // One answer per call, whichever path gets there first: a push that acks after its own
@@ -886,6 +979,19 @@ object McpTools {
                 if (devices == null) fail(unavailable.devices) else listDevices(devices, answer)
             "attach_device" ->
                 if (devices == null) fail(unavailable.devices) else attachDevice(args, devices, answer)
+            // These kill the app and delete its files, so a host that must not change the device
+            // refuses them outright — the same gate as a mock write.
+            "restart_app" ->
+                if (apps == null || !apps.writable()) fail(unavailable.apps)
+                else appAction(AppAction.RESTART, args, apps, answer)
+            "clear_app_data" ->
+                if (apps == null || !apps.writable()) fail(unavailable.apps)
+                else when (args.str("scope")?.trim()?.lowercase()) {
+                    "cache" -> appAction(AppAction.CLEAR_CACHE, args, apps, answer)
+                    "all" -> appAction(AppAction.CLEAR_DATA, args, apps, answer)
+                    null -> fail("Missing 'scope': 'cache' (keeps logins and databases) or 'all' (pm clear — logs the app out).")
+                    else -> fail("scope must be 'cache' or 'all'.")
+                }
             else -> fail("Unknown tool '$name'")
         }
     }
@@ -2098,6 +2204,111 @@ object McpTools {
         "unauthorized" -> "Accept the USB-debugging prompt on the device."
         "offline" -> "It is still booting or adb lost it — wait a moment, or run `adb reconnect`."
         else -> ""
+    }
+
+    // ---- app control ------------------------------------------------------------------------
+
+    private const val DEFAULT_APP_AWAIT_MILLIS = 10_000L
+    private const val MAX_APP_AWAIT_MILLIS = 30_000L
+
+    private fun appAction(action: AppAction, args: JsonObject, apps: Apps, answer: (JsonElement) -> Unit) {
+        val awaitMillis = (args.str("await_ms")?.toLongOrNull() ?: DEFAULT_APP_AWAIT_MILLIS).coerceIn(0, MAX_APP_AWAIT_MILLIS)
+        val serial = apps.serial() ?: return answer(errorObj(
+            "No device is selected, so there's no app to act on. Call attach_device first (list_devices shows what's connected).",
+        ))
+        val choice = apps.target(args.str("package"))
+        val pkg = when {
+            choice.pkg == null -> return answer(errorObj(
+                "No app has announced itself to this capture on $serial, so LogPose doesn't know which one to " +
+                    "${if (action == AppAction.RESTART) "restart" else "clear"}. Pass package (the application id, " +
+                    "e.g. com.acme.app.debug).",
+            ))
+            choice.ambiguous -> return answer(buildJsonObject {
+                put("error", "Several apps announced themselves on $serial, so LogPose won't guess — pass package.")
+                put("announced", buildJsonArray { choice.announced.forEach { add(it) } })
+            })
+            else -> choice.pkg
+        }
+        val regrant = action == AppAction.CLEAR_DATA && args.bool("regrant_permissions") == true
+        apps.perform(action, pkg, AppControl.Options(regrantPermissions = regrant), awaitMillis, progress = {}) { outcome ->
+            answer(appResult(outcome, choice.source, awaitMillis))
+        }
+    }
+
+    private fun appResult(outcome: AppControlService.Outcome, source: AppTarget.Source, awaitMillis: Long): JsonElement {
+        val r = outcome.report
+        return buildJsonObject {
+            put("done", r.ok && !outcome.busy)
+            put("action", r.action.id)
+            put("package", r.pkg)
+            put("target", when (source) {
+                AppTarget.Source.EXPLICIT -> "as passed"
+                AppTarget.Source.ANNOUNCED -> "announced by the app"
+                AppTarget.Source.REMEMBERED -> "remembered for this device"
+                AppTarget.Source.NONE -> "none"
+            })
+            if (r.serial.isNotEmpty()) put("serial", r.serial)
+            r.sdk?.let { put("api_level", it) }
+            r.error?.let { put("error", it) }
+            if (outcome.busy) return@buildJsonObject
+            put("stopped", r.stopped)
+            if (r.action != AppAction.RESTART) put("cleared", r.cleared)
+            put("launched", r.launched)
+            r.launchedVia?.let { put("launched_via", it) }
+            r.externalCache?.let { put("external_cache", it.name.lowercase()) }
+            if (r.regranted.isNotEmpty() || r.regrantFailed.isNotEmpty()) put("permissions", buildJsonObject {
+                put("regranted", buildJsonArray { r.regranted.forEach { add(it) } })
+                put("not_regranted", buildJsonArray { r.regrantFailed.forEach { add(it) } })
+            })
+            if (r.offerClearAll) put("offer", "clear_app_data with scope='all' (pm clear) works on any build — " +
+                "but it logs the app out and deletes its databases. Ask before using it.")
+            outcome.markerId?.let { put("marker_id", it) }
+            if (r.launched) {
+                outcome.newRun?.let { run ->
+                    put("new_run", buildJsonObject {
+                        put("session", run.index)
+                        if (run.processId.isNotBlank()) put("process_id", run.processId)
+                        run.pid?.let { put("pid", it) }
+                        put("lib_version", run.libVersion)
+                    })
+                }
+                put("waited_ms", outcome.waitedMillis)
+            }
+            outcome.mocks?.let { m ->
+                put("mocks", buildJsonObject {
+                    put("re_pushed", when {
+                        !m.writer -> "not_this_host"
+                        m.activeRules == 0 -> "no_active_rules"
+                        m.rePushed -> "yes"
+                        else -> "no"
+                    })
+                    put("active_rules", m.activeRules)
+                    if (m.rePushed) put("acknowledged", m.acknowledged)
+                })
+            }
+            put("steps", buildJsonArray {
+                r.steps.forEach { step ->
+                    add(buildJsonObject {
+                        put("step", step.name)
+                        put("command", "adb -s ${r.serial} shell ${step.command}")
+                        put("ok", step.ok)
+                        if (!step.ok && step.output.isNotBlank()) put("output", step.output.take(400))
+                    })
+                }
+            })
+            buildList {
+                if (r.launched && outcome.newRun == null) add(
+                    if (awaitMillis == 0L) "Returned right after launch, as asked."
+                    else "The app was launched but didn't announce a new run within ${awaitMillis / 1000}s — it may " +
+                        "not include logpose-android, or capture isn't attached (list_devices).",
+                )
+                if (outcome.newRun != null) add("list_events with session=${outcome.newRun.index} reads only the new run.")
+                outcome.mocks?.let { m ->
+                    if (!m.writer && m.activeRules > 0) add("This host doesn't own the device's mock rules, so it pushed none; the program that does re-pushes them on the new run's hello.")
+                    if (m.rePushed && !m.acknowledged) add("Rules were re-pushed but the device hasn't acknowledged them yet — list_mocks shows when it does.")
+                }
+            }.joinToString(" ").takeIf { it.isNotEmpty() }?.let { put("note", it) }
+        }
     }
 
     // ---- scenarios ----------------------------------------------------------------------------

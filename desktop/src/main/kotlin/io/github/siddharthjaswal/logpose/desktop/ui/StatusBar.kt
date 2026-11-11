@@ -35,6 +35,7 @@ import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.desktop.device.DeviceStatuses
 import io.github.siddharthjaswal.logpose.desktop.session.SessionState
 import io.github.siddharthjaswal.logpose.desktop.theme.LocalPalette
+import io.github.siddharthjaswal.logpose.mcp.McpSetup
 
 /** What the status bar's left end says about the capture, and its dot. */
 internal fun captureLine(state: ScreenState, items: List<SwitcherItem> = emptyList()): Pair<String, Boolean> {
@@ -157,13 +158,16 @@ private fun McpStatus(state: ScreenState, actions: ScreenActions) {
     }
 }
 
-/** *Serve MCP*'s one home: the switch, the ready-made `claude mcp add …` line with Copy, and the token. */
+/**
+ * *Serve MCP*'s one home: the switch, a Claude Code / Codex / Other (JSON) picker over the ready-made
+ * setup snippets (each with Copy), the health URL, and the token with Regenerate.
+ */
 @Composable
 private fun McpPopover(state: ScreenState, actions: ScreenActions, onDismiss: () -> Unit) {
     val p = LocalPalette.current
     val mcp = state.mcp
     val a = actions.advanced
-    Popover(onDismiss, width = 400.dp, above = true, alignEnd = true) {
+    Popover(onDismiss, width = 440.dp, above = true, alignEnd = true) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -173,23 +177,38 @@ private fun McpPopover(state: ScreenState, actions: ScreenActions, onDismiss: ()
                 ToggleSwitch(mcp.serving) { if (!state.serveBusy) a.onServe(!mcp.serving) }
             }
             T(
-                "Expose this window's live capture to a coding agent over MCP on 127.0.0.1 — so a developer can point Claude Code at this session while you test.",
+                "Expose this window's live capture to a coding agent over MCP on 127.0.0.1 — so a developer can point Claude Code or Codex at this session while you test.",
                 p.textDim, style = Type.small.copy(lineHeight = 15.sp), maxLines = 4,
             )
             mcp.error?.let { T(it, p.danger, style = Type.small, maxLines = 3) }
-            val command = mcp.command
-            if (mcp.serving && command != null) {
+            if (mcp.serving && mcp.port != null) {
                 mcp.portNote?.let { T(it, p.warn, style = Type.small, maxLines = 2) }
-                Box(Modifier.fillMaxWidth().background(p.bg0, RoundedCornerShape(6.dp)).border(1.dp, p.borderSubtle, RoundedCornerShape(6.dp)).padding(8.dp)) {
-                    T(command, p.text, style = Type.monoTiny.copy(lineHeight = 13.sp), maxLines = 6)
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    PillButton("Copy command", filled = true) { a.onCopy(command, "MCP connect command copied — paste it in your terminal") }
-                    Spacer(Modifier.width(10.dp))
-                    Hint("The token both authenticates the agent and is kept between launches, so the line keeps working.") {
-                        T("token ${mcp.token.take(8)}…", p.textMuted, style = Type.monoTiny)
+                val clients = McpSetup.Client.entries
+                Segmented(clients.map { it.label }, clients.indexOf(mcp.client)) { a.onMcpClient(clients[it]) }
+                for (snippet in mcp.snippets) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            T(snippet.title, p.text, Modifier.weight(1f), style = Type.small, weight = FontWeight.Medium)
+                            LinkText("Copy") { a.onCopy(snippet.text, "${mcp.client.label} snippet copied") }
+                        }
+                        Box(Modifier.fillMaxWidth().background(p.bg0, RoundedCornerShape(6.dp)).border(1.dp, p.borderSubtle, RoundedCornerShape(6.dp)).padding(8.dp)) {
+                            T(snippet.text, p.text, style = Type.monoTiny.copy(lineHeight = 13.sp), maxLines = 10)
+                        }
+                        snippet.note?.let { T(it, p.textMuted, style = Type.small.copy(lineHeight = 14.sp), maxLines = 2) }
                     }
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Hint("The token authenticates every agent and is kept between launches. Regenerate it if it leaked: the old one stops working at once.") {
+                        T("token ${mcp.token.take(8)}…", p.textMuted, style = Type.monoTiny)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    LinkText("Regenerate", onClick = a.onRegenerateToken)
+                    Spacer(Modifier.weight(1f))
+                    mcp.health?.let { url ->
+                        Hint("Unauthenticated liveness check: $url") { LinkText("Copy health URL") { a.onCopy(url, "Health URL copied") } }
+                    }
+                }
+                mcp.tokenNote?.let { T(it, p.warn, style = Type.small, maxLines = 2) }
                 T(
                     if (mcp.readOnly) "Agents can read everything; mocks and push stay read-only until this app controls the phone's mocks."
                     else "Agents can create mocks and inject pushes on this phone.",

@@ -6,6 +6,66 @@ format may still change.
 
 ## [Unreleased]
 
+### Fixed — Marketplace verifier warnings (plugin)
+- No internal or deprecated platform API left: the plugin's own version is baked into a resource
+  at build time instead of read through `PluginManager.findEnabledPlugin` / `PluginManagerCore`
+  (internal), and the mock editor's tree finds its row checkbox without the deprecated
+  `myCheckbox` / `getCheckbox()`. `verifyPlugin` now also checks IntelliJ IDEA 2026.2 (unified
+  build) and is plain Compatible on 2024.1, 2024.3, 2025.1, 2025.2 and 2026.2.
+
+### Added — App actions: restart, clear cache, clear all data
+
+- **App ▾** in the IDE tool window toolbar and LogPose for Mac's toolbar (plus the Mac Session menu:
+  ⌥⌘R / ⌥⌘C / ⌥⇧⌘C): **Restart app**, **Clear cache & restart** (debuggable builds, via `run-as`;
+  keeps logins and databases) and **Clear all data & restart** (`pm clear`, behind a confirm that
+  says what is lost, with optional re-grant of runtime permissions). Targets the package the app's
+  hello announced; picker when several did; typed and remembered per device when none has.
+- A release build's cache clear is refused before the app is touched, with the full clear offered
+  as a separate confirmed action — never a silent escalation.
+- Each action leaves a `Restarted by LogPose` / `Cache cleared` / `App data cleared` marker row
+  (host-side kind `logpose`, no wire change) at the run boundary; Mac recordings and `.logpose`
+  exports keep it.
+- **MCP:** `restart_app` and `clear_app_data` (`scope: "cache" | "all"`, `regrant_permissions`,
+  `package`, `await_ms`) — 25 tools. Gated like mock writes: refused by `logpose serve` without
+  `--mocks` and by LogPose for Mac unless it controls the phone's mocks. They return the steps run,
+  the new run's session once the app re-announces itself (default wait 10 s), and whether the mock
+  rules were re-pushed and acknowledged. Server instructions mention them.
+- Core: `appcontrol` (command builders, output parsing, `AppControlService`), and
+  `EventStore.awaitSession` — the run-level twin of `addWaiter`.
+
+### Added — first-class Codex (and any standard MCP client) support
+
+All three hosts — the IDE plugin, `logpose serve` and LogPose for Mac — now share one HTTP layer
+(`:core` `McpHttpEndpoint`), so they behave identically:
+
+- **`Authorization: Bearer <token>`** is accepted everywhere, alongside the original
+  `X-LogPose-Token` header (unchanged — saved `claude mcp add` lines and header-configured Codex
+  keep working byte for byte). Token comparison is constant-time; in the IDE the token still
+  selects the project, by either header.
+- **Real auth errors.** A missing token is HTTP 401 with `WWW-Authenticate: Bearer realm="logpose"`;
+  a wrong one is 401 with `error="invalid_token"` (RFC 6750). Both bodies are JSON-RPC errors that
+  say how to send the token and where to get it. The token is now checked on every MCP request,
+  not only `tools/call` (previously a 200 with a `-32001` body). An IDE with no tool window open
+  answers 503.
+- **Streamable HTTP compliance:** protocol-version negotiation (echo 2025-11-25 / 2025-06-18 /
+  2025-03-26 / 2024-11-05, else 2025-06-18), JSON-RPC batches, notifications of any method (and
+  client responses) → 202, `GET`/`DELETE` → 405 with `Allow: POST`, `Mcp-Session-Id` and
+  `MCP-Protocol-Version` accepted (no session issued — stateless).
+- **Health:** `GET /api/logpose/health` in the IDE (new) and `/health` on the daemon and the app
+  now answer `{ok, app, host, version, port}` (the old `status`/`events`/`capture` fields stay).
+- **DNS-rebinding guard:** non-loopback peers, and requests whose `Host` or `Origin` isn't a
+  loopback name, get 403. The daemon and the app already bound 127.0.0.1 only; the IDE handler
+  now refuses non-loopback peers even if the built-in server is opened to the network.
+- **Token rotation:** *Regenerate token* in the tool window's Connect Coding Agent popup and in the
+  Mac app's MCP popover; `logpose serve --rotate-token` for the daemon's saved token. The old
+  token is refused from the next request on.
+- **Setup snippets for Claude Code / Codex / Other (JSON)** in the plugin popup, the Mac popover
+  and the daemon's startup banner, each with Copy. Codex gets `export LOGPOSE_TOKEN=…`,
+  `codex mcp add logpose --url … --bearer-token-env-var LOGPOSE_TOKEN`, and the equivalent
+  `config.toml` table (global or the repo's `.codex/config.toml`). Claude Code's line now uses
+  `Authorization: Bearer`. URLs use `127.0.0.1`.
+- README: *Use with Claude Code*, *Use with Codex*, *Any other MCP client*, and troubleshooting.
+
 ## [1.10.0] - 2026-10-22
 
 ### Added — `attach_device`: an agent can reattach capture itself

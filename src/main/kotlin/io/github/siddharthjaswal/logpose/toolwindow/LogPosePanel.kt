@@ -1,9 +1,7 @@
 package io.github.siddharthjaswal.logpose.toolwindow
 
 import com.intellij.icons.AllIcons
-import com.intellij.ide.plugins.PluginManager
 import com.intellij.openapi.Disposable
-import com.intellij.openapi.extensions.PluginId
 import com.intellij.openapi.actionSystem.ActionGroup
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionToolbar
@@ -24,6 +22,7 @@ import com.intellij.ui.components.JBScrollPane
 import com.intellij.util.Alarm
 import com.intellij.util.ui.JBUI
 import org.jetbrains.ide.BuiltInServerManager
+import io.github.siddharthjaswal.logpose.mcp.McpSetup
 import io.github.siddharthjaswal.logpose.analysis.Correlation
 import io.github.siddharthjaswal.logpose.analysis.CorrelationIndex
 import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
@@ -82,6 +81,14 @@ import io.github.siddharthjaswal.logpose.ui.MockRuleDialog
 import io.github.siddharthjaswal.logpose.ui.MocksBar
 import io.github.siddharthjaswal.logpose.settings.MutedEndpoints
 import io.github.siddharthjaswal.logpose.ui.SaveScenarioDialog
+import io.github.siddharthjaswal.logpose.ui.ClearAppDataDialog
+import io.github.siddharthjaswal.logpose.appcontrol.AppAction
+import io.github.siddharthjaswal.logpose.appcontrol.AppCommands
+import io.github.siddharthjaswal.logpose.appcontrol.AppControl
+import io.github.siddharthjaswal.logpose.appcontrol.AppControlService
+import com.intellij.openapi.progress.ProgressIndicator
+import com.intellij.openapi.progress.ProgressManager
+import com.intellij.openapi.progress.Task
 import io.github.siddharthjaswal.logpose.ui.StatusDot
 import io.github.siddharthjaswal.logpose.ui.Theme
 import io.github.siddharthjaswal.logpose.ui.Toast
@@ -303,8 +310,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     private val statusDot = StatusDot()
 
-    private val pluginVersion: String? =
-        PluginManager.getInstance().findEnabledPlugin(PluginId.getId("io.github.siddharthjaswal.logpose"))?.version
+    private val pluginVersion: String? = PluginVersion.value
     private val versionLabel = JBLabel().apply {
         foreground = Theme.textDim
         font = JBUI.Fonts.label(11f)
@@ -352,7 +358,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     // Lets a coding agent read this project's capture over MCP. The token both authenticates
     // the caller and selects which open project's capture to serve.
-    private val mcpToken = McpSessions.tokenFor(projectStore)
+    @Volatile private var mcpToken = McpSessions.tokenFor(projectStore)
+
+    /** Kept so Regenerate can move it to a new token without rebuilding the surfaces. */
+    private lateinit var mcpSession: McpSessions.Session
 
     // Whether logcat is being tailed right now — read from the MCP (Netty) thread, so an agent
     // can tell "no matching events" from "capture isn't running". Kept off the UI's statusDot,
@@ -390,6 +399,29 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
     private val MAX_REATTACH = 5
     private val REATTACH_DELAY_MS = 2_000
 
+    /**
+     * Restart / clear the captured app — the toolbar's App menu and `restart_app` / `clear_app_data`,
+     * one code path. Its adb work runs inside an IDE background task (progress in the status bar),
+     * never on the EDT; the marker row goes straight into the store like any reader-thread event.
+     */
+    private val appControl = AppControlService(
+        store = store,
+        serial = { mocksController.deviceSerial ?: knownDevices.singleOrNull()?.serial },
+        mocks = mocksController,
+        settings = projectStore,
+        runAsync = { task ->
+            object : Task.Backgroundable(project, "LogPose: app action", false) {
+                override fun run(indicator: ProgressIndicator) {
+                    indicator.isIndeterminate = true
+                    task.run()
+                }
+            }.queue()
+        },
+    )
+
+    /** The package the user picked in the App menu (several announced) or typed (none announced). */
+    @Volatile private var appPicked: String? = null
+
     init {
         // Idempotent, and belt-and-braces with the tool window factory: nothing may read a mute
         // through core's in-memory fallback while the IDE has the real ones on disk.
@@ -398,9 +430,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         isOpaque = true
         background = Theme.bg0
 
-        McpSessions.register(
-            mcpToken,
-            McpSessions.Session(
+        mcpSession = McpSessions.Session(
                 projectName = project.name,
                 store = store,
                 hostAgeMillis = { id -> store.elapsedMillis(id) },
@@ -425,8 +455,10 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
                 },
                 // The device picker and ▶, for an agent whose capture stopped (emulator reboot).
                 devices = McpDevices(),
-            ),
-        )
+                // The App menu's actions; the IDE owns its device, so they are always writable here.
+                apps = appControl,
+            )
+        McpSessions.register(mcpToken, mcpSession)
 
         renderer.elapsedProvider = { tx ->
             if (tx.isPending()) store.elapsedMillis(tx.id) else null
@@ -598,6 +630,9 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
             add(CaptureToggleAction()); add(ClearAction())
             // A .logpose shared from LogPose for Mac (or a library capture.ndjson), read-only.
             add(OpenCaptureAction())
+            addSeparator()
+            // Restart / clear the app being captured — beside capture, because it ends the run.
+            add(AppMenuAction())
             addSeparator()
             // The two things LogPose can *start*: a push into the app, and a whole bottled
             // session. Both are also reachable where they're most natural (an FCM row's menu,
@@ -1471,6 +1506,18 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         McpSessions.unregister(mcpToken)
     }
 
+    /**
+     * Regenerate token: persist a new one and move this project's session onto it in one step, so
+     * the old token is refused from the very next MCP request.
+     */
+    private fun regenerateMcpToken(): String {
+        val old = mcpToken
+        val fresh = McpSessions.rotateToken(projectStore)
+        McpSessions.replace(old, fresh, mcpSession)
+        mcpToken = fresh
+        return fresh
+    }
+
     private fun copyToClipboard(text: String, toast: String) {
         CopyPasteManager.getInstance().setContents(StringSelection(text))
         Toast.show(list, toast)
@@ -2052,6 +2099,110 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
         override fun actionPerformed(e: AnActionEvent) = openCaptureFile()
     }
 
+    /**
+     * "App ▾": restart the captured app, clear its cache, or clear all of its data — each relaunches
+     * it as a new run. The tooltip names the target package; the popup lets the user pick among
+     * several announced apps, or type one when none has announced itself yet.
+     */
+    private inner class AppMenuAction : AnAction(
+        "App",
+        "Restart or clear the app being captured",
+        AllIcons.Actions.Restart,
+    ) {
+        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun actionPerformed(e: AnActionEvent) = showAppPopup(e.inputEvent?.component)
+        override fun update(e: AnActionEvent) {
+            val pkg = appControl.target(appPicked).pkg
+            e.presentation.isEnabled = CaptureFileView.liveActionsEnabled(viewingFile) && !appControl.busy
+            e.presentation.description = when {
+                appControl.busy -> "An app action is running…"
+                pkg != null -> "Restart or clear $pkg"
+                else -> "Restart or clear the app being captured (no app has announced itself yet)"
+            }
+        }
+    }
+
+    private fun showAppPopup(near: Component?) {
+        val choice = appControl.target(appPicked)
+        val group = DefaultActionGroup().apply {
+            addSeparator(choice.pkg?.let { "App: $it" } ?: "App: none announced yet")
+            if (choice.announced.size > 1) {
+                add(DefaultActionGroup("Target App", true).apply {
+                    choice.announced.forEach { pkg ->
+                        add(act(pkg, if (pkg == choice.pkg) AllIcons.Actions.Checked else null) {
+                            appPicked = pkg; appControl.remember(pkg)
+                        })
+                    }
+                })
+            }
+            add(act(if (choice.pkg == null) "Enter Package…" else "Other Package…", null) { promptAppPackage() })
+            addSeparator()
+            AppAction.entries.forEach { action ->
+                add(object : AnAction(
+                    if (action.destructive) "${action.label}…" else action.label, null,
+                    if (action.destructive) AllIcons.Actions.GC else AllIcons.Actions.Restart,
+                ) {
+                    override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                    override fun actionPerformed(e: AnActionEvent) = runAppAction(action)
+                    override fun update(e: AnActionEvent) { e.presentation.isEnabled = choice.pkg != null && !appControl.busy }
+                })
+            }
+        }
+        val popup = JBPopupFactory.getInstance().createActionGroupPopup(
+            "App", group, DataContext.EMPTY_CONTEXT, JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false,
+        )
+        if (near != null && near.isShowing) popup.showUnderneathOf(near) else popup.showInFocusCenter()
+    }
+
+    /** Asks for a package by hand, validated, and remembers it for this device. */
+    private fun promptAppPackage(): String? {
+        val typed = com.intellij.openapi.ui.Messages.showInputDialog(
+            project,
+            "Package to restart or clear, exactly as installed (e.g. com.acme.app.debug):",
+            "LogPose: App Package",
+            null,
+            appControl.target(appPicked).pkg.orEmpty(),
+            object : com.intellij.openapi.ui.InputValidator {
+                override fun checkInput(inputString: String?) = AppCommands.isValidPackage(inputString.orEmpty().trim())
+                override fun canClose(inputString: String?) = checkInput(inputString)
+            },
+        )?.trim() ?: return null
+        appPicked = typed
+        appControl.remember(typed)
+        return typed
+    }
+
+    private fun runAppAction(action: AppAction) {
+        if (!liveOrSay()) return
+        val pkg = appControl.target(appPicked).pkg ?: promptAppPackage() ?: return
+        var options = AppControl.Options()
+        if (action.destructive) {
+            val dialog = ClearAppDataDialog(project, pkg)
+            if (!dialog.showAndGet()) return
+            options = AppControl.Options(regrantPermissions = dialog.regrantPermissions)
+        }
+        appControl.perform(
+            action, pkg, options, awaitRunMillis = 10_000,
+            // Runs on the background task's thread, whose indicator is the one in the status bar.
+            progress = { line -> ProgressManager.getGlobalProgressIndicator()?.text = "${action.label} · $pkg — $line" },
+        ) { outcome ->
+            com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater({ reportAppOutcome(outcome) }, project.disposed)
+        }
+    }
+
+    private fun reportAppOutcome(outcome: AppControlService.Outcome) {
+        val title = "LogPose: ${outcome.report.action.label}"
+        when {
+            outcome.ok -> LogPoseNotifications.info(project, title, outcome.summary)
+            // A release build: say so, and offer the full clear as its own (still confirmed) action.
+            outcome.report.offerClearAll -> LogPoseNotifications.warn(
+                project, title, outcome.summary, "Clear All Data & Restart…",
+            ) { runAppAction(AppAction.CLEAR_DATA) }
+            else -> LogPoseNotifications.warn(project, title, outcome.summary)
+        }
+        scheduleRefresh()
+    }
+
     /** Save / snapshot / load the committable rule sets under `.logpose/scenarios`. */
     private inner class ScenariosAction : AnAction(
         "Scenarios",
@@ -2351,7 +2502,7 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
      */
     private inner class ConnectAgentAction : AnAction(
         "Connect Coding Agent",
-        "Copy the MCP command that lets Claude Code (or any MCP client) read this capture",
+        "Setup snippets for Claude Code, Codex or any MCP client to read this capture",
         AllIcons.Actions.Lightning,
     ) {
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
@@ -2362,54 +2513,22 @@ class LogPosePanel(private val project: com.intellij.openapi.project.Project) : 
 
     private fun showConnectAgentPopup(near: Component?) {
         lateinit var popup: com.intellij.openapi.ui.popup.JBPopup
+        val port = BuiltInServerManager.getInstance().port
 
-        val copy = io.github.siddharthjaswal.logpose.ui.PillButton("Copy connect command", filled = true).apply {
-            addActionListener {
-                val port = BuiltInServerManager.getInstance().port
-                val command = "claude mcp add --transport http logpose " +
-                    "http://localhost:$port${LogPoseMcpHandler.PATH} " +
-                    "--header \"${LogPoseMcpHandler.TOKEN_HEADER}: $mcpToken\""
-                popup.cancel()
-                copyToClipboard(command, "MCP connect command copied — paste it in your terminal")
-            }
-        }
-
-        // Bound directly to the persisted per-project flag; no staging, no OK button.
-        lateinit var expose: io.github.siddharthjaswal.logpose.ui.ToggleSwitch
-        expose = io.github.siddharthjaswal.logpose.ui.ToggleSwitch(McpSessions.exposeBodies(projectStore)) {
-            McpSessions.setExposeBodies(projectStore, expose.on)
-        }
-
-        val exposeLabel = JBLabel("Expose response bodies to agents").apply {
-            foreground = Theme.text
-            font = JBUI.Fonts.label(12f).asBold()
-            border = JBUI.Borders.emptyLeft(8)
-        }
-        val explanation = JBLabel(
-            "<html>When off, agents still see every request, status and timing —<br/>" +
-                "bodies come back as <code>payload_withheld</code> over MCP.</html>",
-        ).apply {
-            foreground = Theme.textMuted
-            font = JBUI.Fonts.label(11f)
-        }
-
-        fun left(c: JComponent) = c.apply { alignmentX = LEFT_ALIGNMENT }
-        val content = JPanel().apply {
-            isOpaque = true
-            background = Theme.bg1
-            layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.Y_AXIS)
-            border = JBUI.Borders.empty(12)
-            add(left(copy))
-            add(javax.swing.Box.createVerticalStrut(JBUI.scale(12)))
-            add(left(JPanel().apply {
-                isOpaque = false
-                layout = javax.swing.BoxLayout(this, javax.swing.BoxLayout.X_AXIS)
-                add(expose)
-                add(exposeLabel)
-            }))
-            add(javax.swing.Box.createVerticalStrut(JBUI.scale(6)))
-            add(left(explanation))
-        }
+        val content = io.github.siddharthjaswal.logpose.ui.ConnectAgentPanel(
+            url = McpSetup.url(port, LogPoseMcpHandler.PATH),
+            token = mcpToken,
+            healthUrl = "http://127.0.0.1:$port${LogPoseMcpHandler.HEALTH_PATH}",
+            initialClient = io.github.siddharthjaswal.logpose.ui.ConnectAgentPanel.clientFrom(
+                projectStore.get(io.github.siddharthjaswal.logpose.ui.ConnectAgentPanel.CLIENT_KEY),
+            ),
+            exposeBodies = McpSessions.exposeBodies(projectStore),
+            onCopy = { text, toast -> copyToClipboard(text, toast) },
+            onClient = { projectStore.set(io.github.siddharthjaswal.logpose.ui.ConnectAgentPanel.CLIENT_KEY, it.name) },
+            onRegenerate = ::regenerateMcpToken,
+            // Bound directly to the persisted per-project flag; no staging, no OK button.
+            onExposeBodies = { McpSessions.setExposeBodies(projectStore, it) },
+        )
 
         popup = JBPopupFactory.getInstance()
             .createComponentPopupBuilder(content, null)

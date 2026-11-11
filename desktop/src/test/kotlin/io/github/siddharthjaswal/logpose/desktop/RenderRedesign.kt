@@ -173,6 +173,14 @@ fun renderRedesign(out: File) {
         val theme = if (dark) "dark" else "light"
         shot(out, "redesign-mcp-popover-$theme", dark) { LogPoseScreen(live(selected = "h1", popover = Popover.MCP, mcp = mcp, updates = newer), ScreenActions()) }
     }
+    // The snippet picker's other two tabs (Claude Code is the default above).
+    for (client in listOf(io.github.siddharthjaswal.logpose.mcp.McpSetup.Client.CODEX, io.github.siddharthjaswal.logpose.mcp.McpSetup.Client.OTHER)) {
+        val tab = if (client == io.github.siddharthjaswal.logpose.mcp.McpSetup.Client.CODEX) "codex" else "json"
+        for (dark in listOf(true, false)) {
+            val theme = if (dark) "dark" else "light"
+            shot(out, "redesign-mcp-popover-$tab-$theme", dark) { LogPoseScreen(live(selected = "h1", popover = Popover.MCP, mcp = mcp.copy(client = client), updates = newer), ScreenActions()) }
+        }
+    }
     shot(out, "redesign-statusbar-mcp-on-dark", true) { LogPoseScreen(live(mcp = mcp, updates = newer), ScreenActions()) }
     // 9. The Developer popover.
     for (dark in listOf(true, false)) {

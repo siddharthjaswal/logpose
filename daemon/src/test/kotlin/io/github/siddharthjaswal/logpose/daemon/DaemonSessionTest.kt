@@ -211,6 +211,29 @@ class DaemonSessionTest {
     }
 
     @Test
+    fun `restart_app and clear_app_data refuse on a read-only daemon, naming --mocks`() {
+        val session = sessionFor(mocks = false)
+        assertNotNull(session.apps)
+        assertFalse(session.apps!!.writable())
+        assertTrue(sessionFor(mocks = true).apps!!.writable())
+        for ((tool, args) in listOf(
+            "restart_app" to kotlinx.serialization.json.buildJsonObject {},
+            "clear_app_data" to kotlinx.serialization.json.buildJsonObject { put("scope", kotlinx.serialization.json.JsonPrimitive("all")) },
+        )) {
+            val latch = CountDownLatch(1)
+            var payload: JsonObject? = null
+            McpTools.callAsync(
+                name = tool, args = args, events = emptyList(),
+                unavailable = DaemonSession.Unavailable, apps = session.apps,
+            ) { result -> payload = result.jsonObject; latch.countDown() }
+            assertTrue(latch.await(5, TimeUnit.SECONDS))
+            val error = payload!!["error"]!!.jsonPrimitive.content
+            assertTrue(error.contains("--mocks"), "was: $error")
+            assertFalse(error.contains("tool window"), "was: $error")
+        }
+    }
+
+    @Test
     fun `the daemon's 401 hint names the daemon, never the tool window`() {
         val hint = DaemonSession.AuthHint
         assertFalse(hint.missingToken.contains("tool window"))

@@ -1,5 +1,6 @@
 package io.github.siddharthjaswal.logpose.ui
 
+import com.intellij.notification.NotificationAction
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.project.Project
@@ -22,6 +23,15 @@ object LogPoseNotifications {
 
     fun info(project: Project?, title: String, content: String) =
         notify(project, title, content, NotificationType.INFORMATION)
+
+    /** A warning with one follow-up action — e.g. a cache clear refused, offering the full clear. */
+    fun warn(project: Project?, title: String, content: String, actionText: String, action: () -> Unit) {
+        NotificationGroupManager.getInstance()
+            .getNotificationGroup(GROUP_ID)
+            .createNotification(title, content, NotificationType.WARNING)
+            .addAction(NotificationAction.createSimpleExpiring(actionText) { action() })
+            .notify(project)
+    }
 
     private fun notify(project: Project?, title: String, content: String, type: NotificationType) {
         NotificationGroupManager.getInstance()

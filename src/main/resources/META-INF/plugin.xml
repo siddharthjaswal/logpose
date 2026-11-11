@@ -121,6 +121,19 @@
 
     <change-notes><![CDATA[
         <ul>
+            <li><b>Restart or reset the app</b> — a new <b>App</b> menu in the toolbar: Restart app,
+                Clear cache &amp; restart (debuggable builds; keeps logins and databases) and Clear all
+                data &amp; restart (<code>pm clear</code>, confirmed, optional permission re-grant).
+                Each starts a new app run and leaves a marker row on the timeline; mocks are re-pushed
+                to the new run. Agents get the same as <code>restart_app</code> and
+                <code>clear_app_data</code> (25 MCP tools).</li>
+            <li><b>Works with Codex and any MCP client</b> — Connect Coding Agent now has
+                <b>Claude Code / Codex / Other (JSON)</b> setup snippets with Copy. MCP accepts
+                <code>Authorization: Bearer</code> (the <code>X-LogPose-Token</code> header still
+                works), answers a missing or stale token with a clear 401, and offers an
+                unauthenticated health check at <code>/api/logpose/health</code>.
+                <b>Regenerate token</b> replaces the project's token at once. Requests from other
+                machines or with a non-local <code>Host</code>/<code>Origin</code> are refused.</li>
             <li><b>Agents can reattach capture</b> — two new MCP tools (23 total).
                 <code>attach_device</code> restarts capture on a device (or moves it to another) the
                 way ▶ and the device picker do, and re-pushes your mock rules — for when an emulator

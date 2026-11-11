@@ -10,6 +10,8 @@ import io.github.siddharthjaswal.logpose.desktop.session.SessionState
 import io.github.siddharthjaswal.logpose.mcp.McpHttpTransport
 import io.github.siddharthjaswal.logpose.mcp.McpRpc
 import io.github.siddharthjaswal.logpose.mcp.McpSessions
+import io.github.siddharthjaswal.logpose.mcp.McpSetup
+import io.github.siddharthjaswal.logpose.mcp.McpAuth
 import io.github.siddharthjaswal.logpose.mcp.McpTools
 import io.github.siddharthjaswal.logpose.mock.DeviceCapability
 import io.github.siddharthjaswal.logpose.mock.DeviceFeature
@@ -34,8 +36,17 @@ data class McpUi(
     val portNote: String? = null,
     val error: String? = null,
     val readOnly: Boolean = true,
+    /** Which client's setup the popover shows — remembered between launches. */
+    val client: McpSetup.Client = McpSetup.Client.CLAUDE_CODE,
+    /** A one-shot confirmation after Regenerate, shown under the snippets. */
+    val tokenNote: String? = null,
 ) {
+    val url: String? get() = port?.let { McpSetup.url(it) }
     val command: String? get() = port?.let { McpHttpTransport.connectCommand(it, token) }
+    val health: String? get() = port?.let { "http://127.0.0.1:$it${McpHttpTransport.HEALTH_PATH}" }
+
+    /** The selected client's copyable blocks, with this server's real URL and token. */
+    val snippets: List<McpSetup.Snippet> get() = url?.let { McpSetup.snippets(client, it, token) }.orEmpty()
 }
 
 /**
@@ -62,14 +73,47 @@ class DesktopMcp(
     private val warn: (String) -> Unit = { System.err.println("[logpose-mcp] $it") },
     /** `list_devices` / `attach_device`, over the window's device menu and Start (AppModel). */
     private val devices: McpTools.Devices? = null,
+    /** `/health`'s `version` — the app's own. */
+    private val appVersion: String = "dev",
+    /** `restart_app` / `clear_app_data`; writable only while this app controls the phone's mocks. */
+    private val apps: McpTools.Apps? = null,
 ) {
-    private val _ui = MutableStateFlow(McpUi())
+    private val _ui = MutableStateFlow(McpUi(client = savedClient()))
     val ui: StateFlow<McpUi> = _ui.asStateFlow()
 
     private val pool = Executors.newCachedThreadPool { r -> Thread(r, "logpose-mcp-work").apply { isDaemon = true } }
     private var transport: McpHttpTransport? = null
 
-    val token: String by lazy { McpSessions.tokenFor(settings) }
+    /**
+     * The current token. Volatile and re-read per request by [Lookup], so [regenerateToken] takes
+     * effect on the very next call — the old token is refused without a restart.
+     */
+    @Volatile var token: String = McpSessions.tokenFor(settings)
+        private set
+
+    private fun savedClient(): McpSetup.Client =
+        settings.get(CLIENT_KEY)?.let { name -> McpSetup.Client.entries.firstOrNull { it.name == name } } ?: McpSetup.Client.CLAUDE_CODE
+
+    /** Switches the popover's snippet tab, and remembers it. */
+    fun selectClient(client: McpSetup.Client) {
+        settings.set(CLIENT_KEY, client.name)
+        _ui.value = _ui.value.copy(client = client)
+    }
+
+    /**
+     * Replaces the token: persisted, live for the next request, and the old one refused from then
+     * on. Every agent configured with the old one needs the new snippet (or, for Codex, the new
+     * `LOGPOSE_TOKEN`).
+     */
+    @Synchronized
+    fun regenerateToken(): String {
+        token = McpSessions.rotateToken(settings)
+        _ui.value = _ui.value.copy(
+            token = token,
+            tokenNote = "New token issued — the old one stopped working. Re-copy the snippet into each agent.",
+        )
+        return token
+    }
 
     /** Binds (off the UI thread — the caller's job) and starts serving. Returns the bound port. */
     @Synchronized
@@ -78,14 +122,14 @@ class DesktopMcp(
         val rpc = McpRpc(sessions = Lookup(), hint = AuthHint, unavailable = Unavailable)
         val won = runCatching {
             McpHttpTransport.firstFree(McpHttpTransport.candidatePorts(preferred)) { port ->
-                McpHttpTransport(port, rpc, warn, ::health).also { it.start() }
+                McpHttpTransport(port, rpc, warn, ::health, hostName = "mac", version = appVersion).also { it.start() }
             }
         }.getOrElse { e ->
-            _ui.value = McpUi(token = token, error = "Couldn't start: ${e.message ?: e}")
+            _ui.value = McpUi(token = token, client = _ui.value.client, error = "Couldn't start: ${e.message ?: e}")
             return null
         }
         if (won == null) {
-            _ui.value = McpUi(token = token, error = "Ports $preferred–${preferred + 9} are all taken. Stop another LogPose server and try again.")
+            _ui.value = McpUi(token = token, client = _ui.value.client, error = "Ports $preferred–${preferred + 9} are all taken. Stop another LogPose server and try again.")
             return null
         }
         transport = won.second
@@ -94,6 +138,7 @@ class DesktopMcp(
             serving = true, port = won.first, token = token,
             portNote = if (won.first != preferred) "Port $preferred is taken (a logpose daemon?), so this app is on ${won.first}." else null,
             readOnly = !McpSurfaces.of(advanced.mode()).mocksWritable,
+            client = _ui.value.client,
         )
         return won.first
     }
@@ -103,7 +148,7 @@ class DesktopMcp(
         transport?.stop()
         transport = null
         if (remember) settings.setBoolean(SERVE_KEY, false, false)
-        _ui.value = McpUi(token = token)
+        _ui.value = McpUi(token = token, client = _ui.value.client)
     }
 
     /** Whether the user left Serve MCP on last time — the app restarts it at launch. */
@@ -138,12 +183,14 @@ class DesktopMcp(
         workerTransitions = McpTools.WorkerTransitions { session.workerLifecycle.transitions(session.workerLifecycle.keyOf(it)) },
         // Offered read-only too: attaching changes what the app records; only the writer re-pushes.
         devices = devices,
+        // Present either way; refuses unless this app is the phone's writer (its writable()).
+        apps = apps,
     )
 
     /** One capture, so the token is pure authentication. */
     private inner class Lookup : McpRpc.SessionLookup {
         override fun byToken(token: String): McpSessions.Session? =
-            if (constantTimeEquals(token, this@DesktopMcp.token)) currentSession() else null
+            if (McpAuth.constantTimeEquals(token, this@DesktopMcp.token)) currentSession() else null
 
         override fun hasSessions(): Boolean = true
     }
@@ -295,19 +342,20 @@ class DesktopMcp(
             correlations = "Correlation isn't available — LogPose for Mac has no capture wired.",
             devices = "Re-attaching isn't available — LogPose for Mac has no capture wired. Pick the device and " +
                 "press Start in the app.",
+            apps = "Restarting or clearing the app isn't available — LogPose for Mac is read-only on this phone, and " +
+                "these kill the app and delete its files. In the app, turn on Advanced and \"This app controls mocks\" " +
+                "for the device to let an agent do it (the App menu in the toolbar works either way).",
         )
+
+        const val CLIENT_KEY = "logpose.desktop.mcp.client"
 
         val AuthHint = McpRpc.AuthHint(
             missingToken = "Missing or unknown ${McpRpc.TOKEN_HEADER}. Copy the connect line (token included) from " +
                 "LogPose for Mac → Serve MCP.",
             noCapture = "LogPose for Mac has no capture registered.",
+            fix = "Copy the current setup snippet from LogPose for Mac → status bar → MCP (Regenerate there replaces the token).",
         )
 
-        fun constantTimeEquals(a: String, b: String): Boolean {
-            if (a.length != b.length) return false
-            var diff = 0
-            for (i in a.indices) diff = diff or (a[i].code xor b[i].code)
-            return diff == 0
-        }
+        fun constantTimeEquals(a: String, b: String): Boolean = McpAuth.constantTimeEquals(a, b)
     }
 }

@@ -2,11 +2,6 @@ package io.github.siddharthjaswal.logpose.mcp
 
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
 import java.io.IOException
 import java.net.BindException
 import java.net.InetAddress
@@ -28,9 +23,9 @@ import java.util.concurrent.TimeUnit
  * `:core` is the one module both depend on.
  *
  * Two things make the JDK server sufficient. The protocol is plain request/response HTTP/1.1 (one
- * path, POST only, a header token, `Content-Length` the server writes itself), and the JSON-RPC is
- * entirely [McpRpc]'s, shared with the plugin's Netty handler — so this file is only bytes and
- * threads.
+ * path, POST only, `Content-Length` the server writes itself), and everything above the bytes —
+ * routing, the loopback guard, bearer/header auth, 401/202/405, `/health`, the JSON-RPC — is
+ * [McpHttpEndpoint]'s, shared with the plugin's Netty handler. So this file is only bytes and threads.
  *
  * ### The deferred tools, and why this blocks
  *
@@ -55,12 +50,22 @@ class McpHttpTransport(
     /** For `/health` — event count and whether logcat is attached. */
     private val health: () -> Health,
     private val deferTimeoutSeconds: Long = DEFER_TIMEOUT_SECONDS,
+    /** `/health`'s `host` field: `daemon` or `mac`. */
+    private val hostName: String = "daemon",
+    /** `/health`'s `version` field: the host's own version. */
+    private val version: String = "dev",
 ) {
 
     data class Health(val events: Int, val capture: String)
 
     private var server: HttpServer? = null
     private var executor: ExecutorService? = null
+    @Volatile private var boundPort: Int = port
+
+    private val endpoint = McpHttpEndpoint(rpc, PATH, HEALTH_PATH) {
+        val h = health()
+        McpHttpEndpoint.HealthInfo(hostName, version, boundPort, h.events, h.capture)
+    }
 
     /** Binds and starts serving. Returns the actual port (the same one, or the OS's when 0). */
     fun start(): Int {
@@ -79,13 +84,15 @@ class McpHttpTransport(
             ThreadPoolExecutor.AbortPolicy(),
         )
         http.executor = pool
-        http.createContext(PATH) { exchange -> handleMcp(exchange) }
-        http.createContext(HEALTH_PATH) { exchange -> handleHealth(exchange) }
+        // One root context: the JDK matches contexts by prefix, so `/health` would also catch
+        // `/healthz`. The endpoint does exact routing (and the 404) itself.
+        http.createContext("/") { exchange -> handle(exchange) }
         http.start()
 
         server = http
         executor = pool
-        return http.address.port
+        boundPort = http.address.port
+        return boundPort
     }
 
     fun stop() {
@@ -95,83 +102,42 @@ class McpHttpTransport(
         executor = null
     }
 
-    private fun handleMcp(exchange: HttpExchange) {
+    private fun handle(exchange: HttpExchange) {
         try {
-            if (exchange.requestMethod != "POST") {
-                respond(exchange, 405, """{"error":"POST only"}""")
-                return
-            }
             val body = exchange.requestBody.readBytes().toString(StandardCharsets.UTF_8)
-            val token = exchange.requestHeaders.getFirst(McpRpc.TOKEN_HEADER).orEmpty()
-
-            val deferred = CompletableFuture<JsonObject>()
-            val outcome = rpc.dispatch(body, token) { payload -> deferred.complete(payload) }
-
-            when (outcome) {
-                is McpRpc.Outcome.Reply -> respond(exchange, 200, rpc.encode(outcome.body))
-                // A notification: acknowledge with no body, exactly as the plugin does.
-                McpRpc.Outcome.NoReply -> respond(exchange, 202, "")
-                McpRpc.Outcome.Deferred -> {
-                    val payload = runCatching {
-                        deferred.get(deferTimeoutSeconds, TimeUnit.SECONDS)
-                    }.getOrNull()
-                    if (payload == null) {
-                        // Past every tool's own deadline: something never called back. Say so in
-                        // JSON-RPC rather than hanging up, so the client sees a reason.
-                        respond(exchange, 200, rpc.encode(timedOut(body)))
-                    } else {
-                        respond(exchange, 200, rpc.encode(payload))
-                    }
-                }
-            }
+            val request = McpHttpEndpoint.Request(
+                method = exchange.requestMethod.uppercase(),
+                path = exchange.requestURI.rawPath ?: "/",
+                header = { name -> exchange.requestHeaders.getFirst(name) },
+                body = body,
+                remoteIsLoopback = exchange.remoteAddress?.address?.isLoopbackAddress == true,
+            )
+            val answer = CompletableFuture<McpHttpEndpoint.Response>()
+            endpoint.handle(request) { response -> answer.complete(response) }
+            // Sync answers are already complete; a deferred tool parks this thread until it
+            // answers (see the class comment), bounded by the backstop below.
+            val response = runCatching { answer.get(deferTimeoutSeconds, TimeUnit.SECONDS) }.getOrNull()
+                ?: McpHttpEndpoint.Response(200, McpHttpEndpoint.timeoutBody(rpc, body, deferTimeoutSeconds))
+            respond(exchange, response)
         } catch (e: IOException) {
             // The client hung up mid-wait. Nothing is leaked — the tool's own waiter still expires.
             warn("client disconnected: ${e.message}")
             runCatching { exchange.close() }
         } catch (t: Throwable) {
             warn("request failed: ${t.message ?: t::class.java.simpleName}")
-            runCatching { respond(exchange, 500, """{"error":"internal"}""") }
+            runCatching { respond(exchange, McpHttpEndpoint.Response(500, """{"error":"internal"}""")) }
         }
     }
 
-    /**
-     * Liveness for CI and supervisors. Unauthenticated on purpose: it exposes a count and a word,
-     * never a capture, and requiring the token would make it useless for the one job it has —
-     * telling a script the server is up before it has a token in hand.
-     */
-    private fun handleHealth(exchange: HttpExchange) {
-        try {
-            if (exchange.requestMethod != "GET") {
-                respond(exchange, 405, """{"error":"GET only"}""")
-                return
-            }
-            respond(exchange, 200, healthJson(health()))
-        } catch (t: Throwable) {
-            runCatching { respond(exchange, 500, """{"error":"internal"}""") }
-        }
-    }
-
-    private fun respond(exchange: HttpExchange, status: Int, text: String) {
-        val bytes = text.toByteArray(StandardCharsets.UTF_8)
-        exchange.responseHeaders.set("Content-Type", "application/json; charset=utf-8")
+    private fun respond(exchange: HttpExchange, response: McpHttpEndpoint.Response) {
+        val bytes = response.body.toByteArray(StandardCharsets.UTF_8)
+        exchange.responseHeaders.set("Content-Type", response.contentType)
         exchange.responseHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate")
+        response.headers.forEach { (k, v) -> exchange.responseHeaders.set(k, v) }
         // A 202 with no body must send length 0, not "unknown" (-1) — the latter makes the JDK
         // server chunk an empty response, which some clients read as a malformed reply.
-        exchange.sendResponseHeaders(status, if (bytes.isEmpty()) -1L else bytes.size.toLong())
+        exchange.sendResponseHeaders(response.status, if (bytes.isEmpty()) -1L else bytes.size.toLong())
         if (bytes.isNotEmpty()) exchange.responseBody.use { it.write(bytes) } else exchange.close()
-    }
-
-    /** The id is echoed so a client can match the failure to its call; parsing it can't throw here. */
-    private fun timedOut(body: String): JsonObject {
-        val id = runCatching { (Json.parseToJsonElement(body) as? JsonObject)?.get("id") }.getOrNull() ?: JsonNull
-        return buildJsonObject {
-            put("jsonrpc", JsonPrimitive("2.0"))
-            put("id", id)
-            put("error", buildJsonObject {
-                put("code", JsonPrimitive(-32000))
-                put("message", JsonPrimitive("The tool never answered within ${deferTimeoutSeconds}s."))
-            })
-        }
     }
 
     companion object {
@@ -197,13 +163,11 @@ class McpHttpTransport(
         private const val BACKLOG = 32
 
         /** Built here rather than in the handler so a test can assert the shape without a socket. */
-        fun healthJson(health: Health): String =
-            """{"status":"ok","events":${health.events},"capture":"${health.capture}"}"""
+        fun healthJson(health: Health, host: String = "daemon", version: String = "dev", port: Int = DEFAULT_PORT): String =
+            McpHttpEndpoint.HealthInfo(host, version, port, health.events, health.capture).toJson()
 
         /** The exact line a developer pastes to point Claude Code at a server on [port]. */
-        fun connectCommand(port: Int, token: String): String =
-            "claude mcp add --transport http logpose http://localhost:$port$PATH " +
-                "--header \"${McpRpc.TOKEN_HEADER}: $token\""
+        fun connectCommand(port: Int, token: String): String = McpSetup.claudeCommand(McpSetup.url(port), token)
 
         /**
          * Ports to try, in order: [preferred], then the next [span] − 1 above it. A daemon already

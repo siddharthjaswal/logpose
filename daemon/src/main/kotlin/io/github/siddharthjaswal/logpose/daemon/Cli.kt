@@ -44,6 +44,12 @@ object Cli {
          * tailing a device — an agent reads a capture someone shared, over the same MCP tools.
          */
         val open: File? = null,
+        /**
+         * `--rotate-token`: replace the token saved in `.logpose/daemon.properties` with a fresh one
+         * before serving, so every agent holding the old one is refused. Meaningless (and refused)
+         * with `--token` or `--stdio`; `$LOGPOSE_TOKEN` is checked at startup, where it is known.
+         */
+        val rotateToken: Boolean = false,
     ) {
         /** The session's display name — the flag, else the directory's own name. */
         val projectName: String
@@ -124,6 +130,7 @@ object Cli {
                     options = options.copy(open = File(v).let { if (it.isAbsolute) it else File(cwd, v) })
                 }
                 "--stdio" -> options = options.copy(stdio = true)
+                "--rotate-token" -> options = options.copy(rotateToken = true)
                 "--no-bodies" -> options = options.copy(exposeBodies = false)
                 "--mocks" -> options = options.copy(mocks = true)
                 "--clear" -> options = options.copy(clear = true)
@@ -138,6 +145,13 @@ object Cli {
                 "logpose serve: --stdio and --port are mutually exclusive. --stdio speaks MCP on " +
                     "stdin/stdout for a client that launched this process; --port binds a socket " +
                     "for a client that connects to it. Pick one.\n\n" + usage(),
+            )
+        }
+        if (options.rotateToken && (options.token != null || options.stdio)) {
+            return Command.Exit(
+                2,
+                "logpose serve: --rotate-token replaces the SAVED token; it can't be combined with " +
+                    "--token (yours to manage) or --stdio (no token at all).\n\n" + usage(),
             )
         }
         if (options.open != null && (options.mocks || options.device != null || options.clear)) {
@@ -166,7 +180,10 @@ object Cli {
                               authentication); every log line goes to stderr. Not with --port.
           --project-dir DIR   Anchors .logpose/ — scenarios and daemon settings (default: cwd)
           --device SERIAL     Which attached device to tail (default: adb's own choice)
-          --token T           MCP token; else ${'$'}LOGPOSE_TOKEN, else saved, else generated
+          --token T           MCP token; else ${'$'}LOGPOSE_TOKEN, else saved, else generated.
+                              Clients send it as `Authorization: Bearer T` (or X-LogPose-Token).
+          --rotate-token      Replace the saved token with a new one before serving; agents
+                              holding the old one get 401 until they're given the new one.
           --name N            Session name reported over MCP (default: the project dir's name)
           --no-bodies         Withhold request/response bodies from MCP results
           --mocks             Become this device's mock writer. Only ONE process may be:
@@ -180,6 +197,9 @@ object Cli {
                               Read-only: not with --device, --mocks or --clear.
 
         Environment:
-          LOGPOSE_TOKEN       Used when --token is absent.
+          LOGPOSE_TOKEN       Used when --token is absent — the same variable Codex reads with
+                              bearer_token_env_var, so one export serves both.
+
+        Health (no token): GET http://127.0.0.1:PORT/health
     """.trimIndent()
 }

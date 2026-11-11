@@ -33,6 +33,8 @@ object KindPresenter {
         is LogEvent.Generic -> when (event.kind) {
             Envelope.KIND_ANALYTICS -> "ANLY"
             Envelope.KIND_EVENT -> "EVENT"
+            // What LogPose itself did to the app (restart / clear) — a host-side marker, not the app's.
+            io.github.siddharthjaswal.logpose.appcontrol.AppMarker.KIND -> "MARK"
             else -> "APP"
         }
         else -> event.kind.uppercase()

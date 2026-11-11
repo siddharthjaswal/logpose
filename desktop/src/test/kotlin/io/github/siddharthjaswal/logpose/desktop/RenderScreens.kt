@@ -45,6 +45,7 @@ fun main(args: Array<String>) {
     if (args.getOrNull(1) == "doctor") { renderDoctor(out); println("Rendered to ${out.absolutePath}"); return }
     if (args.getOrNull(1) == "emulators") { renderEmulators(out); println("Rendered to ${out.absolutePath}"); return }
     if (args.getOrNull(1) == "redesign") { renderRedesign(out); println("Rendered to ${out.absolutePath}"); return }
+    if (args.getOrNull(1) == "app") { renderAppActions(out); println("Rendered to ${out.absolutePath}"); return }
     val pixel = Adb.DeviceInfo("37211FDJH00ABC", "device", "Pixel_9a")
     val events = Fixtures.store().snapshot()
     val running = SessionState.Running(pixel.serial, System.currentTimeMillis())

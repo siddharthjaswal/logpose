@@ -175,10 +175,25 @@ class AppModel(
     /** Pane sizes and collapsed states (persisted), and which toolbar/status-bar popover is open. */
     val layout = LayoutController(scope, settings)
 
+    /**
+     * Restart / clear the captured app — the toolbar's App menu, the menu bar and `restart_app` /
+     * `clear_app_data`. The human may always use it; over MCP it follows the mock-writer state like
+     * the other device writes (an agent can't kill the app on a phone this app is read-only on).
+     */
+    val apps = io.github.siddharthjaswal.logpose.appcontrol.AppControlService(
+        store = session.store,
+        serial = ::currentSerial,
+        mocks = advanced.mocks,
+        settings = settings,
+        writable = { io.github.siddharthjaswal.logpose.desktop.advanced.McpSurfaces.of(advanced.mode()).mocksWritable },
+        record = { session.recordLocal(it) },
+    )
+    val appActions = AppActionsController(scope, apps)
+
     /** Serve MCP (PRD §7). */
     val mcp = DesktopMcp(settings, session, advanced, projectName = {
         advanced.location.projectDir?.name ?: "LogPose for Mac"
-    }, devices = McpDevices())
+    }, devices = McpDevices(), appVersion = appVersion(), apps = apps)
 
     init {
         // Mutes are a global view preference (the plugin keeps them application-wide too), kept in
@@ -367,6 +382,14 @@ class AppModel(
         advanced.setProjectDir(dir)
         // After the location settles (setProjectDir hops to IO itself), re-read the vocabulary.
         scope.launch { delay(150); reloadKeys() }
+    }
+
+    /** The MCP popover's Claude Code / Codex / JSON picker. */
+    fun selectMcpClient(client: io.github.siddharthjaswal.logpose.mcp.McpSetup.Client) = mcp.selectClient(client)
+
+    /** Regenerate in the MCP popover: the old token stops working on the next request. */
+    fun regenerateMcpToken() {
+        scope.launch(Dispatchers.IO) { mcp.regenerateToken() }
     }
 
     fun setServing(on: Boolean) {

@@ -58,6 +58,11 @@ object McpSessions {
         val workerTransitions: McpTools.WorkerTransitions = McpTools.WorkerTransitions { emptyList() },
         /** Device listing and capture (re)attach for `attach_device`; null where the host can't. */
         val devices: McpTools.Devices? = null,
+        /**
+         * `restart_app` / `clear_app_data`; null where the host has no device to act on. Present but
+         * not [McpTools.Apps.writable] on a host that must not change the device.
+         */
+        val apps: McpTools.Apps? = null,
     )
 
     private const val TOKEN_KEY = "logpose.mcp.token"
@@ -68,10 +73,21 @@ object McpSessions {
     /** Stable per-project token, generated once and persisted in [store]. */
     fun tokenFor(store: KeyValueStore): String {
         store.get(TOKEN_KEY)?.takeIf { it.isNotBlank() }?.let { return it }
-        val token = UUID.randomUUID().toString().replace("-", "")
+        return rotateToken(store)
+    }
+
+    /**
+     * Replaces the persisted token with a fresh one and returns it. The caller re-registers its
+     * session under the new token (see [replace]) — the old one stops working the moment it does.
+     */
+    fun rotateToken(store: KeyValueStore): String {
+        val token = newToken()
         store.set(TOKEN_KEY, token)
         return token
     }
+
+    /** 128 random bits as 32 hex chars — `UUID.randomUUID` draws from `SecureRandom`. */
+    fun newToken(): String = UUID.randomUUID().toString().replace("-", "")
 
     /**
      * Whether response bodies may leave the IDE over MCP. Defaults to on — the bodies are the
@@ -91,7 +107,24 @@ object McpSessions {
         byToken.remove(token)
     }
 
-    fun byToken(token: String): Session? = byToken[token]
+    /** Moves [session] from [old] to [new] in one step: [old] is refused from the next request on. */
+    fun replace(old: String, new: String, session: Session) {
+        byToken[new] = session
+        byToken.remove(old)
+    }
+
+    /**
+     * The session [token] selects. Compared in constant time against every registered token (there
+     * are as many as open projects) rather than by hash lookup, so response timing says nothing
+     * about how close a guess was.
+     */
+    fun byToken(token: String): Session? {
+        var found: Session? = null
+        for ((candidate, session) in byToken) {
+            if (McpAuth.constantTimeEquals(candidate, token)) found = session
+        }
+        return found
+    }
 
     /** True once any project has registered — used to explain a 401 to a misconfigured client. */
     fun hasSessions(): Boolean = byToken.isNotEmpty()

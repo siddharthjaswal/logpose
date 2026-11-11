@@ -211,13 +211,18 @@ class JsonPatchTree : JPanel(BorderLayout()) {
 
     /** Renders `key: value` / `key {n}` / `key [n]`; hides the checkbox on containers. */
     private inner class Renderer : CheckboxTree.CheckboxTreeCellRenderer() {
+        private val rowCheckbox: javax.swing.JCheckBox? by lazy {
+            components.firstOrNull { it is javax.swing.JCheckBox } as? javax.swing.JCheckBox
+        }
+
         override fun customizeRenderer(
             tree: javax.swing.JTree?, value: Any?, selected: Boolean,
             expanded: Boolean, leaf: Boolean, row: Int, hasFocus: Boolean,
         ) {
             val node = value as? JNode ?: return
-            // myCheckbox, not the deprecated getCheckbox().
-            myCheckbox.isVisible = merge && node.kind == Kind.LEAF
+            // The renderer's checkbox is its JCheckBox child; both myCheckbox and getCheckbox() are
+            // deprecated (the Marketplace verifier flags them), so find it among our components.
+            rowCheckbox?.isVisible = merge && node.kind == Kind.LEAF
             val tr = textRenderer
             val name = if (node.added) (node.objectKey ?: "") else node.label
             if (name.isNotEmpty()) tr.append("$name", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)

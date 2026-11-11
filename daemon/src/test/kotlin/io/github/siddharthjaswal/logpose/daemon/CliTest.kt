@@ -188,4 +188,22 @@ class CliTest {
         // A throwable with no message still says something rather than "null".
         assertEquals("IllegalStateException", explain(IllegalStateException(), serve()))
     }
+
+    @Test
+    fun `--rotate-token parses, and is refused with --token or --stdio`() {
+        assertTrue(serve("--rotate-token").rotateToken)
+        assertFalse(serve().rotateToken)
+        for (bad in listOf(listOf("--rotate-token", "--token", "x"), listOf("--rotate-token", "--stdio"))) {
+            val command = Cli.parse(listOf("serve") + bad, cwd)
+            assertTrue(command is Cli.Command.Exit && command.exitCode == 2, "$bad → $command")
+        }
+    }
+
+    @Test
+    fun `usage documents Bearer, rotation and the health URL`() {
+        val usage = Cli.usage()
+        assertTrue(usage.contains("--rotate-token"))
+        assertTrue(usage.contains("Authorization: Bearer"))
+        assertTrue(usage.contains("/health"))
+    }
 }

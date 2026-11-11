@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.daemon
 
 import io.github.siddharthjaswal.logpose.analysis.Correlation
 import io.github.siddharthjaswal.logpose.analysis.CorrelationKey
+import io.github.siddharthjaswal.logpose.appcontrol.AppControlService
 import io.github.siddharthjaswal.logpose.logcat.Adb
 import io.github.siddharthjaswal.logpose.mcp.McpRpc
 import io.github.siddharthjaswal.logpose.mcp.McpSessions
@@ -74,6 +75,18 @@ class DaemonSession(
         // Attaching changes what the daemon reads, not what the device holds, so it is offered
         // read-only too; Capture.attachTo re-pushes rules only under --mocks.
         devices = DaemonDevices(),
+        // Restarting or clearing the app kills it and deletes its files: a device write, so it
+        // follows the same --mocks gate as the rule writes (refused, with this host's wording).
+        apps = apps,
+    )
+
+    /** One per daemon, so its "one action at a time" latch covers every MCP connection. */
+    private val apps = AppControlService(
+        store = capture.store,
+        serial = { capture.attachedSerial ?: options.device },
+        mocks = capture.mocks,
+        writable = { options.mocks },
+        runAsync = { task -> pool.execute(task) },
     )
 
     /** One capture, so the token is pure authentication — it no longer selects anything. */
@@ -323,6 +336,9 @@ class DaemonSession(
                 "wired. Check its stderr.",
             devices = "Re-attaching isn't available — this LogPose daemon has no capture wired. " +
                 "Check its stderr.",
+            apps = "Restarting or clearing the app isn't available — this LogPose daemon is running " +
+                "read-only, and these kill the app and delete its files. Restart the daemon with " +
+                "--mocks to let it change the device.",
         )
 
         /** The daemon's 401 texts: same wire shape as the IDE's, different fix — there is no tool
@@ -335,14 +351,13 @@ class DaemonSession(
             noCapture =
                 "This LogPose daemon has no capture registered — it is still starting up, or it " +
                     "failed to start. Check its stderr.",
+            fix = "The daemon prints its token and the Claude Code / Codex setup lines when it starts " +
+                "(the token comes from --token, else \$LOGPOSE_TOKEN, else .logpose/daemon.properties; " +
+                "`logpose serve --rotate-token` issues a new saved one).",
         )
 
-        /** Length-independent enough for a 32-hex token, and constant-time over equal lengths. */
-        fun constantTimeEquals(a: String, b: String): Boolean {
-            if (a.length != b.length) return false
-            var diff = 0
-            for (i in a.indices) diff = diff or (a[i].code xor b[i].code)
-            return diff == 0
-        }
+        /** Constant-time over the bytes — see [io.github.siddharthjaswal.logpose.mcp.McpAuth]. */
+        fun constantTimeEquals(a: String, b: String): Boolean =
+            io.github.siddharthjaswal.logpose.mcp.McpAuth.constantTimeEquals(a, b)
     }
 }

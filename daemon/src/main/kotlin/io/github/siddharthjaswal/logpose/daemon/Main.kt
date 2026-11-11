@@ -2,6 +2,7 @@ package io.github.siddharthjaswal.logpose.daemon
 
 import io.github.siddharthjaswal.logpose.mcp.McpRpc
 import io.github.siddharthjaswal.logpose.mcp.McpSessions
+import io.github.siddharthjaswal.logpose.mcp.McpSetup
 import io.github.siddharthjaswal.logpose.mock.ScenarioStore
 import io.github.siddharthjaswal.logpose.settings.CorrelationSettings
 import io.github.siddharthjaswal.logpose.settings.FileKeyValueStore
@@ -11,7 +12,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
 
-/** `logpose serve` — LogPose's capture and all 23 MCP tools, with no IDE in the process. */
+/** `logpose serve` — LogPose's capture and all 25 MCP tools, with no IDE in the process. */
 fun main(args: Array<String>) {
     when (val command = Cli.parse(args.toList())) {
         is Cli.Command.Exit -> {
@@ -25,7 +26,7 @@ fun main(args: Array<String>) {
     }
 }
 
-private fun version(): String =
+internal fun version(): String =
     Daemon::class.java.`package`?.implementationVersion ?: "dev"
 
 private fun serve(options: Cli.ServeOptions) {
@@ -103,7 +104,21 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
     private val capture = Capture(options, settings, correlationSettings, log)
     private val scenarios = ScenarioStore.forProject(options.projectDir.absolutePath)
 
-    val token: String = resolveToken(options.token, System.getenv(TOKEN_ENV), settings)
+    /** Resolved on first use — [start] touches it first, so a refusal is a clean "could not start". */
+    val token: String by lazy {
+        val env = System.getenv(TOKEN_ENV)
+        if (options.rotateToken) {
+            // Rotating the saved token while $LOGPOSE_TOKEN is set would print a new token and then
+            // keep serving the env's — say so instead of pretending.
+            require(env.isNullOrBlank()) {
+                "--rotate-token replaces the saved token, but \$$TOKEN_ENV is set and wins over it. " +
+                    "Change \$$TOKEN_ENV instead (and the agents that read it), or unset it."
+            }
+            McpSessions.rotateToken(settings).also { log.info("token rotated — agents holding the old one now get 401") }
+        } else {
+            resolveToken(options.token, env, settings)
+        }
+    }
 
     private var transport: HttpTransport? = null
     private var stdio: StdioTransport? = null
@@ -111,6 +126,7 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
 
     fun start() {
         options.projectDir.mkdirs()
+        token // resolve (and maybe rotate) before anything binds
 
         val glue = DaemonSession(capture, options, scenarios, pool, log)
         val session = glue.session()
@@ -130,6 +146,7 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
                 rpc = rpc,
                 log = log,
                 health = { HttpTransport.Health(capture.store.snapshot().size, capture.state()) },
+                version = version(),
             )
             boundPort = server.start()
             transport = server
@@ -175,12 +192,7 @@ class Daemon(private val options: Cli.ServeOptions, private val log: Log) {
         }
         log.info("MCP listening on http://127.0.0.1:$boundPort${HttpTransport.PATH}")
         log.out("")
-        log.out("Connect a coding agent:")
-        log.out(
-            "  claude mcp add --transport http logpose " +
-                "http://localhost:$boundPort${HttpTransport.PATH} " +
-                "--header \"${McpRpc.TOKEN_HEADER}: $token\""
-        )
+        McpSetup.banner(McpSetup.url(boundPort), token).forEach(log::out)
         log.out("")
     }
 

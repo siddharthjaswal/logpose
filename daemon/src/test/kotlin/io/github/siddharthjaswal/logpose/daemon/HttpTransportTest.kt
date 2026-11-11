@@ -128,11 +128,12 @@ class HttpTransportTest {
     }
 
     @Test
-    fun `tools_list is unauthenticated and lists the whole catalogue`() {
-        val response = post("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""", withToken = null)
+    fun `tools_list lists the whole catalogue, and needs the token`() {
+        val response = post("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""")
         assertEquals(200, response.status)
         val tools = response.json["result"]!!.jsonObject["tools"]!!.jsonArray
-        assertEquals(23, tools.size, "the daemon must expose the same 23 tools as the plugin")
+        assertEquals(25, tools.size, "the daemon must expose the same 25 tools as the plugin")
+        assertEquals(401, post("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""", withToken = null).status)
     }
 
     @Test
@@ -147,11 +148,10 @@ class HttpTransportTest {
     }
 
     @Test
-    fun `a bad token is a JSON-RPC 401-shaped error naming the daemon`() {
+    fun `a bad token is HTTP 401 with a JSON-RPC body naming the daemon`() {
         val response = call("session_summary", withToken = "wrong")
-        // The plugin answers 200 with a JSON-RPC error body rather than an HTTP 401, and parity
-        // is the product — a client must not be able to tell the two hosts apart.
-        assertEquals(200, response.status)
+        // Every host answers the same 401 (McpHttpEndpoint), so a client still can't tell them apart.
+        assertEquals(401, response.status)
         val error = response.json["error"]!!.jsonObject
         assertEquals(-32001, error["code"]!!.jsonPrimitive.content.toInt())
         val message = error["message"]!!.jsonPrimitive.content
@@ -161,7 +161,9 @@ class HttpTransportTest {
 
     @Test
     fun `a missing token is refused the same way`() {
-        assertNotNull(call("session_summary", withToken = null).json["error"])
+        val response = call("session_summary", withToken = null)
+        assertEquals(401, response.status)
+        assertNotNull(response.json["error"])
     }
 
     @Test
@@ -229,10 +231,13 @@ class HttpTransportTest {
 
     @Test
     fun `health JSON shape is exactly what a CI check greps for`() {
+        val json = HttpTransport.healthJson(HttpTransport.Health(0, "waiting"), version = "1.10.0", port = 63343)
         assertEquals(
-            """{"status":"ok","events":0,"capture":"waiting"}""",
-            HttpTransport.healthJson(HttpTransport.Health(0, "waiting")),
+            """{"ok":true,"app":"logpose","host":"daemon","version":"1.10.0","port":63343,"status":"ok","events":0,"capture":"waiting"}""",
+            json,
         )
+        // What CI scripts grep for keeps matching.
+        assertTrue(json.contains("\"status\":\"ok\""))
     }
 
     @Test

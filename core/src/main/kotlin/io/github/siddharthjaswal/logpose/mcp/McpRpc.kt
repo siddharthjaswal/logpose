@@ -1,6 +1,7 @@
 package io.github.siddharthjaswal.logpose.mcp
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -10,6 +11,8 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReferenceArray
 
 /**
  * The MCP JSON-RPC envelope, with no transport in it.
@@ -52,7 +55,15 @@ class McpRpc(
      * tool window, a daemon will point at its own config — while the wire shape stays identical.
      * [Ide] is what the plugin sends and must not drift.
      */
-    data class AuthHint(val missingToken: String, val noCapture: String) {
+    data class AuthHint(
+        val missingToken: String,
+        val noCapture: String,
+        /**
+         * Where, in this host, the developer gets the current token and setup snippet — appended to
+         * the HTTP 401 body ([McpHttpEndpoint]) after the host-neutral "how to send it" sentence.
+         */
+        val fix: String = missingToken,
+    ) {
         companion object {
             const val TOKEN_HEADER = "X-LogPose-Token"
 
@@ -62,9 +73,37 @@ class McpRpc(
                 noCapture =
                     "No LogPose capture is registered. Open the LogPose tool window in the project you " +
                         "want to inspect, then retry.",
+                fix = "Copy the current setup snippet from the LogPose tool window → Connect Coding Agent " +
+                    "(the token is per project, and Regenerate there replaces it).",
             )
         }
     }
+
+    /** What a transport's token resolves to, before any JSON-RPC is read. See [authenticate]. */
+    enum class Auth {
+        /** A registered capture answers to this token. */
+        Ok,
+        /** No token at all — the client was never configured with one. */
+        Missing,
+        /** A token nothing answers to: regenerated, mistyped, or (IDE) its project isn't open. */
+        Invalid,
+        /** No capture is registered at all, so no token could be right yet. */
+        NoCapture,
+    }
+
+    /**
+     * Resolves [token] the way `tools/call` does, so an HTTP transport can refuse a request with a
+     * real 401 before dispatching it. Blank and null both mean [Auth.Missing].
+     */
+    fun authenticate(token: String?): Auth = when {
+        token.isNullOrBlank() -> if (sessions.hasSessions()) Auth.Missing else Auth.NoCapture
+        sessions.byToken(token) != null -> Auth.Ok
+        sessions.hasSessions() -> Auth.Invalid
+        else -> Auth.NoCapture
+    }
+
+    /** The host's wording, for a transport that writes its own auth refusal. */
+    val authHint: AuthHint get() = hint
 
     /** What the transport must do with a dispatched request. */
     sealed interface Outcome {
@@ -106,6 +145,13 @@ class McpRpc(
         val method = (request["method"] as? JsonPrimitive)?.content.orEmpty()
         val params = request["params"] as? JsonObject ?: JsonObject(emptyMap())
 
+        // JSON-RPC: a message without an id is a notification and is never answered — whatever its
+        // method, including one this server doesn't know. And a message carrying `result`/`error`
+        // instead of a method is the client answering *us*; LogPose sends no server requests, so
+        // there is nothing to route it to.
+        if ("id" !in request && method.isNotEmpty()) return Outcome.NoReply
+        if (method.isEmpty() && ("result" in request || "error" in request)) return Outcome.NoReply
+
         return when (method) {
             "initialize" -> Outcome.Reply(result(id, initialize(params)))
             "ping" -> Outcome.Reply(result(id, buildJsonObject {}))
@@ -126,10 +172,58 @@ class McpRpc(
         }
     }
 
+    /**
+     * Any JSON-RPC message an HTTP POST may carry: one request/notification object, or (MCP
+     * 2025-03-26, which we still negotiate) a batch array. [respond] is called exactly once — with
+     * the reply object, the batch's array of replies, or `null` when nothing is owed (a lone
+     * notification, or a batch of only notifications: HTTP 202). It may be called on a foreign
+     * thread, and possibly before this returns, exactly like [Outcome.Deferred].
+     */
+    fun dispatchMessage(body: String, token: String, respond: (JsonElement?) -> Unit) {
+        when (val parsed = runCatching { json.parseToJsonElement(body) }.getOrNull()) {
+            is JsonObject -> dispatchOne(parsed, token, respond)
+            is JsonArray -> dispatchBatch(parsed, token, respond)
+            else -> respond(errorResponse(JsonNull, -32700, "Parse error"))
+        }
+    }
+
+    private fun dispatchOne(request: JsonObject, token: String, respond: (JsonElement?) -> Unit) {
+        when (val outcome = dispatch(request, token) { payload -> respond(payload) }) {
+            is Outcome.Reply -> respond(outcome.body)
+            Outcome.NoReply -> respond(null)
+            Outcome.Deferred -> Unit // the callback above writes it, at most once (McpRpc's latch)
+        }
+    }
+
+    /**
+     * A batch answers once every member has, in member order, leaving out the notifications. The
+     * members may finish on different threads (one deferred tool among sync ones), hence the
+     * atomic slots and countdown rather than a list.
+     */
+    private fun dispatchBatch(batch: JsonArray, token: String, respond: (JsonElement?) -> Unit) {
+        if (batch.isEmpty()) {
+            respond(errorResponse(JsonNull, -32600, "Invalid Request: empty batch"))
+            return
+        }
+        val slots = AtomicReferenceArray<JsonElement?>(batch.size)
+        val remaining = AtomicInteger(batch.size)
+        fun settle(index: Int, reply: JsonElement?) {
+            slots.set(index, reply)
+            if (remaining.decrementAndGet() == 0) {
+                val replies = (0 until batch.size).mapNotNull { slots.get(it) }
+                respond(if (replies.isEmpty()) null else JsonArray(replies))
+            }
+        }
+        batch.forEachIndexed { index, member ->
+            val settled = AtomicBoolean(false)
+            val once: (JsonElement?) -> Unit = { reply -> if (settled.compareAndSet(false, true)) settle(index, reply) }
+            if (member is JsonObject) dispatchOne(member, token, once)
+            else once(errorResponse(JsonNull, -32600, "Invalid Request"))
+        }
+    }
+
     private fun initialize(params: JsonObject): JsonObject {
-        // Echo the client's protocol version when it names one — safer than pinning a version
-        // this plugin would then have to chase.
-        val version = (params["protocolVersion"] as? JsonPrimitive)?.content ?: PROTOCOL_VERSION
+        val version = negotiateVersion((params["protocolVersion"] as? JsonPrimitive)?.content)
         return buildJsonObject {
             put("protocolVersion", version)
             put("capabilities", buildJsonObject { put("tools", buildJsonObject {}) })
@@ -151,7 +245,10 @@ class McpRpc(
                     "a check reads mock → inject → await → assert. Those three change what the " +
                     "running app receives; the timeline always shows which rows they produced. If " +
                     "capture has stopped (an emulator reboot, an adb drop), attach_device " +
-                    "reattaches it.",
+                    "reattaches it. restart_app relaunches the app and clear_app_data clears its " +
+                    "cache (scope='cache') or all of its data (scope='all', which logs it out) " +
+                    "before relaunching — each starts a new app run and leaves a marker row on " +
+                    "the timeline.",
             )
         }
     }
@@ -214,6 +311,7 @@ class McpRpc(
                 devices = session.devices,
                 captureRunning = session.captureRunning,
                 unavailable = unavailable,
+                apps = session.apps,
             ) { payload ->
                 answer(toolResult(json.encodeToString(JsonElement.serializer(), payload), isError = false))
             }
@@ -257,9 +355,35 @@ class McpRpc(
     /** Serialize a response body the way every LogPose transport must write it. */
     fun encode(body: JsonObject): String = json.encodeToString(JsonElement.serializer(), body)
 
+    /** [encode] for a batch reply (an array) as well as a single object. */
+    fun encodeElement(body: JsonElement): String = json.encodeToString(JsonElement.serializer(), body)
+
     companion object {
         const val TOKEN_HEADER = AuthHint.TOKEN_HEADER
-        private const val PROTOCOL_VERSION = "2025-06-18"
         private const val PROTOCOL_SERVER_VERSION = "1.6.0"
+
+        /**
+         * The MCP revisions this server speaks. For a tools-only server they differ in nothing it
+         * sends: 2025-11-25 is additive over 2025-06-18 (and was already echoed before negotiation
+         * existed, so clients sending it keep the exact reply they got), and 2025-03-26 is why a
+         * batch body is still accepted ([dispatchMessage]). 2026-07-28 (`server/discover`) is
+         * deliberately absent: a client that prefers it — Codex behind its `mcp_2026_07_28`
+         * feature — gets `-32601` for `server/discover` and falls back to `initialize` with
+         * 2025-06-18, the path its own legacy-fallback code is written for.
+         */
+        val SUPPORTED_PROTOCOL_VERSIONS = listOf("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
+
+        /**
+         * Answered when the client names a version we don't speak, or none. 2025-06-18 rather than
+         * the newest because it is what this server always answered with — byte-compatible.
+         */
+        const val LATEST_PROTOCOL_VERSION = "2025-06-18"
+
+        /**
+         * The spec's negotiation: echo the client's version when we support it, otherwise answer
+         * with [LATEST_PROTOCOL_VERSION] and let the client decide whether it can live with that.
+         */
+        fun negotiateVersion(requested: String?): String =
+            requested?.takeIf { it in SUPPORTED_PROTOCOL_VERSIONS } ?: LATEST_PROTOCOL_VERSION
     }
 }

@@ -44,6 +44,11 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
+    // `./gradlew test -PrenderDir=/some/dir` also writes PNGs of renderable panels (ConnectAgentPanelTest).
+    providers.gradleProperty("renderDir").orNull?.let {
+        systemProperty("logpose.renderDir", it)
+        systemProperty("java.awt.headless", "true")
+    }
 }
 
 // LogPose contributes no Settings page, so there is nothing for searchable-options indexing to
@@ -86,7 +91,8 @@ intellijPlatform {
             ide("2024.1")
             ide("2024.3")
             ide("2025.1")
-            ide("2025.2") // newest release that resolves from the IDE repo for this platform
+            ide("2025.2")
+            ide(org.jetbrains.intellij.platform.gradle.IntelliJPlatformType.IntellijIdeaUltimate, "2026.2") // where the Marketplace flagged internal/deprecated API on 1.9.0
 
         }
     }
@@ -95,3 +101,18 @@ intellijPlatform {
 kotlin {
     jvmToolchain(17)
 }
+
+// The tool window shows the plugin's own version. Reading it back through PluginManager is flagged as
+// internal API by the Marketplace verifier, so bake it into a resource at build time instead.
+val generatePluginVersion by tasks.registering {
+    val out = layout.buildDirectory.dir("generated/versionResource")
+    val v = project.version.toString()
+    inputs.property("version", v)
+    outputs.dir(out)
+    doLast {
+        val f = out.get().file("io/github/siddharthjaswal/logpose/plugin-version.txt").asFile
+        f.parentFile.mkdirs()
+        f.writeText(v)
+    }
+}
+sourceSets.main { resources.srcDir(generatePluginVersion) }

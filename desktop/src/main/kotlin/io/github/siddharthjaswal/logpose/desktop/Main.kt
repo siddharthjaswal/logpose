@@ -40,6 +40,8 @@ import androidx.compose.ui.window.FrameWindowScope
 import androidx.compose.ui.window.MenuBar
 import io.github.siddharthjaswal.logpose.desktop.app.Popover
 import io.github.siddharthjaswal.logpose.desktop.ui.ChromeActions
+import io.github.siddharthjaswal.logpose.desktop.ui.AppActions
+import io.github.siddharthjaswal.logpose.appcontrol.AppAction
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import java.awt.Desktop
@@ -140,6 +142,9 @@ private fun App(model: AppModel, adb: AdbStatus) {
     val emulators by model.emulators.ui.collectAsState()
     val layout by model.layout.layout.collectAsState()
     val popover by model.layout.popover.collectAsState()
+    val app by model.appActions.ui.collectAsState()
+    // The App menu's target follows the capture's runs and the selected device.
+    LaunchedEffect(snapshot, selectedSerial) { model.appActions.refresh() }
     // A one-second clock, only while a session runs: it is what lets "no LogPose events" appear
     // 20 s in without any event arriving to trigger a recomposition.
     val now by produceState(System.currentTimeMillis(), session) {
@@ -174,6 +179,7 @@ private fun App(model: AppModel, adb: AdbStatus) {
             advanced = advanced, mcp = mcp, serveBusy = serveBusy, updates = updates,
             emulators = emulators,
             layout = layout, popover = popover,
+            app = app,
         ),
         ScreenActions(
             onDownloadAdb = model::downloadPlatformTools,
@@ -269,6 +275,8 @@ private fun App(model: AppModel, adb: AdbStatus) {
                 onClearProjectFolder = { model.setProjectDir(null) },
                 onServe = model::setServing,
                 onCopy = model::copy,
+                onMcpClient = model::selectMcpClient,
+                onRegenerateToken = model::regenerateMcpToken,
             ),
             onUpdatesEnabled = model.updates::setEnabled,
             onDownloadUpdate = model.updates::openDownload,
@@ -297,6 +305,16 @@ private fun App(model: AppModel, adb: AdbStatus) {
                 onTogglePopover = model.layout::toggle,
                 onClosePopover = model.layout::close,
                 onLayout = model.layout::set,
+            ),
+            app = AppActions(
+                onRequest = model.appActions::request,
+                onPick = model.appActions::pick,
+                onDraft = model.appActions::editDraft,
+                onUseDraft = { model.appActions.useDraft() },
+                onRegrant = model.appActions::setRegrant,
+                onConfirm = model.appActions::confirm,
+                onCancelConfirm = model.appActions::cancelConfirm,
+                onDismiss = model.appActions::dismissResult,
             ),
             share = ShareActions(
                 onClose = model.share::close,
@@ -328,10 +346,12 @@ private fun FrameWindowScope.AppMenuBar(model: AppModel) {
     val selected by model.selectedSerial.collectAsState()
     val devices by model.devices.collectAsState()
     val updates by model.updates.ui.collectAsState()
+    val app by model.appActions.ui.collectAsState()
     val running = session is SessionState.Running
     val ready = adb is AdbStatus.Ready
     openFile = { chooseCaptureFile()?.let(model::openCaptureFile) }
     fun meta(key: Key, shift: Boolean = false) = KeyShortcut(key, meta = true, shift = shift)
+    fun metaAlt(key: Key, shift: Boolean = false) = KeyShortcut(key, meta = true, alt = true, shift = shift)
     MenuBar {
         Menu("File") {
             Item("Open Capture File…", shortcut = meta(Key.O), onClick = { openFile() })
@@ -346,6 +366,13 @@ private fun FrameWindowScope.AppMenuBar(model: AppModel) {
             Item("Take Screenshot", shortcut = meta(Key.S, shift = true), enabled = running, onClick = model::takeScreenshot)
             Separator()
             Item("Clear Timeline", enabled = viewing == null, onClick = model::clearTimeline)
+            Separator()
+            // ⌥⌘ keeps clear of every existing binding (⌘R is Start/Stop); the destructive one still confirms.
+            val canApp = viewing == null && devices.any { it.serial == selected && it.ready } && app.pkg != null && !app.busy
+            Item("Restart App", shortcut = metaAlt(Key.R), enabled = canApp, onClick = { model.appActions.request(AppAction.RESTART) })
+            Item("Clear App Cache & Restart", shortcut = metaAlt(Key.C), enabled = canApp, onClick = { model.appActions.request(AppAction.CLEAR_CACHE) })
+            Item("Clear All App Data & Restart…", shortcut = metaAlt(Key.C, shift = true), enabled = canApp, onClick = { model.appActions.request(AppAction.CLEAR_DATA) })
+            Item("Choose App…", enabled = viewing == null && devices.any { it.serial == selected && it.ready }, onClick = { model.layout.open(Popover.APP) })
         }
         Menu("Device") {
             Item("Choose Device…", shortcut = meta(Key.K), enabled = ready, onClick = { model.layout.open(Popover.SWITCHER) })

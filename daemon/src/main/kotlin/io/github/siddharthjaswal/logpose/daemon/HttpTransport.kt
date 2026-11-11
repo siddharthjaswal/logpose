@@ -19,6 +19,8 @@ class HttpTransport(
     /** For `/health` — event count and whether logcat is attached. */
     health: () -> Health,
     deferTimeoutSeconds: Long = DEFER_TIMEOUT_SECONDS,
+    /** `/health`'s `version` — the daemon jar's own. */
+    version: String = "dev",
 ) {
 
     data class Health(val events: Int, val capture: String)
@@ -29,6 +31,8 @@ class HttpTransport(
         warn = log::warn,
         health = { health().let { McpHttpTransport.Health(it.events, it.capture) } },
         deferTimeoutSeconds = deferTimeoutSeconds,
+        hostName = "daemon",
+        version = version,
     )
 
     /** Binds and starts serving. Returns the actual port (the same one, or the OS's when 0). */
@@ -42,7 +46,7 @@ class HttpTransport(
         const val DEFER_TIMEOUT_SECONDS = McpHttpTransport.DEFER_TIMEOUT_SECONDS
         const val MAX_THREADS = McpHttpTransport.MAX_THREADS
 
-        fun healthJson(health: Health): String =
-            McpHttpTransport.healthJson(McpHttpTransport.Health(health.events, health.capture))
+        fun healthJson(health: Health, version: String = "dev", port: Int = McpHttpTransport.DEFAULT_PORT): String =
+            McpHttpTransport.healthJson(McpHttpTransport.Health(health.events, health.capture), "daemon", version, port)
     }
 }

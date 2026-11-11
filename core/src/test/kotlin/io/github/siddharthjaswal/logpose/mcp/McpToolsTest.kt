@@ -32,6 +32,8 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.int
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotEquals
@@ -780,6 +782,7 @@ class McpToolsTest {
                 "await_event", "find_failures",
                 "session_summary", "query_hotspots", "worker_history", "config_changes",
                 "analytics_events", "clear_capture", "list_devices", "attach_device",
+                "restart_app", "clear_app_data",
                 "list_mocks", "create_mock", "set_mock_enabled", "delete_mock",
                 "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
             ),
@@ -791,6 +794,7 @@ class McpToolsTest {
             setOf(
                 "await_event", "inject_fcm", "list_scenarios", "load_scenario", "save_scenario",
                 "get_related", "list_correlation_keys", "list_devices", "attach_device",
+                "restart_app", "clear_app_data",
             ),
             names.filter { McpTools.isAsync(it) }.toSet(),
         )
@@ -1058,11 +1062,120 @@ class McpToolsTest {
         correlations: McpTools.Correlations? = null,
         capturing: Boolean = true,
         devices: McpTools.Devices? = null,
+        apps: McpTools.Apps? = null,
+        unavailable: McpTools.Unavailable = McpTools.Unavailable.Ide,
     ): Answer = Answer().also { answer ->
         McpTools.callAsync(
             name, args, events, push, waits, scenarios, correlations, devices,
-            captureRunning = { capturing }, now = { clock }, onResult = answer::accept,
+            captureRunning = { capturing }, now = { clock }, unavailable = unavailable, apps = apps, onResult = answer::accept,
         )
+    }
+
+    // ---- restart_app / clear_app_data ----------------------------------------------------------
+
+    /** Records what it was asked to do and answers with a scripted outcome. */
+    private class FakeApps(
+        private val writable: Boolean = true,
+        private val serial: String? = "emulator-5580",
+        private val announced: List<String> = listOf("com.acme.app.debug"),
+        private val failure: io.github.siddharthjaswal.logpose.appcontrol.AppControl.Failure? = null,
+    ) : McpTools.Apps {
+        val calls = mutableListOf<Triple<io.github.siddharthjaswal.logpose.appcontrol.AppAction, String, Boolean>>()
+        override fun writable() = writable
+        override fun serial() = serial
+        override fun target(explicit: String?) =
+            io.github.siddharthjaswal.logpose.appcontrol.AppTarget.choose(announced, null, explicit)
+        override fun perform(
+            action: io.github.siddharthjaswal.logpose.appcontrol.AppAction,
+            pkg: String,
+            options: io.github.siddharthjaswal.logpose.appcontrol.AppControl.Options,
+            awaitRunMillis: Long,
+            progress: (String) -> Unit,
+            onResult: (io.github.siddharthjaswal.logpose.appcontrol.AppControlService.Outcome) -> Unit,
+        ) {
+            calls += Triple(action, pkg, options.regrantPermissions)
+            val notDebuggable = failure == io.github.siddharthjaswal.logpose.appcontrol.AppControl.Failure.NOT_DEBUGGABLE
+            val report = io.github.siddharthjaswal.logpose.appcontrol.AppControl.Report(
+                action, serial!!, pkg,
+                steps = listOf(io.github.siddharthjaswal.logpose.appcontrol.AppControl.Step("force-stop", "am force-stop $pkg", true, "")),
+                failure = failure, error = if (failure != null) "run-as refused" else null,
+                stopped = !notDebuggable, cleared = failure == null && action != io.github.siddharthjaswal.logpose.appcontrol.AppAction.RESTART,
+                launchedVia = if (notDebuggable) null else "am start -n $pkg/.Main", sdk = 34,
+            )
+            onResult(
+                io.github.siddharthjaswal.logpose.appcontrol.AppControlService.Outcome(
+                    report, markerId = if (notDebuggable) null else "logpose-app-1",
+                    newRun = if (notDebuggable) null else io.github.siddharthjaswal.logpose.store.EventStore.Session(3, 0, "proc-3", pkg, "1.7.4", pid = 4242),
+                    waitedMillis = 850,
+                    mocks = io.github.siddharthjaswal.logpose.appcontrol.AppControlService.MocksAfter(true, 2, rePushed = !notDebuggable, acknowledged = !notDebuggable),
+                ),
+            )
+        }
+    }
+
+    @Test fun `restart_app restarts the announced app and returns the new run`() {
+        val apps = FakeApps()
+        val out = callAsync("restart_app", apps = apps).get()
+        assertEquals(listOf(Triple(io.github.siddharthjaswal.logpose.appcontrol.AppAction.RESTART, "com.acme.app.debug", false)), apps.calls)
+        assertEquals(true, out["done"]!!.jsonPrimitive.boolean)
+        assertEquals("restart", out["action"]!!.jsonPrimitive.content)
+        assertEquals("announced by the app", out["target"]!!.jsonPrimitive.content)
+        assertEquals(3, out["new_run"]!!.jsonObject["session"]!!.jsonPrimitive.int)
+        assertEquals("yes", out["mocks"]!!.jsonObject["re_pushed"]!!.jsonPrimitive.content)
+        assertEquals("logpose-app-1", out["marker_id"]!!.jsonPrimitive.content)
+        assertEquals("adb -s emulator-5580 shell am force-stop com.acme.app.debug", out["steps"]!!.jsonArray[0].jsonObject["command"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `clear_app_data maps scope and passes regrant only for all`() {
+        val apps = FakeApps()
+        callAsync("clear_app_data", buildJsonObject { put("scope", "cache"); put("regrant_permissions", true) }, apps = apps).get()
+        callAsync("clear_app_data", buildJsonObject { put("scope", "all"); put("regrant_permissions", true) }, apps = apps).get()
+        assertEquals(
+            listOf(
+                Triple(io.github.siddharthjaswal.logpose.appcontrol.AppAction.CLEAR_CACHE, "com.acme.app.debug", false),
+                Triple(io.github.siddharthjaswal.logpose.appcontrol.AppAction.CLEAR_DATA, "com.acme.app.debug", true),
+            ),
+            apps.calls,
+        )
+        assertTrue(callAsync("clear_app_data", apps = apps).get()["error"]!!.jsonPrimitive.content.startsWith("Missing 'scope'"))
+        assertEquals("scope must be 'cache' or 'all'.", callAsync("clear_app_data", buildJsonObject { put("scope", "files") }, apps = apps).get()["error"]!!.jsonPrimitive.content)
+        assertEquals(2, apps.calls.size, "a bad scope runs nothing")
+    }
+
+    @Test fun `a refused cache clear offers the full clear instead of escalating`() {
+        val apps = FakeApps(failure = io.github.siddharthjaswal.logpose.appcontrol.AppControl.Failure.NOT_DEBUGGABLE)
+        val out = callAsync("clear_app_data", buildJsonObject { put("scope", "cache") }, apps = apps).get()
+        assertEquals(false, out["done"]!!.jsonPrimitive.boolean)
+        assertTrue(out["offer"]!!.jsonPrimitive.content.contains("scope='all'"))
+        assertEquals(1, apps.calls.size)
+        assertFalse(out.containsKey("new_run"))
+    }
+
+    @Test fun `app tools refuse on a read-only host with that host's words`() {
+        val readOnly = McpTools.Unavailable.Ide.copy(apps = "read-only: restart with --mocks")
+        val apps = FakeApps(writable = false)
+        for ((tool, args) in listOf("restart_app" to buildJsonObject {}, "clear_app_data" to buildJsonObject { put("scope", "all") })) {
+            val out = callAsync(tool, args, apps = apps, unavailable = readOnly).get()
+            assertEquals("read-only: restart with --mocks", out["error"]!!.jsonPrimitive.content, tool)
+        }
+        assertTrue(apps.calls.isEmpty())
+    }
+
+    @Test fun `app tools never guess between several apps`() {
+        val apps = FakeApps(announced = listOf("com.b", "com.a"))
+        val out = callAsync("restart_app", apps = apps).get()
+        assertTrue(out["error"]!!.jsonPrimitive.content.contains("pass package"))
+        assertEquals(listOf("com.b", "com.a"), out["announced"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(apps.calls.isEmpty())
+        callAsync("restart_app", buildJsonObject { put("package", "com.a") }, apps = apps).get()
+        assertEquals("com.a", apps.calls.single().second)
+    }
+
+    @Test fun `app tools say what to pass when nothing announced`() {
+        val out = callAsync("restart_app", apps = FakeApps(announced = emptyList())).get()
+        assertTrue(out["error"]!!.jsonPrimitive.content.contains("No app has announced itself"))
+        val noDevice = callAsync("restart_app", apps = FakeApps(serial = null)).get()
+        assertTrue(noDevice["error"]!!.jsonPrimitive.content.contains("attach_device"))
     }
 
     // ---- await_event ---------------------------------------------------------------------------
@@ -1169,6 +1282,8 @@ class McpToolsTest {
         assertTrue(callAsync("list_correlation_keys").get().containsKey("error"))
         assertTrue(callAsync("list_devices").get().containsKey("error"))
         assertTrue(callAsync("attach_device").get().containsKey("error"))
+        assertTrue(callAsync("restart_app").get().containsKey("error"))
+        assertTrue(callAsync("clear_app_data", buildJsonObject { put("scope", "all") }).get().containsKey("error"))
     }
 
     // ---- inject_fcm ----------------------------------------------------------------------------

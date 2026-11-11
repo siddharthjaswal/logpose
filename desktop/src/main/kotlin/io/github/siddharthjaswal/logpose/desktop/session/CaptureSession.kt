@@ -180,6 +180,16 @@ class CaptureSession(
         )
     }
 
+    /**
+     * Puts a host-made row (the App actions' marker) on the timeline *and* in the session recording,
+     * so a shared `.logpose` file shows what LogPose did to the app. It is an ordinary envelope line,
+     * replayed like any other.
+     */
+    fun recordLocal(event: LogEvent) {
+        store.add(event)
+        recorder?.takeIf { _state.value is SessionState.Running }?.append(CaptureLines.of(event))
+    }
+
     @Synchronized
     fun stop() {
         val before = _state.value

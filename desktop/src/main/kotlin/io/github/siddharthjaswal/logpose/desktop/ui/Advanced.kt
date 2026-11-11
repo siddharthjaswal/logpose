@@ -74,6 +74,8 @@ class AdvancedActions(
     val onClearProjectFolder: () -> Unit = {},
     val onServe: (Boolean) -> Unit = {},
     val onCopy: (String, String) -> Unit = { _, _ -> },
+    val onMcpClient: (io.github.siddharthjaswal.logpose.mcp.McpSetup.Client) -> Unit = {},
+    val onRegenerateToken: () -> Unit = {},
 )
 
 /** The sync line's three-plus states — the plugin MocksBar's `applySync`, word for word. */

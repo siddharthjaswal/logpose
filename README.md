@@ -775,20 +775,90 @@ all from the chat, while the app keeps running.
 
 ### Setup
 
-In the LogPose tool window, click **⚡ Connect Coding Agent** — it copies a ready-to-run
-command:
+In the LogPose tool window, click **⚡ Connect Coding Agent**. The popup has a **Claude Code /
+Codex / Other (JSON)** picker with ready-to-copy snippets carrying the real port and this project's
+token, a **Regenerate token** link, and **Copy health URL**. LogPose for Mac has the same picker in
+its status bar's **MCP** popover, and `logpose serve` prints all of them when it starts.
+
+Where each host serves (all on loopback only):
+
+| Host | MCP endpoint | Health (no token) |
+|---|---|---|
+| IDE plugin | `http://127.0.0.1:63342/api/logpose/mcp` | `http://127.0.0.1:63342/api/logpose/health` |
+| `logpose serve` | `http://127.0.0.1:63343/api/logpose/mcp` | `http://127.0.0.1:63343/health` |
+| LogPose for Mac | `http://127.0.0.1:63343/api/logpose/mcp` (next free port if taken) | `http://127.0.0.1:<port>/health` |
+
+63342 is the IDE's built-in server port; a second IDE takes the next free one, so trust the port in
+the copied snippet. Health answers `{"ok":true,"app":"logpose","host":"ide|daemon|mac","version":…,"port":…}`
+(plus `events`/`capture` on the daemon and the app) and nothing from the capture.
+
+#### Use with Claude Code
 
 ```bash
-claude mcp add --transport http logpose http://localhost:63342/api/logpose/mcp \
-  --header "X-LogPose-Token: <your project token>"
+claude mcp add --transport http logpose http://127.0.0.1:63342/api/logpose/mcp \
+  --header "Authorization: Bearer <your project token>"
 ```
 
-**Tools (23).**
+Verify with `claude mcp list` (logpose should be ✓ connected). Lines saved before 1.11 that use
+`--header "X-LogPose-Token: <token>"` keep working unchanged.
+
+#### Use with Codex
+
+Codex reads the token from an environment variable, so it never sits in a config file:
+
+```bash
+export LOGPOSE_TOKEN=<your project token>     # add to ~/.zshrc so every Codex session sees it
+codex mcp add logpose --url http://127.0.0.1:63342/api/logpose/mcp --bearer-token-env-var LOGPOSE_TOKEN
+```
+
+That writes the same table you can add by hand — to `~/.codex/config.toml`, or to your app repo's
+`.codex/config.toml` (Codex reads a project-local config once you've trusted the project, and
+since it holds no token it's safe to commit):
+
+```toml
+[mcp_servers.logpose]
+url = "http://127.0.0.1:63342/api/logpose/mcp"
+bearer_token_env_var = "LOGPOSE_TOKEN"
+```
+
+Verify with `codex mcp list` and `codex mcp get logpose`, then ask Codex to call
+`session_summary`. No `experimental_use_rmcp_client` flag is needed on current Codex. A static
+header works too (`http_headers = { "X-LogPose-Token" = "<token>" }`, or
+`env_http_headers = { "X-LogPose-Token" = "LOGPOSE_TOKEN" }`), but the bearer form is the one the
+snippets use. `logpose serve` also reads `$LOGPOSE_TOKEN` as its token, so one export serves both.
+
+#### Any other MCP client
+
+LogPose speaks MCP **Streamable HTTP** (protocol 2025-06-18; 2025-03-26, 2024-11-05 and
+2025-11-25 are negotiated too): `POST` JSON-RPC to the endpoint with
+`Authorization: Bearer <token>` (or `X-LogPose-Token: <token>`). It answers in plain JSON even
+when you `Accept: application/json, text/event-stream`, returns 202 for notifications and 405 for
+`GET` (no SSE stream), accepts JSON-RPC batches, and issues no `Mcp-Session-Id` (the token already
+selects the capture). For JSON-configured clients:
+
+```json
+{ "mcpServers": { "logpose": { "type": "http", "url": "http://127.0.0.1:63342/api/logpose/mcp",
+  "headers": { "Authorization": "Bearer <token>" } } } }
+```
+
+#### Troubleshooting
+
+- **Connection refused** — nothing is listening: the IDE is closed, Serve MCP is off in LogPose for
+  Mac, or `logpose serve` isn't running. Check the health URL; check the port in the snippet.
+- **401** — the token is missing or was regenerated. The `WWW-Authenticate: Bearer realm="logpose"`
+  response says which (`error="invalid_token"` for a stale one). Re-copy the snippet, or for Codex
+  update `LOGPOSE_TOKEN` and restart Codex.
+- **503** (IDE) — no LogPose tool window is open yet, so there's no capture to serve. Open it.
+- **403** — the request came with a non-loopback `Host` or a browser `Origin`. LogPose refuses those
+  on purpose (DNS-rebinding guard); point the client at `127.0.0.1` or `localhost`.
+
+**Tools (25).**
 
 | Group | Tools |
 |---|---|
 | **Read the capture** | `list_events`, `get_event`, `get_trace`, `find_failures`, `session_summary`, `clear_capture` |
 | **Keep capture attached** | `list_devices`, `attach_device` |
+| **Restart or reset the app** | `restart_app`, `clear_app_data` (`scope: cache \| all`) |
 | **Follow one id** | `get_related`, `list_correlation_keys` |
 | **Diagnose the other kinds** | `query_hotspots`, `worker_history`, `config_changes`, `analytics_events` |
 | **Change what the app receives** | `list_mocks`, `create_mock`, `set_mock_enabled`, `delete_mock` |
@@ -821,20 +891,59 @@ copied command, since a second IDE gets the next free port). A few things worth 
 
 - **Every call is authenticated** with a per-project token, which also selects *which* open
   project's capture to serve. Captures contain auth tokens and user data, and that port is
-  reachable by any local process.
+  reachable by any local process. **Regenerate token** in the popup replaces it; the old one is
+  refused from the next request on. LogPose also refuses non-loopback peers and any request whose
+  `Host`/`Origin` isn't a loopback name, so a web page can't reach the capture by DNS rebinding.
 - **`attach_device` changes what LogPose captures.** It restarts capture (or moves it to another
   device) the way ▶ and the device picker do — for when an emulator reboot or an adb drop stopped
   it and nobody is at the window. It re-pushes the mock rules, so they apply again.
+- **`restart_app` / `clear_app_data` kill the app** (and `scope: "all"` logs it out). They are
+  refused on a host that must not change the device — `logpose serve` without `--mocks`, LogPose
+  for Mac unless it controls the phone's mocks — and answer with the new run's session once the
+  relaunched app says hello. See [Restart or reset the app](#restart-or-reset-the-app).
 - **`create_mock` changes what the running app receives.** Your MCP client asks before each
   call, rules show up in the Mocks strip like any other, and everything clears from the device
   when capture stops.
 - **Response bodies can be withheld** while still exposing request shape, statuses, and
   timings — set `logpose.mcp.exposeBodies` to `false` in the project's properties.
 
+## Restart or reset the app
+
+The toolbar's **App ▾** (IDE tool window and LogPose for Mac) acts on the app being captured — the
+package its `Hello` announced, `.debug` suffix and all. Several apps announced? Pick one. None yet?
+Type the package; it is remembered per device.
+
+| Action | What runs (`adb -s <serial> shell …`) | Keeps |
+|---|---|---|
+| **Restart app** | `am force-stop <pkg>` → `cmd package resolve-activity --brief -c android.intent.category.LAUNCHER <pkg>` → `am start -n '<component>' -a android.intent.action.MAIN -c android.intent.category.LAUNCHER` (fallback: `monkey -p <pkg> -c android.intent.category.LAUNCHER 1`) | everything |
+| **Clear cache & restart** | `run-as <pkg> true` (probe, before anything is stopped) → force-stop → `run-as <pkg> sh -c 'rm -rf cache/* cache/.[!.]* code_cache/* code_cache/.[!.]*'` → empty `/sdcard/Android/data/<pkg>/cache` → launch | logins, databases, files, prefs |
+| **Clear all data & restart…** | (optional `dumpsys package <pkg>`) → force-stop → `pm clear <pkg>` → (optional `pm grant` per permission) → launch | nothing |
+
+- **Cache needs a debuggable build.** On a release build `run-as` refuses; LogPose says so, changes
+  nothing, and offers *Clear all data* as its own, confirmed action — it never escalates by itself.
+- **What `pm clear` resets** (verified on API 34 and 36 emulators): the app's internal and
+  device-protected data (databases, shared prefs, `files/`, `no_backup/`, caches), its folders
+  under `Android/data` and `Android/media`, and its runtime permissions (back to "ask"). Its OBB
+  folder survives. The confirm dialog says so before anything runs.
+- **Re-grant runtime permissions afterwards** (checkbox): reads `granted=true` runtime permissions
+  from `dumpsys package` first (skipping system/policy-fixed ones) and `pm grant`s them back;
+  anything the device refuses is listed. Special access (overlay, exact alarms, all-files, battery
+  optimisation) is app-op based and not restored.
+- **The capture shows it.** A `Restarted by LogPose` / `Cache cleared` / `App data cleared` row
+  (kind `logpose`) lands at the run boundary, then the relaunched app's hello opens a new run — the
+  old run's open requests become *abandoned · app restarted*. Mac recordings and shared `.logpose`
+  files keep the row.
+- **Mocks come back by themselves.** Force-stop and `pm clear` wipe the device's in-memory rules;
+  the new run's hello reports zero rules and the mock writer re-pushes them. A request the app fires
+  in the first ~100 ms after launch can still beat that push.
+- Mac shortcuts: **⌥⌘R** restart, **⌥⌘C** clear cache, **⌥⇧⌘C** clear all data (Session menu).
+- API floor 24 (`cmd package` and adb's exit-status protocol). On a build whose `cmd` lacks
+  `resolve-activity --brief`, the launch falls back to `monkey`.
+
 ## Run headless (`logpose serve`)
 
 Everything above assumes an IDE is open. It doesn't have to be. `logpose serve` is the same
-capture and the **same 23 MCP tools** in a plain JVM process — no tool window, no timeline, no
+capture and the **same 25 MCP tools** in a plain JVM process — no tool window, no timeline, no
 IntelliJ on the classpath — for an agent driving a device from a terminal, a QA laptop, or CI.
 
 Build it, then run it against the directory you want `.logpose/` anchored in:
@@ -850,9 +959,12 @@ resolution the plugin does). The jar is self-contained; copy it anywhere.
 **Two transports.** Pick by who starts the process.
 
 ```bash
-# HTTP — the daemon runs, clients connect. It prints this line itself, token included:
-claude mcp add --transport http logpose http://localhost:63343/api/logpose/mcp \
-  --header "X-LogPose-Token: <the token it printed>"
+# HTTP — the daemon runs, clients connect. It prints the Claude Code and Codex lines itself,
+# token included:
+claude mcp add --transport http logpose http://127.0.0.1:63343/api/logpose/mcp \
+  --header "Authorization: Bearer <the token it printed>"
+export LOGPOSE_TOKEN=<the token it printed>
+codex mcp add logpose --url http://127.0.0.1:63343/api/logpose/mcp --bearer-token-env-var LOGPOSE_TOKEN
 
 # stdio — your MCP client launches the daemon and owns its pipes. No port, no token:
 claude mcp add logpose -- java -jar logpose-daemon.jar serve --stdio --project-dir /path/to/your/app
@@ -861,9 +973,14 @@ claude mcp add logpose -- java -jar logpose-daemon.jar serve --stdio --project-d
 Over stdio, stdout carries newline-delimited JSON-RPC and **nothing else** — every log line,
 including the connect banner, goes to stderr. `--stdio` and `--port` are mutually exclusive.
 
-`GET http://127.0.0.1:63343/health` answers `{"status":"ok","events":N,"capture":"attached"}`
+`GET http://127.0.0.1:63343/health` answers
+`{"ok":true,"app":"logpose","host":"daemon","version":"…","port":63343,"status":"ok","events":N,"capture":"attached"}`
 without a token, so a CI script can wait for the daemon before it has one. Both transports bind
 **127.0.0.1 only**, like the plugin.
+
+The token is `--token`, else `$LOGPOSE_TOKEN`, else the one saved in `.logpose/daemon.properties`
+(generated on first run). `logpose serve --rotate-token` replaces the saved one before serving —
+agents holding the old token get 401 until they're given the new one.
 
 ### Running it beside the IDE
 
@@ -883,7 +1000,7 @@ answer normally, while `create_mock`, `set_mock_enabled`, `delete_mock`, `load_s
 ### What it honestly doesn't have
 
 No UI — no timeline, no filter bar, no waterfall rendering, no mock dialog, no diff view, no
-endpoint muting. Everything else is there: all 23 tools, mocks, push injection, correlation and
+endpoint muting. Everything else is there: all 25 tools, mocks, push injection, correlation and
 `await_event`.
 
 Two seams are worth knowing:

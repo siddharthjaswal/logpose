@@ -132,6 +132,8 @@ data class ScreenState(
     /** Render seeds: the switcher's search text and highlighted row on first composition. */
     val switcherQuery: String = "",
     val switcherHighlight: String? = null,
+    // App actions — restart / clear the captured app (toolbar App menu, its confirm and progress strip)
+    val app: io.github.siddharthjaswal.logpose.desktop.app.AppActionsUi = io.github.siddharthjaswal.logpose.desktop.app.AppActionsUi(),
 )
 
 /** The chrome's verbs: popovers and the pane layout. */
@@ -170,6 +172,7 @@ class ScreenActions(
     val onDownloadUpdate: () -> Unit = {},
     val emulators: EmulatorActions = EmulatorActions(),
     val chrome: ChromeActions = ChromeActions(),
+    val app: AppActions = AppActions(),
 )
 
 @Composable
@@ -195,6 +198,7 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
             state.viewing?.let { ViewingBanner(it, actions) }
             state.pendingBookmark?.let { BookmarkPrompt(it, state.marks.bookmarks.size + 1, actions) }
             state.notice?.let { NoticeStrip(it, actions) }
+            AppActionStrip(state.app, actions)
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 if (state.placeholder == Placeholder.NoDevice && state.viewing == null) Welcome(state, actions, items)
                 else MainArea(state, actions)
@@ -209,6 +213,7 @@ private fun Screen(state: ScreenState, actions: ScreenActions) {
         ComposePushSheet(state.advanced.compose, actions.advanced)
         SaveScenarioSheet(state.advanced.saveScenario, state.advanced.location?.label ?: "this Mac", actions.advanced)
         EmulatorsSheet(state.emulators, actions.emulators)
+        AppConfirmSheet(state.app, actions)
     }
 }
 
@@ -381,6 +386,8 @@ private fun Toolbar(state: ScreenState, actions: ScreenActions, items: List<Swit
                 if (state.screenshotBusy) CircularProgressIndicator(Modifier.size(22.dp), color = p.accent, strokeWidth = 1.5.dp)
             }
         }
+        Spacer(Modifier.width(6.dp))
+        AppMenuButton(state, actions)
         Spacer(Modifier.weight(1f))
         ToolGroup {
             IconButton(Ico.FOLDER, "Open a capture file…  ⌘O", actions.onOpenFile)

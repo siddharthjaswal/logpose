@@ -133,4 +133,4 @@ data class PaneLayout(
 }
 
 /** The window chrome's transient state: which popover is open. Never persisted. */
-enum class Popover { NONE, SWITCHER, DEVELOPER, MCP }
+enum class Popover { NONE, SWITCHER, DEVELOPER, MCP, APP }
